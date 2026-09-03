@@ -754,10 +754,10 @@ class MemeSmartSelectService:
 
         try:
             await client.send_sticker(**payload)
-            logger.debug(f"[Magpie] Telegram 已按贴纸发送: {emoji_path}")
+            logger.debug(f"[MemeThief] Telegram 已按贴纸发送: {emoji_path}")
             return True
         except Exception as e:
-            logger.debug(f"[Magpie] Telegram 贴纸发送失败，将回退图片发送: {e}")
+            logger.debug(f"[MemeThief] Telegram 贴纸发送失败，将回退图片发送: {e}")
             return False
 
     def _should_send_file_directly(self, event: AstrMessageEvent) -> bool:
@@ -792,7 +792,7 @@ class MemeSmartSelectService:
             await event.send(payload)
             return True
         except Exception as e:
-            logger.debug(f"[Magpie] file_image 发送失败，回退 base64: {e}")
+            logger.debug(f"[MemeThief] file_image 发送失败，回退 base64: {e}")
             return False
 
     async def _append_emoji_to_result(
@@ -804,7 +804,7 @@ class MemeSmartSelectService:
                 result.file_image(emoji_path)
                 return True
             except Exception as e:
-                logger.debug(f"[Magpie] result.file_image 失败，回退 base64: {e}")
+                logger.debug(f"[MemeThief] result.file_image 失败，回退 base64: {e}")
 
         b64 = await self._encode_emoji(emoji_path)
         if not b64:
@@ -842,7 +842,7 @@ class MemeSmartSelectService:
         try:
             # active_sent means an emoji was actually sent, not merely auto-claimed.
             if self.plugin._emoji_turn_state(event).is_active_sent():
-                logger.debug("[Magpie] 已主动发送过表情包，跳过自动发送")
+                logger.debug("[MemeThief] 已主动发送过表情包，跳过自动发送")
                 return False
 
             if not self._check_group_allowed(event):
@@ -855,8 +855,8 @@ class MemeSmartSelectService:
             try:
                 await self.record_emoji_usage(emoji_path, trigger="auto")
             except Exception as e:
-                logger.debug(f"[Magpie] 记录表情包使用失败: {e}")
-            logger.debug(f"[Magpie] 已发送表情包 ({send_mode}): {emoji_path}")
+                logger.debug(f"[MemeThief] 记录表情包使用失败: {e}")
+            logger.debug(f"[MemeThief] 已发送表情包 ({send_mode}): {emoji_path}")
             return True
 
         except Exception as e:
@@ -879,7 +879,7 @@ class MemeSmartSelectService:
             return False
 
         if self.plugin._emoji_turn_state(event).is_active_sent():
-            logger.debug("[Magpie] 检测到已发送，跳过表情发送")
+            logger.debug("[MemeThief] 检测到已发送，跳过表情发送")
             return False
 
         priors = [item for item in (emotions or []) if item]
@@ -903,5 +903,5 @@ class MemeSmartSelectService:
                     logger.debug("已发送表情包：情绪先验=无，按文本/图上文字/角色/BM25 匹配")
                 return True
 
-        logger.debug("[Magpie] 未匹配到表情包")
+        logger.debug("[MemeThief] 未匹配到表情包")
         return False

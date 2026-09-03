@@ -64,13 +64,14 @@ class TargetFilterCommand:
             raw_scope = "send"
 
         if raw_action in {"", "help", "h"}:
+            c = self.plugin.cmd
             help_text = (
                 "用法：\n"
-                "/magpie group show\n"
-                "/magpie group <send|steal> show\n"
-                "/magpie group <send|steal> priority <wl|bl>\n"
-                "/magpie group <send|steal> <wl|bl> <add|del|clear> [group:ID|user:QQ]\n"
-                "/magpie group <send|steal> <wl|bl> <add|del> <group|user> <ID>\n\n"
+                f"{c('group show', event)}\n"
+                f"{c('group <send|steal> show', event)}\n"
+                f"{c('group <send|steal> priority <wl|bl>', event)}\n"
+                f"{c('group <send|steal> <wl|bl> <add|del|clear> [group:ID|user:QQ]', event)}\n"
+                f"{c('group <send|steal> <wl|bl> <add|del> <group|user> <ID>', event)}\n\n"
                 "说明：\n"
                 "- send 控制发表情\n"
                 "- steal 控制偷表情\n"

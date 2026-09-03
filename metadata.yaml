@@ -1,9 +1,9 @@
 name: astrbot_plugin_meme_magpie
-display_name: 表情包喜鹊
+display_name: meme神偷
 author: Whereis-Alice
 author_url: https://github.com/Whereis-Alice
-desc: 让 AstrBot 自动收集群聊里的表情包，用视觉模型识别内容并分类入库，聊天时按情绪自动挑一张发出去。支持 LLM 主动检索/发送/收录表情包（可由 LLM 直接回填作品、角色、动作等参数），提供 WebUI 管理面板、批量导入与批量重新识别（可配置并发与速率上限，避免触发上游 429）、语义检索、存储清理，并内置从 astrbot_plugin_stealer 迁移数据的指令。
-short_desc: 自动收集群聊表情包，AI 识别分类入库，聊天时按情绪自动发送，并提供 WebUI 管理。
+desc: 让 AstrBot 自动收集群聊里的表情包，用视觉模型识别内容并打上语义标签，聊天时按情绪自动挑一张发回去。支持 LLM 主动搜索/发送/收录表情包（可由 LLM 直接回填作品、角色、动作等参数），提供 WebUI 管理表情库、批量导入与限速可控的批量识别（可配置并发与速率上限，避免触发上游 429），并内置从 astrbot_plugin_stealer 迁移数据的指令。
+short_desc: 自动收集群聊表情包，AI 识别内容与情绪，聊天时按语境自动发送，附带 WebUI 管理面板。
 repo: https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie
 category: 娱乐
 tags:
@@ -15,44 +15,49 @@ tags:
   - WebUI
   - 群聊
 help: |
-  表情包喜鹊：自动收集群聊表情包，用视觉模型识别分类入库，聊天时按情绪自动发送。
+  meme神偷：自动收集群聊里的表情包，用视觉模型识别内容与情绪，聊天时按语境自动发送。
 
-  命令前缀为 /magpie，也可用中文别名 /喜鹊。
+  指令前缀是 mp，同时保留别名 magpie 和 神偷（写哪个都一样）。
+  下面示例统一按 AstrBot 出厂唤醒前缀 / 书写；如果你把唤醒前缀改成了 ! # . 之类，
+  请把 /mp 换成 !mp、#mp；如果你清空了唤醒前缀，就直接私聊或 @机器人 后写 mp xxx。
+  拿不准的时候发 /mp help，它会按你当前的真实前缀把命令重新打印一遍。
 
   查询指令（所有人可用）：
-  - /magpie status：查看运行状态与表情包统计
-  - /magpie list [分类] [每页数量] [页码]：列出已收集的表情包
-  - /magpie emotion_stats：查看情绪分布统计
+  - /mp status：查看开关状态与容量统计
+  - /mp list [分类] [每页数量] [页码]：翻看已收录的表情包
+  - /mp emotion_stats：查看情绪分布统计
+  - /mp help：按当前唤醒前缀打印完整子命令清单
 
-  开关指令（仅管理员）：
-  - /magpie on | /magpie off：开启 / 关闭表情包收集
-  - /magpie auto_on | /magpie auto_off：开启 / 关闭自动发送
-  - /magpie group：查看或切换当前会话的收集开关
-  - /magpie 偷：进入 30 秒强制收录模式，期间群里的图片一律收下
-  - /magpie natural_analysis：切换「自然语言分析」开关
+  开关指令（管理员）：
+  - /mp on | /mp off：开启 / 关闭表情包收集
+  - /mp auto_on | /mp auto_off：开启 / 关闭自动发送
+  - /mp group show：查看群聊 / 用户的收集与发送黑白名单（只写 /mp group 会先打印用法）
+  - /mp 偷：开启 30 秒强制收录模式，期间群里的图片一律入库
+  - /mp natural_analysis：切换自然语言情绪分析开关
 
-  管理指令（仅管理员）：
-  - /magpie delete <序号|文件名>：删除表情包
-  - /magpie blacklist <序号|文件名>：删除并加入黑名单，之后不再重复收录
-  - /magpie scope <序号|文件名> <public|local>：设置表情包的可见范围
-  - /magpie clean [force]：清理未分类的暂存图片
-  - /magpie capacity：查看容量与磁盘占用
-  - /magpie tag_stats [N]：标签体检（高频 / 低频 / 零标签）
-  - /magpie clear_emotion_cache：清空情绪匹配缓存
-  - /magpie rebuild_index：重建检索索引
+  管理指令（管理员）：
+  - /mp delete <序号|文件名>：删除表情包
+  - /mp blacklist <序号|文件名>：删除并加入黑名单，之后不再重复收录
+  - /mp scope <序号|文件名> <public|local>：设置表情包的可见范围
+  - /mp clean：清理未入库的暂存图片（已入库的表情包不受影响）
+  - /mp capacity：立即执行容量上限清理（会删掉超出上限的最旧表情包，只看容量请用 /mp status）
+  - /mp tag_stats [N]：标签体检（高频 / 低频 / 无标签）
+  - /mp clear_emotion_cache：清理情绪匹配缓存
+  - /mp rebuild_index：重建检索索引
 
-  数据迁移（仅管理员，用于从 astrbot_plugin_stealer 搬家）：
-  - /magpie migrate：预演迁移，只报告将要搬多少数据，不写入
-  - /magpie migrate check：检查是否能找到旧插件的数据目录
-  - /magpie migrate apply：执行迁移（复制文件，旧数据保留，可重复执行）
-  - /magpie migrate move：执行迁移并移动文件（不保留旧副本，慎用）
+  数据迁移（管理员，用于从 astrbot_plugin_stealer 搬家）：
+  - /mp migrate：预演，只打印"如果执行会发生什么"，一个字节都不写
+  - /mp migrate check：只检查能否找到旧插件的数据目录
+  - /mp migrate apply：真正执行（复制文件，旧数据保留，可重复执行）
+  - /mp migrate move：真正执行并搬走图片文件（更省磁盘）
 
-  对话中 LLM 可自动调用三个工具：magpie_search_meme 检索表情包、magpie_send_meme 发送表情包、
-  magpie_steal_meme 主动收录图片（LLM 可以顺手把作品名、角色、动作、情绪等信息一起写进库里）。
+  对话中 LLM 可自动调用三个工具：magpie_search_meme 搜索表情包、magpie_send_meme 发送表情包、
+  magpie_steal_meme 主动收录图片。LLM 可以顺手把作品、角色、动作、情绪等信息一起写进数据库，
+  比只靠事后视觉分析准得多。
 
-  WebUI：在插件详情页点击「表情包管理」进入管理面板，可浏览 / 编辑 / 批量导入 / 批量重新识别，
-  批量任务支持设置并发数与每分钟请求上限，并实时显示进度、预计剩余时间和失败明细。
-version: 1.0.0
+  WebUI：在插件管理页面打开"表情神偷管理面板"，可浏览 / 编辑 / 批量导入 / 批量重新识别；
+  批量识别支持配置并发数与每分钟请求上限，并实时显示进度、预估剩余时间和失败明细。
+version: 1.1.0
 support_platforms:
   - aiocqhttp
   - telegram
@@ -60,4 +65,4 @@ support_platforms:
 astrbot_version: ">=4.24.1"
 pages:
   - name: dashboard
-    title: 表情包管理
+    title: 表情神偷管理面板

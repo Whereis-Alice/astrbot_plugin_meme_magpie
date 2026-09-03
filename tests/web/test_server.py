@@ -862,7 +862,7 @@ class PreviewServer:
 
     def run(self) -> None:
         print("\n" + "=" * 56)
-        print("  表情包喜鹊 WebUI 预览服务器 (pages/dashboard)")
+        print("  meme神偷 WebUI 预览服务器 (pages/dashboard)")
         print(f"  预览地址: http://{self.host}:{self.port}/")
         print(f"  库内表情: {len(self.state.library)}  待审核: {len(self.state.pending)}")
         print("=" * 56 + "\n")
@@ -875,7 +875,7 @@ def create_app(state: PreviewState | None = None) -> web.Application:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="表情包喜鹊 WebUI 预览测试服务器")
+    parser = argparse.ArgumentParser(description="meme神偷 WebUI 预览测试服务器")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-seed", action="store_true", help="不生成种子数据")

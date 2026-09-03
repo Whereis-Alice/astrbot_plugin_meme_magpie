@@ -69,7 +69,7 @@ class BackgroundStealQueue:
             for i in range(self.worker_count)
         ]
         logger.info(
-            f"[Magpie] 后台偷图队列已启动: capacity={self.capacity}, "
+            f"[MemeThief] 后台偷图队列已启动: capacity={self.capacity}, "
             f"workers={self.worker_count}, capture_limit={self.capture_limit}"
         )
 
@@ -115,7 +115,7 @@ class BackgroundStealQueue:
                     if path.is_file():
                         await safe_remove_file(str(path))
 
-        logger.info("[Magpie] 后台偷图队列已停止，暂存文件已清理")
+        logger.info("[MemeThief] 后台偷图队列已停止，暂存文件已清理")
 
     def submit_capture(self, descriptors: list[dict[str, Any]]) -> bool:
         """Schedule staging/download work and return without waiting for it."""
@@ -123,7 +123,7 @@ class BackgroundStealQueue:
             return False
         if len(self._capture_tasks) >= self.capture_limit:
             logger.warning(
-                f"[Magpie] 后台偷图暂存任务已达上限 {self.capture_limit}，丢弃新任务"
+                f"[MemeThief] 后台偷图暂存任务已达上限 {self.capture_limit}，丢弃新任务"
             )
             return False
         task = asyncio.create_task(
@@ -200,13 +200,13 @@ class BackgroundStealQueue:
                 if self._queue.full():
                     await safe_remove_file(staged_path)
                     logger.warning(
-                        "[Magpie] 后台偷图队列已满，丢弃最新任务 "
+                        "[MemeThief] 后台偷图队列已满，丢弃最新任务 "
                         f"source={job.source} meta={job.extra_meta}"
                     )
                     return False
                 self._queue.put_nowait(job)
                 logger.info(
-                    f"[Magpie] 后台偷图已入队 source={job.source}, queued={self._queue.qsize()}"
+                    f"[MemeThief] 后台偷图已入队 source={job.source}, queued={self._queue.qsize()}"
                 )
                 return True
             except asyncio.CancelledError:
@@ -244,7 +244,7 @@ class BackgroundStealQueue:
                     # just to discover that the processing queue is already full.
                     if self._queue.full():
                         logger.warning(
-                            f"[Magpie] 后台偷图队列已满，下载前丢弃任务 ref={ref[:120]}"
+                            f"[MemeThief] 后台偷图队列已满，下载前丢弃任务 ref={ref[:120]}"
                         )
                         continue
                     source_path, _ = await handler._download_url_to_temp(ref)
@@ -277,13 +277,13 @@ class BackgroundStealQueue:
                         await safe_remove_file(staged_path)
                         staged_path = ""
                         logger.warning(
-                            "[Magpie] 后台偷图队列已满，丢弃最新任务 "
+                            "[MemeThief] 后台偷图队列已满，丢弃最新任务 "
                             f"source={job.source} meta={job.extra_meta}"
                         )
                         continue
                     self._queue.put_nowait(job)
                     logger.info(
-                        f"[Magpie] 后台偷图已入队 source={job.source}, "
+                        f"[MemeThief] 后台偷图已入队 source={job.source}, "
                         f"queued={self._queue.qsize()}"
                     )
             except asyncio.CancelledError:
@@ -322,7 +322,7 @@ class BackgroundStealQueue:
                     to_pending=job.to_pending,
                 )
                 logger.info(
-                    f"[Magpie] 后台偷图处理完成 source={job.source}, "
+                    f"[MemeThief] 后台偷图处理完成 source={job.source}, "
                     f"success={success}, pending={job.to_pending}"
                 )
                 if success and isinstance(index, dict) and not job.to_pending:

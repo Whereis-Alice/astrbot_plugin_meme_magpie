@@ -101,8 +101,8 @@ def test_terminal_theme_avoids_fullpage_compositing():
     assert ".crt-hud" in css
     assert "mascot.png" in css
     assert "crt-mascot" in template
-    assert "PIP-BOY 3000 MK IV" in template
-    assert "ROBCO INDUSTRIES" in template
+    assert "THIEF-OS 3000 MK IV" in template
+    assert "THIEF-OS UNIFIED OPERATING SYSTEM" in template
     assert "loadDashboardPrefs" in (DASHBOARD_DIR / "app.js").read_text(encoding="utf-8")
 
 

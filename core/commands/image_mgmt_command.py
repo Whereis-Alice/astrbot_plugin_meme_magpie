@@ -35,11 +35,12 @@ class ImageManagementCommand:
             limit: 显示数量限制，默认10张
         """
         # 参数解析目标：
-        # - /magpie list            -> page=1, per_page=默认
-        # - /magpie list 2          -> page=2 (默认每页数量)
-        # - /magpie list happy 2    -> 分类=happy, page=2
-        # - /magpie list 20 2       -> per_page=20, page=2
-        # - /magpie list happy 20 2 -> 分类=happy, per_page=20, page=2
+        # 参数写法（下面省略唤醒前缀）：
+        # - mp list            -> page=1, per_page=默认
+        # - mp list 2          -> page=2 (默认每页数量)
+        # - mp list happy 2    -> 分类=happy, page=2
+        # - mp list 20 2       -> per_page=20, page=2
+        # - mp list happy 20 2 -> 分类=happy, per_page=20, page=2
         category = str(category or "").strip()
         limit = str(limit or "").strip()
         page = str(page or "").strip()
@@ -48,12 +49,12 @@ class ImageManagementCommand:
         if category.isdigit() and (not limit or limit == "10") and (not page or page == "1"):
             page, category = category, ""
             limit = "10"
-        # /magpie list happy 2 -> 分类 + 页码
+        # mp list happy 2 -> 分类 + 页码
         elif (
             category and (not category.isdigit()) and limit.isdigit() and (not page or page == "1")
         ):
             page, limit = limit, "10"
-        # /magpie list 20 2 -> 每页数量 + 页码
+        # mp list 20 2 -> 每页数量 + 页码
         elif category.isdigit() and limit.isdigit() and (not page or page == "1"):
             page, limit, category = limit, category, ""
 
@@ -235,11 +236,11 @@ class ImageManagementCommand:
             result_text += f"{idx:4d}. {marker}{desc}\n"
 
         if total_pages > 1:
-            next_page_hint = f"\n下一页: /magpie list {page_num + 1}"
+            next_sub = f"list {page_num + 1}"
             if category:
-                next_page_hint = f"\n下一页: /magpie list {category} {page_num + 1}"
-            result_text += next_page_hint
-        result_text += "\n用法: /magpie list [分类] [每页数量] [页码]"
+                next_sub = f"list {category} {page_num + 1}"
+            result_text += f"\n下一页: {self.plugin.cmd(next_sub, event)}"
+        result_text += f"\n用法: {self.plugin.cmd('list [分类] [每页数量] [页码]', event)}"
         yield event.plain_result(result_text).stop_event()
 
     async def delete_image(self, event: AstrMessageEvent, identifier: str = ""):
@@ -251,7 +252,8 @@ class ImageManagementCommand:
         """
         if not identifier:
             yield event.plain_result(
-                "用法: /magpie delete <序号|文件名>\n先使用 /magpie list 查看图片列表获取序号"
+                f"用法: {self.plugin.cmd('delete <序号|文件名>', event)}\n"
+                f"先使用 {self.plugin.cmd('list', event)} 查看图片列表获取序号"
             )
             return
 
@@ -265,7 +267,8 @@ class ImageManagementCommand:
 
         if not target_image:
             yield event.plain_result(
-                f"未找到图片: {identifier}\n请使用 /magpie list 查看可用的图片列表"
+                f"未找到图片: {identifier}\n"
+                f"请使用 {self.plugin.cmd('list', event)} 查看可用的图片列表"
             )
             return
 
@@ -292,7 +295,8 @@ class ImageManagementCommand:
         """删除指定表情包并加入黑名单。"""
         if not identifier:
             yield event.plain_result(
-                "用法: /magpie blacklist <序号|文件名>\n先使用 /magpie list 查看图片列表获取序号"
+                f"用法: {self.plugin.cmd('blacklist <序号|文件名>', event)}\n"
+                f"先使用 {self.plugin.cmd('list', event)} 查看图片列表获取序号"
             )
             return
 
@@ -305,7 +309,8 @@ class ImageManagementCommand:
         target_image = self._find_target_image(image_index, identifier)
         if not target_image:
             yield event.plain_result(
-                f"未找到图片: {identifier}\n请使用 /magpie list 查看可用的图片列表"
+                f"未找到图片: {identifier}\n"
+                f"请使用 {self.plugin.cmd('list', event)} 查看可用的图片列表"
             )
             return
 
@@ -345,7 +350,7 @@ class ImageManagementCommand:
         """设置表情包作用域。"""
         if not identifier or not scope_mode:
             yield event.plain_result(
-                "用法: /magpie scope <序号|文件名> <public|local>\n"
+                f"用法: {self.plugin.cmd('scope <序号|文件名> <public|local>', event)}\n"
                 "public=公开表情包，所有群可发送\n"
                 "local=仅来源群可发送"
             )
@@ -359,7 +364,8 @@ class ImageManagementCommand:
         target_image = self._find_target_image(image_index, identifier)
         if not target_image:
             yield event.plain_result(
-                f"未找到图片: {identifier}\n请使用 /magpie list 查看可用的图片列表"
+                f"未找到图片: {identifier}\n"
+                f"请使用 {self.plugin.cmd('list', event)} 查看可用的图片列表"
             )
             return
 
@@ -411,7 +417,7 @@ class ImageManagementCommand:
         return valid_images
 
     def _find_target_image(self, image_index: dict, identifier: str) -> dict[str, Any] | None:
-        """按 /magpie list 的全局序号或文件名定位图片。"""
+        """按 mp list 的全局序号或文件名定位图片。"""
         valid_images = self._collect_valid_images(image_index)
 
         try:

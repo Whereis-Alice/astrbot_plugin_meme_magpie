@@ -1,5 +1,5 @@
 name: 💡 功能建议
-description: 为表情包喜鹊提出新功能或改进想法
+description: 为 meme神偷 提出新功能或改进想法
 title: "[Feature] "
 labels: ["enhancement"]
 body:
@@ -31,7 +31,7 @@ body:
     attributes:
       label: 期望的解决方案
       description: 你希望这个功能怎么工作？
-      placeholder: 例如：希望增加 `/magpie list <分类>` 指令，直接在聊天中返回该分类的表情数量和缩略图列表
+      placeholder: 例如：希望增加 `/mp list <分类>` 指令，直接在聊天中返回该分类的表情数量和缩略图列表
     validations:
       required: true
 

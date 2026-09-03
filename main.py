@@ -31,6 +31,13 @@ from .core.processing.image_processor_service import ImageProcessorService
 from .core.processing.llm_meme_hints import LlmMemeHints
 from .core.maintenance.migration_service import MigrationService
 from .core.maintenance.service import MaintenanceService
+from .core.util.command_hint import (
+    CHINESE_COMMAND_GROUP,
+    COMMAND_GROUP,
+    LEGACY_COMMAND_GROUP,
+    format_command,
+    resolve_wake_prefix,
+)
 from .core.util.normalization import canonicalize_path, normalize_label_list
 from .core.util.safe_io import safe_remove_file
 from .task_scheduler import TaskScheduler
@@ -43,7 +50,7 @@ except ImportError:
 
 
 class Main(Star):
-    """表情包偷取与发送插件。
+    """meme神偷：表情包偷取与发送插件。
 
     功能：
     - 监听消息中的图片并自动保存到插件数据目录
@@ -461,41 +468,64 @@ class Main(Star):
         **kw: self._emoji_sender_engine.async_analyze_and_send_emoji(event, text, emotions, **kw)
     )
 
-    @filter.command_group("magpie", alias={"喜鹊"})
-    def magpie(self):
-        """表情包喜鹊管理指令"""
+    # ===== 命令提示：按用户实际配置的唤醒前缀渲染 =====
+
+    def wake_prefix(self, event: AstrMessageEvent | None = None) -> str:
+        """返回当前生效的唤醒前缀。
+
+        AstrBot 的 wake_prefix 是用户可配置项（出厂默认 `/`，也常被改成 `!`、`#`，
+        甚至清空只靠 @机器人 唤醒），所以任何“接下来请执行 xxx”的提示都必须按实际
+        配置渲染，不能写死 `/`。传入 event 时优先读该会话的会话级配置。
+        """
+        umo = None
+        if event is not None:
+            try:
+                umo = event.unified_msg_origin
+            except Exception:
+                umo = None
+        return resolve_wake_prefix(self.context, umo)
+
+    def cmd(self, sub: str = "", event: AstrMessageEvent | None = None) -> str:
+        """拼出一条可直接复制执行的本插件命令，例如 `/mp migrate apply`。"""
+        return format_command(sub, self.wake_prefix(event), COMMAND_GROUP)
+
+    @filter.command_group(
+        COMMAND_GROUP, alias={LEGACY_COMMAND_GROUP, CHINESE_COMMAND_GROUP}
+    )
+    def mp(self):
+        """meme神偷 管理指令。子命令清单见 mp help。"""
         pass
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("on")
+    @mp.command("on")
     async def meme_on(self, event: AstrMessageEvent):
         """开启表情包偷取功能，自动收集群聊中的表情包。"""
         async for result in self.command_handler.meme_on(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("off")
+    @mp.command("off")
     async def meme_off(self, event: AstrMessageEvent):
         """关闭表情包偷取功能，停止收集新表情包。"""
         async for result in self.command_handler.meme_off(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("auto_on")
+    @mp.command("auto_on")
     async def auto_on(self, event: AstrMessageEvent):
         """开启自动发送表情包，聊天时根据情绪自动发送。"""
         async for result in self.command_handler.auto_on(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("auto_off")
+    @mp.command("auto_off")
     async def auto_off(self, event: AstrMessageEvent):
         """关闭自动发送表情包。"""
         async for result in self.command_handler.auto_off(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("group")
+    @mp.command("group")
     async def group_filter(
         self,
         event: AstrMessageEvent,
@@ -505,67 +535,67 @@ class Main(Star):
         target: str = "",
         target_id: str = "",
     ):
-        """管理群聊黑白名单。用法: /magpie group <wl|bl> <add|del|clear|show> [群号]"""
+        """管理群聊黑白名单。用法: mp group <wl|bl> <add|del|clear|show> [群号]"""
         async for result in self.command_handler.group_filter(
             event, scope, list_name, action, target, target_id
         ):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("偷")
+    @mp.command("偷")
     async def capture(self, event: AstrMessageEvent):
         """进入强制接收模式，30秒内发送的图片将直接入库。"""
         async for result in self.command_handler.capture(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("natural_analysis")
+    @mp.command("natural_analysis")
     async def toggle_natural_analysis(self, event: AstrMessageEvent, action: str = ""):
-        """切换情绪识别模式。用法: /magpie natural_analysis <on|off>"""
+        """切换情绪识别模式。用法: mp natural_analysis <on|off>"""
         async for result in self.command_handler.toggle_natural_analysis(event, action):
             yield result
 
-    @magpie.command("emotion_stats")
+    @mp.command("emotion_stats")
     async def emotion_analysis_stats(self, event: AstrMessageEvent):
         """查看情绪分析统计信息和当前模式。"""
         async for result in self.command_handler.emotion_analysis_stats(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("clear_emotion_cache")
+    @mp.command("clear_emotion_cache")
     async def clear_emotion_cache(self, event: AstrMessageEvent):
         """清空情绪分析缓存，释放内存。"""
         async for result in self.command_handler.clear_emotion_cache(event):
             yield result
 
-    @magpie.command("status")
+    @mp.command("status")
     async def status(self, event: AstrMessageEvent):
         """查看插件运行状态和表情包统计信息。"""
         async for result in self.command_handler.status(event):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("tag_stats")
+    @mp.command("tag_stats")
     async def tag_stats(self, event: AstrMessageEvent, limit: str = ""):
-        """标签/场景统计：高频标签、低频噪声标签、零标签条目（打标质量体检）。用法: /magpie tag_stats [N]"""
+        """标签/场景统计：高频标签、低频噪声标签、零标签条目（打标质量体检）。用法: mp tag_stats [N]"""
         async for result in self.command_handler.tag_stats(event, limit):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("clean", priority=-100)
+    @mp.command("clean", priority=-100)
     async def clean(self, event: AstrMessageEvent, mode: str = ""):
         """清理原始图片缓存（不影响已分类的表情包）。"""
         async for result in self.command_handler.clean(event, mode):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("capacity")
+    @mp.command("capacity")
     async def enforce_capacity(self, event: AstrMessageEvent):
         """立即执行容量控制，清理超出上限的旧表情包。"""
         async for result in self.command_handler.enforce_capacity(event):
             yield result
 
-    @magpie.command("list")
+    @mp.command("list")
     async def list_images(
         self,
         event: AstrMessageEvent,
@@ -573,47 +603,53 @@ class Main(Star):
         limit: str = "10",
         page: str = "1",
     ):
-        """列出已收集的表情包。用法: /magpie list [分类] [数量]"""
+        """列出已收集的表情包。用法: mp list [分类] [每页数量] [页码]"""
         async for result in self.command_handler.list_images(event, category, limit, page):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("delete")
+    @mp.command("delete")
     async def delete_image(self, event: AstrMessageEvent, identifier: str = ""):
-        """删除指定表情包。用法: /magpie delete <序号|文件名>"""
+        """删除指定表情包。用法: mp delete <序号|文件名>"""
         async for result in self.command_handler.delete_image(event, identifier):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("blacklist")
+    @mp.command("blacklist")
     async def blacklist_image(self, event: AstrMessageEvent, identifier: str = ""):
-        """拉黑指定表情包。用法: /magpie blacklist <序号|文件名>"""
+        """拉黑指定表情包。用法: mp blacklist <序号|文件名>"""
         async for result in self.command_handler.blacklist_image(event, identifier):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("scope")
+    @mp.command("scope")
     async def set_image_scope(
         self, event: AstrMessageEvent, identifier: str = "", scope_mode: str = ""
     ):
-        """设置表情包作用域。用法: /magpie scope <序号|文件名> <public|local>"""
+        """设置表情包作用域。用法: mp scope <序号|文件名> <public|local>"""
         async for result in self.command_handler.set_image_scope(event, identifier, scope_mode):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("migrate")
+    @mp.command("migrate")
     async def migrate_legacy(
         self, event: AstrMessageEvent, action: str = "", source: str = ""
     ):
-        """从旧插件迁移数据。用法: /magpie migrate [check|apply|move] [旧数据目录]"""
+        """从旧插件迁移数据。用法: mp migrate [check|apply|move] [旧数据目录]"""
         async for result in self.command_handler.migrate_legacy(event, action, source):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
-    @magpie.command("rebuild_index")
+    @mp.command("rebuild_index")
     async def rebuild_index(self, event: AstrMessageEvent):
         """重建表情包索引，用于修复索引异常或版本迁移。"""
         async for result in self.command_handler.rebuild_index(event):
+            yield result
+
+    @mp.command("help", alias={"帮助"})
+    async def show_help(self, event: AstrMessageEvent):
+        """列出全部子命令。命令示例会按你当前配置的唤醒前缀显示。"""
+        async for result in self.command_handler.show_help(event):
             yield result
 
     async def _search_meme_candidates(
@@ -1275,7 +1311,7 @@ class Main(Star):
             self._cancel_pending_auto_emoji(event)
         self._emoji_sender_engine.reset_turn_state(event)
         event_handler = self._get_event_handler(
-            log_message="[Magpie] event_handler 未初始化，跳过消息处理",
+            log_message="[MemeThief] event_handler 未初始化，跳过消息处理",
             log_level="debug",
         )
         if event_handler is None:
@@ -1283,7 +1319,7 @@ class Main(Star):
         try:
             await event_handler.on_message(event)
         except Exception as e:
-            logger.error(f"[Magpie] 处理消息时发生错误: {e}", exc_info=True)
+            logger.error(f"[MemeThief] 处理消息时发生错误: {e}", exc_info=True)
 
     @filter.on_llm_tool_respond()
     async def _track_external_image_delivery(
@@ -1315,7 +1351,7 @@ class Main(Star):
         if not sent_image:
             return
         self._emoji_turn_state(event).mark_active_sent()
-        logger.debug("[Magpie] LLM 已通过通用消息工具发送图片，跳过本轮被动表情")
+        logger.debug("[MemeThief] LLM 已通过通用消息工具发送图片，跳过本轮被动表情")
 
     @filter.on_decorating_result(priority=100)
     async def _prepare_emoji_response(self, event: AstrMessageEvent):
@@ -1365,7 +1401,7 @@ class Main(Star):
             self._validate_config()
             if (
                 self._get_event_handler(
-                    log_message="[Magpie] event_handler 未初始化，插件无法启动",
+                    log_message="[MemeThief] event_handler 未初始化，插件无法启动",
                     log_level="error",
                 )
                 is None
@@ -1417,7 +1453,7 @@ class Main(Star):
                 except Exception as e:
                     logger.warning(f"[Embedding] 初始化失败: {e}")
 
-            logger.info("[Magpie] 插件初始化完成")
+            logger.info("[MemeThief] 插件初始化完成")
         except Exception as e:
             logger.error(f"初始化插件失败: {e}")
             raise
@@ -1434,11 +1470,12 @@ class Main(Star):
             if total <= 0:
                 return
             logger.info(
-                f"[Magpie] 检测到旧插件数据（{info.get('source_dir')}，约 {total} 张），"
-                "可发送 /magpie migrate 预演迁移，确认后 /magpie migrate apply 执行。"
+                f"[MemeThief] 检测到旧插件数据（{info.get('source_dir')}，约 {total} 张），"
+                f"可发送 {self.cmd('migrate')} 预演迁移，"
+                f"确认后 {self.cmd('migrate apply')} 执行。"
             )
         except Exception as e:
-            logger.debug(f"[Magpie] 旧数据探测跳过: {e}")
+            logger.debug(f"[MemeThief] 旧数据探测跳过: {e}")
 
     async def terminate(self):
         """插件销毁生命周期钩子。"""
@@ -1492,7 +1529,7 @@ class Main(Star):
             except Exception:
                 pass
         await super().terminate()
-        logger.info("[Magpie] 插件资源清理完成")
+        logger.info("[MemeThief] 插件资源清理完成")
 
     async def _migrate_blacklist_to_db(self) -> None:
         """将旧的 blacklist_cache.json 迁移到数据库 blacklist 表。

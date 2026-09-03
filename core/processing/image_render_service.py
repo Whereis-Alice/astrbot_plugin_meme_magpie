@@ -9,6 +9,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..util.command_hint import DEFAULT_WAKE_PREFIX, format_command
+
 try:
     from PIL import Image as PILImage
     from PIL import ImageDraw as PILImageDraw
@@ -197,6 +199,25 @@ class ImageRenderService:
             for item in items
         ]
 
+    # ── 列表页页脚提示 ──────────────────────────────────────
+
+    def _footer_commands(self) -> tuple[str, str]:
+        """返回（list 命令, delete 命令），已带上用户实际的唤醒前缀。
+
+        列表页脚要告诉用户"怎么翻页、怎么删图"，而唤醒前缀是用户可改的，
+        所以这里不写死 `/`，而是向主插件要一份当前生效的写法。
+        """
+        render = getattr(getattr(self, "plugin", None), "cmd", None)
+        if callable(render):
+            try:
+                return str(render("list")), str(render("delete"))
+            except Exception:
+                pass
+        return (
+            format_command("list", DEFAULT_WAKE_PREFIX),
+            format_command("delete", DEFAULT_WAKE_PREFIX),
+        )
+
     # ── 列表页渲染（html-to-pic）─────────────────────────────
 
     async def render_emoji_list_page_file(
@@ -230,6 +251,7 @@ class ImageRenderService:
                 }
             )
 
+        cmd_list, cmd_delete = self._footer_commands()
         tmpl = _LIST_PAGE_FILE_TEMPLATE
         data = {
             "items": rendered_items,
@@ -239,6 +261,8 @@ class ImageRenderService:
             "total_all": int(total_all),
             "category": str(category or ""),
             "per_page": int(per_page),
+            "cmd_list": cmd_list,
+            "cmd_delete": cmd_delete,
         }
 
         try:
@@ -292,6 +316,7 @@ class ImageRenderService:
                 }
             )
 
+        cmd_list, cmd_delete = self._footer_commands()
         tmpl = _LIST_PAGE_URL_TEMPLATE
         data = {
             "items": rendered_items,
@@ -301,6 +326,8 @@ class ImageRenderService:
             "total_all": int(total_all),
             "category": str(category or ""),
             "per_page": int(per_page),
+            "cmd_list": cmd_list,
+            "cmd_delete": cmd_delete,
         }
 
         try:
@@ -406,6 +433,8 @@ class ImageRenderService:
             except Exception:
                 return None
 
+        cmd_list, cmd_delete = self._footer_commands()
+
         def _sync_render() -> str:
             width = 980
             pad = 24
@@ -489,7 +518,10 @@ class ImageRenderService:
                     width=1,
                 )
 
-            foot = "翻页: /magpie list 2 或 /magpie list happy 2 或 /magpie list 20 2    删除: /magpie delete <序号>"
+            foot = (
+                f"翻页: {cmd_list} 2 或 {cmd_list} happy 2 或 {cmd_list} 20 2"
+                f"    删除: {cmd_delete} <序号>"
+            )
             draw.text((pad, height - footer_h + 16), foot, fill=(90, 95, 110), font=small_font)
 
             buf = BytesIO()
@@ -645,8 +677,8 @@ _LIST_PAGE_FILE_TEMPLATE = """<!doctype html>
       {% endfor %}
     </div>
     <div class="footer">
-      <div>翻页: /magpie list 2 或 /magpie list happy 2 或 /magpie list 20 2</div>
-      <div>删除: /magpie delete &lt;序号&gt;</div>
+      <div>翻页: {{ cmd_list }} 2 或 {{ cmd_list }} happy 2 或 {{ cmd_list }} 20 2</div>
+      <div>删除: {{ cmd_delete }} &lt;序号&gt;</div>
     </div>
   </div>
 </body>
@@ -808,8 +840,8 @@ _LIST_PAGE_URL_TEMPLATE = """<!doctype html>
       </div>
     </div>
     <div class="footer">
-      <div>翻页: /magpie list 2 或 /magpie list happy 2 或 /magpie list 20 2</div>
-      <div>删除: /magpie delete &lt;序号&gt;</div>
+      <div>翻页: {{ cmd_list }} 2 或 {{ cmd_list }} happy 2 或 {{ cmd_list }} 20 2</div>
+      <div>删除: {{ cmd_delete }} &lt;序号&gt;</div>
     </div>
   </div>
 </body>

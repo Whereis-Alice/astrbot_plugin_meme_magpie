@@ -226,7 +226,14 @@ def test_dry_run_writes_nothing(env):
     assert report.missing_files == 1
     assert env["db"].count_total() == 0
     assert not (env["target"] / "categories" / "happy").exists()
-    assert "/magpie migrate apply" in report.summary()
+    # 默认渲染（不传 cmd）走 AstrBot 出厂前缀 `/`
+    assert "/mp migrate apply" in report.summary()
+    # 传入自定义前缀时，提示必须跟着变
+    custom = report.summary(lambda sub: f"!mp {sub}")
+    assert "!mp migrate apply" in custom
+    assert "/mp migrate apply" not in custom
+    # 预演文案不能再声称"尚未写入任何数据"这种歧义说法
+    assert "这一步只读不写" in custom
 
 
 def test_dry_run_counts_tags_scenes_and_vectors(env):

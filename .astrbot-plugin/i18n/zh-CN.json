@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "display_name": "表情包喜鹊",
+    "display_name": "meme神偷",
     "short_desc": "自动收藏表情包，聊天时挑合适的一张发出来",
     "desc": "把聊天里出现的表情包自动收进图库：视觉模型负责分类打标，回复时按语义和情绪挑一张发出去。支持 LLM 主动查找与收藏表情包（模型可直接给出作品、角色、动作等参数）、WebUI 图库管理与批量导入（并发与速率可配置）、待审核池、重复图清理、存储回收，以及从 astrbot_plugin_stealer 一键迁移旧数据。"
   },
@@ -252,10 +252,10 @@
   },
   "pages": {
     "dashboard": {
-      "title": "表情包管理面板",
+      "title": "表情神偷管理面板",
       "header": {
-        "brand": "亨利的战利品",
-        "subtitle": "表情包喜鹊管理面板"
+        "brand": "赃物仓库",
+        "subtitle": "meme神偷管理面板"
       },
       "health": {
         "ok": "正常",

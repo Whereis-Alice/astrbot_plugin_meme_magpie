@@ -1,7 +1,67 @@
 # 更新日志
 
-本文件记录「表情包喜鹊」（`astrbot_plugin_meme_magpie`）的版本变更。
+本文件记录「meme神偷」（`astrbot_plugin_meme_magpie`）的版本变更。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+---
+
+## [1.1.0] - 2026-09-04
+
+改名与手感调整版。**功能一个都没少，数据一个字节都不用动**：数据库结构、配置项键名、WebUI 路由、LLM 工具名全部保持 1.0.0 的样子，从 1.0.0 直接覆盖升级即可，不需要重新迁移、不需要重新配置。旧指令组 `magpie` 变成别名保留，原来的用法继续能用。
+
+### 变更
+
+对外的名字和指令换了一套，更短也更好念：
+
+| | 1.0.0 | 1.1.0 |
+|:---|:---|:---|
+| 显示名 | 表情包喜鹊 | meme神偷 |
+| 指令组 | `magpie`（别名 `喜鹊`） | `mp`（别名 `magpie`、`神偷`） |
+| WebUI 面板标题 | 表情包管理面板 | 表情神偷管理面板 |
+| 日志前缀 | `[Magpie]` | `[MemeThief]` |
+
+下面这些**一个都没改**，所以升级不会丢数据、不会破链接，也不用改提示词：
+
+- 包名与插件目录名 `astrbot_plugin_meme_magpie`
+- 数据目录 `data/plugin_data/astrbot_plugin_meme_magpie/`
+- 配置文件名与全部配置项键名
+- WebUI 路由 `/astrbot_plugin_meme_magpie/*`
+- LLM 工具名 `magpie_search_meme` / `magpie_send_meme` / `magpie_steal_meme`
+
+AstrBot 用 `metadata.yaml` 里的 `name` 决定插件目录和数据目录，动它等于让已入库的表情包、数据库和配置全部失联，所以这次只改了 `display_name`。LLM 工具名同理——它可能已经被写进用户的人格提示词里，改名会让老提示词失效。
+
+### 新增
+
+- `mp help` / `mp 帮助`：在聊天里直接列出全部指令和用法，不用回去翻 README。
+
+### 改进
+
+- **所有提示文本不再硬编码 `/` 前缀。** 唤醒前缀是 AstrBot 的全局设置（`wake_prefix`，可以改成 `#`、`!`，也可以留空），而此前插件的回复一律写死 `/magpie xxx`，前缀不是 `/` 的用户照抄就会执行失败。现在下列位置都按当前会话真实生效的前缀渲染：
+  - 指令回复与参数错误提示
+  - 迁移报告结尾的「下一步该执行什么」
+  - `mp list` 生成的图片页脚（HTML 渲染与 PIL 兜底两条路径都改了）
+  - `meme_sender_engine` 里判断「这条消息是不是指令」的正则
+  - 私聊或 @机器人 触发时本来就不需要前缀，这种场景下提示里也不会再多出一个 `/`
+- **迁移预演的说明文字不再有误导。** 旧文案是「以下是即将发生的变化，目前尚未写入任何数据」，容易被读成「已经开始搬了、只是还没写完」。新文案写明「下面是「如果执行」会发生的变化。这一步只读不写，旧插件和本插件的数据都没有被改动。」，并补上数据的「去向」路径、待审核图片是什么意思，以及 `mp migrate move` 这个选项。
+
+### 修复
+
+- **`mp clean` 从来没生效过，而只读的 `mp tag_stats` 会偿删暂存目录。** 上游 `astrbot_plugin_stealer` 里 `clean` 的方法定义行丢了，只剩一段没人认领的 docstring 和函数体，1.0.0 原样继承了这个缺陷。后果有两条：一是 `mp clean` 会直接抛 `AttributeError`（`CommandHandler` 上根本不存在 `clean` 这个属性）；二是那段清理代码在缩排上归到了 `tag_stats` 的函数体里，于是本应只读的标签统计命令会顺手删空整个 `raw` 暂存目录（里面可能还有排队等识别的图），并多输出一行「raw 目录清理完成」。现在两个方法已拆开：`mp tag_stats` 变回纯只读，`mp clean` 正常工作（兼容老习惯的 `clean force` 写法，但该参数实际不区分模式）。
+- **插件介绍里的命令说明跟实际行为不符。** `metadata.yaml` 把 `capacity` 写成「查看容量与磁盘占用」，它实际会**删除**超出上限的最旧表情包——把一个删图命令当成查询命令介绍给用户是危险的。同时修正：`group` 要写成 `group show` 才能看到名单（裸 `group` 只会打印用法），`clean` 后面的 `[force]` 已去掉。README 的指令表同步改正。
+- **清掉上游遗留的第三方 IP 字样。** 1.0.0 的更新日志声称已经移除，但 WebUI 终端主题里实际还留着 `ROBCO INDUSTRIES`、`PIP-BOY 3000 MK IV`、`VAULT-TEC`、`COPYRIGHT 2075-2077` 和「亨利的战利品」等字样。现在统一换成本项目自己的 `THIEF-OS` / `STASH VAULT` / `赃物仓库`。
+- **`assets/logo.svg` 与 `assets/mascot.svg` 在部分渲染器上会丢图。** 两个文件的 `<use>` 只写了 SVG2 的裸 `href`，像 librsvg 2.40 这种只认 `xlink:href` 的渲染器会把主体图形（整只鸟）渲染成空白。现在两个属性都写上，并补齐 `xmlns:xlink` 声明。
+
+### 视觉
+
+- Logo 与吉祥物加上了盗贼眼罩，跟「神偷」这个名字对得上；在 64px 的插件列表缩略图下依然能认出来。PNG 已按新的矢量源重新导出。
+
+### 测试
+
+- 新增 `tests/test_command_hint.py`（16 个用例）覆盖前缀解析：`wake_prefix` 为列表 / 空列表 / 空字符串 / 自定义前缀 / 读取失败时的兜底，以及指令识别正则的转义。
+- 新增 `tests/test_help_command.py`（5 个用例）：`mp help` 在默认 / 自定义 / 空前缀下的渲染结果。
+- 新增 `tests/test_clean_command.py`（4 个用例）锁住上面那个缺陷：`clean` 必須是真存在的异步生成器、签名要跟 `main.py` 的调用对得上，且 `tag_stats` 不得触发任何 raw 清理。
+- 迁移服务与 WebUI 预览的相关断言同步更新。
+- 全量测试 487 条通过，`ruff check --select F,E9` 无告警。
 
 ---
 

@@ -18,8 +18,8 @@ export const TEMPLATE = `
 </datalist>
 <header class="codex-header">
     <div class="crt-boot" aria-hidden="true">
-        <span>ROBCO INDUSTRIES UNIFIED OPERATING SYSTEM</span>
-        <span>COPYRIGHT 2075-2077 ROBCO INDUSTRIES</span>
+        <span>THIEF-OS UNIFIED OPERATING SYSTEM</span>
+        <span>STASH TERMINAL READY // STOLEN GOODS ARCHIVE</span>
     </div>
     <div class="header-title">
         <button class="mobile-menu-button" type="button" @click="sidebarOpen = true"
@@ -34,14 +34,14 @@ export const TEMPLATE = `
                     d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
             </svg>
         </div>
-        <div class="crt-mascot crt-mascot-header" role="img" aria-label="Magpie"></div>
+        <div class="crt-mascot crt-mascot-header" role="img" aria-label="Meme Thief"></div>
         <div class="header-text">
-            <h1>{{ t('pages.dashboard.header.brand', 'Henry\\'s Spoils') }}</h1>
+            <h1>{{ t('pages.dashboard.header.brand', 'The Stash') }}</h1>
             <p>{{ t('pages.dashboard.header.subtitle', 'Sticker Manager') }}</p>
         </div>
         <div class="crt-title" aria-hidden="true">
-            <span class="crt-title-os">PIP-BOY 3000 MK IV</span>
-            <span class="crt-title-sub">VAULT-TEC  //  HOLOTAPE ARCHIVE</span>
+            <span class="crt-title-os">THIEF-OS 3000 MK IV</span>
+            <span class="crt-title-sub">STASH VAULT  //  STICKER ARCHIVE</span>
         </div>
     </div>
 
@@ -97,12 +97,12 @@ export const TEMPLATE = `
             </div>
         </div>
     </div>
-    <nav class="crt-pip-tabs" aria-label="Pip-Boy">
+    <nav class="crt-pip-tabs" aria-label="Terminal sections">
         <span class="crt-pip-tab is-chrome">STAT</span>
         <button type="button" class="crt-pip-tab" :class="{ active: activeSection === 'library' }" @click="switchSection('library')">INV</button>
         <button type="button" class="crt-pip-tab" :class="{ active: activeSection === 'pending' }" @click="switchSection('pending')">DATA</button>
-        <span class="crt-pip-tab is-chrome">MAP</span>
-        <span class="crt-pip-tab is-chrome">RADIO</span>
+        <span class="crt-pip-tab is-chrome">TAGS</span>
+        <span class="crt-pip-tab is-chrome">LOOT</span>
     </nav>
 </header>
 
@@ -326,7 +326,7 @@ export const TEMPLATE = `
             </div>
 
             <div v-else-if="images.length === 0" class="empty-state">
-                <div class="crt-mascot crt-mascot-empty" role="img" aria-label="Magpie"></div>
+                <div class="crt-mascot crt-mascot-empty" role="img" aria-label="Meme Thief"></div>
                 <svg class="empty-state-icon" style="width:64px;height:64px;opacity:0.3;margin-bottom:16px" fill="none" stroke="currentColor"
                     viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
@@ -476,7 +476,7 @@ export const TEMPLATE = `
             </div>
 
             <div v-else-if="pendingImages.length === 0" class="empty-state">
-                <div class="crt-mascot crt-mascot-empty" role="img" aria-label="Magpie"></div>
+                <div class="crt-mascot crt-mascot-empty" role="img" aria-label="Meme Thief"></div>
                 <svg class="empty-state-icon" style="width:64px;height:64px;opacity:0.3;margin-bottom:16px" fill="none" stroke="currentColor"
                     viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 13l4 4L19 7" />
@@ -583,7 +583,7 @@ export const TEMPLATE = `
     </main>
 </div>
 
-<div class="crt-mascot crt-mascot-mascot" role="img" aria-label="Magpie"></div>
+<div class="crt-mascot crt-mascot-mascot" role="img" aria-label="Meme Thief"></div>
 <footer class="crt-hud" aria-hidden="true">
     <div class="crt-hud-group">
         <span class="crt-hud-k">HP</span>

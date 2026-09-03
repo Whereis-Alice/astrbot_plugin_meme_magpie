@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "display_name": "Meme Magpie",
+    "display_name": "Meme Thief",
     "short_desc": "Collects stickers on its own and sends a fitting one while chatting",
     "desc": "Files away the stickers that show up in chat: a vision model classifies and tags them, and the plugin picks a semantically and emotionally fitting one when replying. Includes LLM tools for searching and collecting stickers (the model can pass work, character and action parameters directly), a WebUI library with batch import (configurable concurrency and rate limit), a review queue, duplicate cleanup, storage reclaim, and one-command data migration from astrbot_plugin_stealer."
   },
@@ -252,10 +252,10 @@
   },
   "pages": {
     "dashboard": {
-      "title": "Sticker Dashboard",
+      "title": "Meme Thief Dashboard",
       "header": {
-        "brand": "Henry's Spoils",
-        "subtitle": "Sticker Manager"
+        "brand": "The Stash",
+        "subtitle": "Meme Thief control panel"
       },
       "health": {
         "ok": "Healthy",

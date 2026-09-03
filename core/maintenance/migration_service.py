@@ -23,9 +23,12 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 from astrbot.api import logger
+
+from ..util.command_hint import DEFAULT_WAKE_PREFIX, format_command
 
 LEGACY_PLUGIN_NAME = "astrbot_plugin_stealer"
 
@@ -127,15 +130,28 @@ class MigrationReport:
         data["imported_config_keys"] = list(self.imported_config_keys)
         return data
 
-    def summary(self) -> str:
-        """生成给聊天窗口看的中文摘要（控制在 15 行内）。"""
+    def summary(self, cmd: Callable[[str], str] | None = None) -> str:
+        """生成给聊天窗口看的中文摘要（控制在 20 行内）。
+
+        Args:
+            cmd: 把子命令渲染成"可直接复制发送的完整命令"的函数，通常传
+                `plugin.cmd`。不传时按 AstrBot 出厂默认唤醒前缀 `/` 渲染。
+        """
+
+        def _default_cmd(sub: str) -> str:
+            return format_command(sub, DEFAULT_WAKE_PREFIX)
+
+        render = cmd or _default_cmd
         verb = "待迁入" if self.dry_run else "已迁入"
         lines = [
-            "【迁移预演】以下是即将发生的变化，目前尚未写入任何数据"
+            "【迁移预演】下面是「如果执行」会发生的变化。这一步只读不写，"
+            "旧插件和本插件的数据都没有被改动。"
             if self.dry_run
-            else "【迁移完成】",
+            else "【迁移完成】以下是实际写入的结果。",
             f"来源：{self.source_dir or '未找到旧插件数据目录'}",
         ]
+        if self.target_dir:
+            lines.append(f"去向：{self.target_dir}")
         if not self.source_dir:
             if self.errors:
                 lines.extend(f"  · {item}" for item in self.errors[:3])
@@ -161,15 +177,26 @@ class MigrationReport:
             f"新增分类 {self.categories_added} 个 / 新增角色 {self.characters_added} 个"
             f" / 沿用旧插件设置 {self.config_keys_imported} 项"
         )
+        if self.pending_imported > 0:
+            lines.append(
+                "（待审核 = 旧插件里还没分类的图，迁移后可在 WebUI 里补分类和标签）"
+            )
         if self.errors:
             lines.append(f"另有 {len(self.errors)} 处提示，前 3 条：")
             lines.extend(f"  · {item}" for item in self.errors[:3])
         if self.dry_run:
-            lines.append("确认无误后执行：/magpie migrate apply")
+            lines.append(f"确认无误后执行：{render('migrate apply')}")
+            lines.append(f"想省一份磁盘、直接搬走旧文件：{render('migrate move')}")
         elif self.move:
-            lines.append("已选择移动模式，旧插件文件已被搬走。建议接着执行 /magpie rebuild_index。")
+            lines.append(
+                "已选择移动模式，旧插件的图片文件已被搬走（数据库记录仍保留）。"
+                f"建议接着执行 {render('rebuild_index')}。"
+            )
         else:
-            lines.append("旧插件数据未被改动，可随时回滚。建议接着执行 /magpie rebuild_index。")
+            lines.append(
+                "旧插件数据一个字节都没动，可随时回滚。"
+                f"建议接着执行 {render('rebuild_index')}。"
+            )
         return "\n".join(lines)
 
 
@@ -268,7 +295,8 @@ class MigrationService:
                 "file_count": 0,
                 "reason": (
                     f"未找到旧插件数据目录。已在 {self.target_dir.parent} 下查找：{searched}；"
-                    "也可以手动指定目录，例如 /magpie migrate check D:/astrbot/data/plugin_data/xxx"
+                    "也可以手动指定目录，把路径直接写在命令末尾，"
+                    "例如：mp migrate check D:/astrbot/data/plugin_data/xxx"
                 ),
             }
         db_path = self._legacy_db_path(resolved)

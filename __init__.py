@@ -1,4 +1,4 @@
-# 表情包喜鹊（astrbot_plugin_meme_magpie）包初始化文件
+# meme神偷（astrbot_plugin_meme_magpie）包初始化文件
 
 from __future__ import annotations
 

@@ -5,6 +5,12 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from ..util.command_hint import (
+    CHINESE_COMMAND_GROUP,
+    LEGACY_COMMAND_GROUP,
+    format_command,
+)
+
 
 class CommandHandler:
     """命令处理服务类，负责处理所有与插件相关的命令操作。"""
@@ -89,13 +95,13 @@ class CommandHandler:
     ):
         """从旧插件（astrbot_plugin_stealer）迁移数据。
 
-        用法：
-            /magpie migrate              预演，只报告会发生什么
-            /magpie migrate check        只探测旧数据，不做规划
-            /magpie migrate apply        真正执行（复制文件，旧数据保留）
-            /magpie migrate move         执行并移动文件（不保留旧文件副本）
+        用法（下面省略唤醒前缀，实际发送时按你自己的前缀来，例如 /mp migrate）：
+            mp migrate              预演，只报告会发生什么
+            mp migrate check        只探测旧数据，不做规划
+            mp migrate apply        真正执行（复制文件，旧数据保留）
+            mp migrate move         执行并移动文件（不保留旧文件副本）
         以上均可在末尾追加旧数据目录，例如：
-            /magpie migrate apply D:/astrbot/data/plugin_data/astrbot_plugin_stealer
+            mp migrate apply D:/astrbot/data/plugin_data/astrbot_plugin_stealer
         """
         service = getattr(self.plugin, "migration_service", None)
         if service is None:
@@ -104,7 +110,7 @@ class CommandHandler:
 
         action = (action or "").strip().lower()
         source = (source or "").strip()
-        # 允许把目录写在第一个参数位置（例如 /magpie migrate D:/data/...）
+        # 允许把目录写在第一个参数位置（例如 mp migrate D:/data/...）
         if action and action not in {"check", "apply", "move", "dry", "dryrun", "preview"}:
             action, source = "", action if not source else source
 
@@ -118,7 +124,8 @@ class CommandHandler:
                 f"目录：{info['source_dir']}\n"
                 f"表情包 {info['emoji_count']} 张 / 待审核 {info['pending_count']} 张"
                 f" / 磁盘文件 {info['file_count']} 个\n"
-                "下一步：/magpie migrate 预演，确认后 /magpie migrate apply 执行"
+                f"下一步：{self.plugin.cmd('migrate', event)} 预演，"
+                f"确认后 {self.plugin.cmd('migrate apply', event)} 执行"
             )
             return
 
@@ -132,7 +139,9 @@ class CommandHandler:
             logger.error(f"[迁移] 执行失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 迁移失败：{e}")
             return
-        yield event.plain_result(report.summary())
+        yield event.plain_result(
+            report.summary(lambda sub: self.plugin.cmd(sub, event))
+        )
 
     async def rebuild_index(self, event):
         """重建索引（已迁移到 IndexRebuildCommand）。"""
@@ -160,7 +169,8 @@ class CommandHandler:
         if action not in ["on", "off"]:
             current_status = "启用" if self.plugin.plugin_config.enable_natural_emotion_analysis else "禁用"
             yield event.plain_result(
-                f"当前智能检索状态: {current_status}\n用法: /magpie natural_analysis <on|off>"
+                f"当前智能检索状态: {current_status}\n"
+                f"用法: {self.plugin.cmd('natural_analysis <on|off>', event)}"
             )
             return
 
@@ -293,7 +303,7 @@ class CommandHandler:
     async def tag_stats(self, event: AstrMessageEvent, limit: str = ""):
         """标签/场景统计：高频标签、低频标签、零标签条目。
 
-        用法: /magpie tag_stats [N]   （N 为 Top 数量，默认 15）
+        用法: mp tag_stats [N]   （N 为 Top 数量，默认 15）
         """
         try:
             db = getattr(self.plugin, "db_service", None)
@@ -345,12 +355,16 @@ class CommandHandler:
         except Exception as e:
             logger.error(f"标签统计失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 标签统计失败: {e}")
-        """手动触发清理操作，清理raw目录中的原始图片文件，不影响已分类的表情包。
+
+    async def clean(self, event: AstrMessageEvent, mode: str = ""):
+        """清理 raw 暂存目录里的原始图片，不影响已入库的表情包。
 
         Args:
             event: 消息事件
-            mode: 清理模式，现在只支持清理所有raw文件
+            mode: 保留参数（兼容老用户习惯输入的 ``clean force``）。
+                当前只有“清空全部 raw 文件”一种行为，此参数不改变结果。
         """
+        del mode  # 显式声明：目前不区分清理模式
         try:
             # 清理所有raw文件（因为成功分类的文件已经被立即删除了）
             deleted_count = await self._force_clean_raw_directory()
@@ -397,6 +411,83 @@ class CommandHandler:
         except Exception as e:
             logger.error(f"容量控制失败: {e}")
             yield event.plain_result(f"容量控制失败: {str(e)}")
+
+    async def show_help(self, event: AstrMessageEvent):
+        """输出完整子命令清单。
+
+        命令示例按当前会话真实生效的唤醒前缀渲染，避免把用了 `!`、`#` 或
+        清空前缀的用户引到一条在他机器上不存在的命令上。
+        """
+        plugin = self.plugin
+        prefix = plugin.wake_prefix(event)
+
+        def c(sub: str) -> str:
+            return plugin.cmd(sub, event)
+
+        if prefix:
+            head_note = f"你当前的唤醒前缀是「{prefix}」，下面的命令都可以直接复制发送。"
+        else:
+            head_note = "你的唤醒前缀是空的，所以命令不带前缀，下面的写法可以直接复制发送。"
+
+        sections: list[tuple[str, list[tuple[str, str]]]] = [
+            (
+                "开关",
+                [
+                    (c("on") + "  |  " + c("off"), "开始 / 停止自动收集聊天里的表情包"),
+                    (c("auto_on") + "  |  " + c("auto_off"), "开启 / 关闭聊天时自动配表情"),
+                    (c("偷"), "强制接收模式：之后 30 秒内发的图直接入库"),
+                ],
+            ),
+            (
+                "查看",
+                [
+                    (c("status"), "运行状态与库存统计"),
+                    (c("list [分类] [每页] [页码]"), "翻看已收藏的表情包"),
+                    (c("tag_stats [N]"), "打标质量体检：高频标签、低频噪声、零标签条目"),
+                    (c("emotion_stats"), "情绪分析统计与当前识别模式"),
+                    (c("help"), "就是这份清单"),
+                ],
+            ),
+            (
+                "管理（需要管理员权限）",
+                [
+                    (c("delete <序号|文件名>"), "删掉一张"),
+                    (c("blacklist <序号|文件名>"), "删掉并拉黑，以后遇到同一张也不再收"),
+                    (c("scope <序号|文件名> <public|local>"), "设置作用域：全局可发 / 仅本会话可发"),
+                    (c("group show"), "查看群聊与用户的黑白名单，含更多子用法"),
+                    (c("natural_analysis <on|off>"), "切换情绪识别模式"),
+                    (c("clean"), "清理还没分类的原始图缓存，不动已入库的表情包"),
+                    (c("capacity"), "立刻执行容量上限清理"),
+                    (c("clear_emotion_cache"), "清空情绪分析缓存，释放内存"),
+                    (c("rebuild_index"), "重建索引，用于修复检索异常"),
+                ],
+            ),
+            (
+                "从旧插件迁移",
+                [
+                    (c("migrate check"), "先看看能不能找到 astrbot_plugin_stealer 的数据"),
+                    (c("migrate"), "预演：只报告会搬多少，不写入任何数据"),
+                    (c("migrate apply"), "真正执行，复制文件，旧插件数据原样保留"),
+                    (c("migrate move"), "同上，但移动文件而不是复制，省一份磁盘"),
+                ],
+            ),
+        ]
+
+        lines = ["meme神偷 · 指令清单", head_note, "群聊里 @ 机器人、或者私聊时，前缀一般可以省略。"]
+        for title, rows in sections:
+            lines.append("")
+            lines.append("── " + title + " ──")
+            for cmd_text, desc in rows:
+                lines.append(cmd_text)
+                lines.append("    " + desc)
+
+        lines.append("")
+        lines.append(
+            "命令组别名：" + c("") + "、" + format_command("", prefix, LEGACY_COMMAND_GROUP)
+            + "、" + format_command("", prefix, CHINESE_COMMAND_GROUP) + " 三者等价。"
+        )
+        lines.append("批量导入、批量自动打标、逐张编辑请到 AstrBot WebUI → 插件管理 → meme神偷。")
+        yield event.plain_result("\n".join(lines))
 
     def cleanup(self):
         """清理资源。"""

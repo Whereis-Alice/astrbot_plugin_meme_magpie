@@ -1322,7 +1322,7 @@ class DatabaseService:
             }
 
     def get_tag_stats(self, top_n: int = 15) -> dict[str, Any]:
-        """标签/场景统计（供 /magpie tag_stats 命令与 WebUI 使用）。
+        """标签/场景统计（供 `mp tag_stats` 命令与 WebUI 使用）。
 
         Returns:
             dict: {

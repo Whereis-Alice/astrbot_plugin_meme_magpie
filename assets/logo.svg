@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Meme Magpie">
-  <title>Meme Magpie</title>
-  <desc>A magpie holding a sticker speech bubble in its beak, on a gold collector badge.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="meme神偷 Meme Thief">
+  <title>meme神偷 Meme Thief</title>
+  <desc>A magpie carrying a masked-bandit sticker speech bubble in its beak, on a gold loot badge.</desc>
   <defs>
     <linearGradient id="badge" x1="88" y1="40" x2="428" y2="480" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#fbeec0"/><stop offset="0.36" stop-color="#e9c778"/>
@@ -17,7 +17,7 @@
       <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dee5f0"/>
     </linearGradient>
     <path id="bird" d="M146 182C168 168 190 158 208 152C214 126 238 112 262 116C292 120 314 142 320 172C348 196 368 244 372 296C376 320 422 386 450 434C458 448 450 458 438 448C402 418 356 378 330 352C322 378 306 396 284 402C252 410 218 392 206 362C194 332 192 286 196 248C198 226 200 208 204 198C186 190 164 186 146 196Z"/>
-    <clipPath id="birdClip"><use href="#bird"/></clipPath>
+    <clipPath id="birdClip"><use href="#bird" xlink:href="#bird"/></clipPath>
   </defs>
 
   <rect x="24" y="24" width="464" height="464" rx="114" ry="114" fill="url(#badge)"/>
@@ -29,7 +29,7 @@
     <path d="M450 200l6 17 17 6-17 6-6 17-6-17-17-6 17-6z"/>
   </g>
 
-  <use href="#bird" fill="url(#ink)"/>
+  <use href="#bird" xlink:href="#bird" fill="url(#ink)"/>
 
   <g clip-path="url(#birdClip)">
     <path d="M276 200C324 224 354 280 364 338C368 366 360 390 342 400C338 360 324 306 302 266C288 240 274 218 276 200Z"
@@ -56,8 +56,10 @@
   <g transform="rotate(-6 152 196)">
     <path d="M80 252h58l14-58 24 58h22a22 22 0 0 1 22 22v78a22 22 0 0 1-22 22H80a22 22 0 0 1-22-22v-78a22 22 0 0 1 22-22z"
           fill="url(#card)" stroke="#131a29" stroke-width="10" stroke-linejoin="round"/>
-    <circle cx="100" cy="298" r="11" fill="#131a29"/>
-    <circle cx="152" cy="298" r="11" fill="#131a29"/>
+    <path d="M62 294c0-13 11-21 26-21 12 0 20 6 24 13l14 4 14-4c4-7 12-13 24-13 15 0 26 8 26 21 0 17-11 29-26 29-13 0-22-8-25-20l-13-4-13 4c-3 12-12 20-25 20-15 0-26-12-26-29z"
+          fill="#131a29"/>
+    <circle cx="100" cy="296" r="8.5" fill="#f4f7fd"/>
+    <circle cx="152" cy="296" r="8.5" fill="#f4f7fd"/>
     <path d="M96 332q30 30 58 0" fill="none" stroke="#131a29" stroke-width="15" stroke-linecap="round"/>
   </g>
 </svg>

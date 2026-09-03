@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-`astrbot_plugin_meme_magpie`（表情包喜鹊）是一个 AstrBot 插件：自动从群聊中收集图片，用视觉语言模型（VLM）分类打标，在对话中按情绪与语义匹配发送表情包。提供 WebUI 管理面板，并向 LLM 暴露搜索 / 发送 / 主动收图三个工具。
+`astrbot_plugin_meme_magpie`（对外显示名 **meme神偷** / Meme Thief）是一个 AstrBot 插件：自动从群聊中收集图片，用视觉语言模型（VLM）分类打标，在对话中按情绪与语义匹配发送表情包。提供 WebUI 管理面板，并向 LLM 暴露搜索 / 发送 / 主动收图三个工具。
 
 本插件是 [`astrbot_plugin_stealer`](https://github.com/nagatoquin33/astrbot_plugin_stealer) 的衍生作品，遵循 **AGPL-3.0**。改动记录见 `CHANGELOG.md`，衍生关系与版权声明见 `NOTICE`。
 
@@ -13,7 +13,7 @@
 | 项目 | 本插件 |
 | --- | --- |
 | 包名 / 数据目录 | `astrbot_plugin_meme_magpie` |
-| 命令组 | `/magpie`（别名 `喜鹊`） |
+| 命令组 | `mp`（别名 `magpie` / `神偷`） |
 | Web API 前缀 | `/astrbot_plugin_meme_magpie/*` |
 | LLM 工具名 | `magpie_search_meme` / `magpie_send_meme` / `magpie_steal_meme` |
 | 前端目录 | `pages/dashboard/` |
@@ -32,7 +32,7 @@ Main (main.py)
 ├── DatabaseService (core/db/database_service.py)     -- SQLite + WAL，表情索引，SCHEMA_VERSION = 7
 ├── IndexManager (core/db/index_manager.py)           -- 内存索引与 DB 的同步
 ├── CacheService (cache_service.py)                   -- 索引 / 图片 / 冷却期内存缓存
-├── CommandHandler (core/commands/command_handler.py) -- /magpie 各子命令实现
+├── CommandHandler (core/commands/command_handler.py) -- mp 各子命令实现
 ├── EventHandler (core/events/event_handler.py)       -- 消息监听、图片下载、强制收图窗口
 ├── BackgroundStealQueue (core/events/background_steal_queue.py) -- 后台收图队列
 ├── ImageProcessorService (core/processing/image_processor_service.py) -- VLM 分类、去重、入库
@@ -101,6 +101,22 @@ Get-Content pages/dashboard/template.js -Raw | node --input-type=module --check
 `requirements.txt` 只声明必要的额外依赖（Pillow 等）。`aiohttp` / `pydantic` 等由 AstrBot 提供。不要随意引入重依赖：插件包体积需控制在 32MB 以内。
 
 ## 必须遵守的约定与陷阱
+
+### 命令前缀（唤醒前缀）不能硬编码
+
+`/` 只是 AstrBot 的**默认** `wake_prefix`（顶层配置，类型是 `list`，默认 `["/"]`），用户可以改成 `!` / `#` / `.`，也可以清空；私聊和 @机器人 场景本来就不带前缀。
+
+因此**任何面向用户的提示文本里都不许出现硬编码的 `/mp xxx`**，一律走：
+
+```python
+self.plugin.cmd("status", event)          # -> "/mp status"，随用户配置变化
+self.plugin.wake_prefix(event)            # 只要前缀本身
+```
+
+- 实现在 `core/util/command_hint.py`（`resolve_wake_prefix` / `format_command` / `command_like_pattern`），`main.py` 上有 `wake_prefix()` / `cmd()` 两个薄封装。
+- 传 `event` 会读会话级配置，不传则读全局配置。
+- 唯一例外是 `@filter.command` 的 **docstring**：AstrBot 直接把它当帮助文本，无法动态求值，所以那里写不带前缀的 `用法: mp xxx`。
+- 用户记不住前缀时可以发 `mp help`，`CommandHandler.show_help()` 会按真实前缀重新渲染整份清单。
 
 ### `pages/dashboard/template.js`
 整个文件是一个反引号包裹的 JS 模板字符串，**首尾恰好 2 个反引号**。因此：

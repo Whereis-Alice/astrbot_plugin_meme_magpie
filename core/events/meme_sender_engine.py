@@ -9,6 +9,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from ..processing.natural_emotion_analyzer import EmotionQuery
+from ..util.command_hint import command_like_pattern
 from .event_context import get_event_session_key
 
 
@@ -167,8 +168,10 @@ class MemeSenderEngine:
         if len(normalized) <= 2:
             return True
         # 如果包含明确的指令或标记，跳过自动发送
+        wake_prefix = getattr(self.plugin, "wake_prefix", None)
+        prefix = wake_prefix() if callable(wake_prefix) else "/"
         skip_patterns = [
-            r"/magpie\s+\w+",
+            command_like_pattern(prefix),
             r"^\\/",
             r"^\s*[!！/#]",
         ]
@@ -246,7 +249,7 @@ class MemeSenderEngine:
         """带日志的权限判断包装，方便排查发送概率问题。"""
         allowed = await self.resolve_auto_emoji_turn_permission(event)
         reason = event.get_extra("magpie_auto_emoji_turn_reason") or "unknown"
-        logger.debug(f"[Magpie] 当前轮次自动发表情判定: allowed={allowed}, reason={reason}")
+        logger.debug(f"[MemeThief] 当前轮次自动发表情判定: allowed={allowed}, reason={reason}")
         return allowed
 
     def claim_auto_emoji_turn(self, event: AstrMessageEvent) -> bool:

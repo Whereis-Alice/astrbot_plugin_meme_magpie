@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="logo.png" alt="Meme Magpie" width="150">
+<img src="logo.png" alt="Meme Thief" width="150">
 
-# Meme Magpie · 表情包喜鹊
+# Meme Thief · meme神偷
 
-**Lets AstrBot squirrel away the stickers people post in chat, then pick a mood-appropriate one when replying.**
+**Lets AstrBot pilfer the stickers people post in chat, then send a mood-appropriate one when replying.**
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
@@ -19,7 +19,7 @@
 
 ## What is this
 
-Magpies collect shiny things. So does this plugin: stickers that scroll past in chat get filed away, a vision model works out what each one is expressing, tags it, transcribes any text printed on the image, and later the bot picks one that matches the mood of its reply.
+Magpies are notorious thieves — anything shiny goes straight into the nest. This plugin does the same: stickers that scroll past in chat get pilfered into your library, a vision model works out what each one is expressing, tags it, transcribes any text printed on the image, and later the bot picks one that matches the mood of its reply.
 
 Three independent switches, none of them coupled:
 
@@ -27,19 +27,33 @@ Three independent switches, none of them coupled:
 - **Understand** — a vision model (VLM) fills in category, tags, usage scenes, on-image text, character and source work.
 - **Send** — after the bot replies, roll the dice on whether to attach a sticker; which one gets picked comes from semantic search plus emotion matching.
 
-Done collecting? `/magpie off`. Everything already in the library still works.
+Done collecting? `/mp off`. Everything already in the library still works.
+
+### About the name
+
+The plugin is called **Meme Thief** (Chinese: meme神偷) and its command group is `mp` — meme + pilfer, two letters that are quick to type.
+
+Version 1.0 shipped as "Meme Magpie", so the old `magpie` and the Chinese `神偷` are kept as aliases. All three are equivalent:
+
+```
+/mp status
+/magpie status
+/神偷 status
+```
+
+The repository and Python package are still named `astrbot_plugin_meme_magpie`, and that is **deliberate**: AstrBot uses the `name` field of `metadata.yaml` both as the plugin directory name and as the data directory `data/plugin_data/<name>`. Renaming it would make every existing user's sticker library and database vanish, so that layer stays exactly as it was.
 
 ### Relationship to astrbot_plugin_stealer
 
 This plugin is a fork of [nagatoquin33/astrbot_plugin_stealer](https://github.com/nagatoquin33/astrbot_plugin_stealer) (AGPL-3.0). Credit to the original author for the idea and the groundwork.
 
-It is a **fully independent plugin**: package name, command prefix, data directory, WebUI routes and LLM tool names are all different, so it can live alongside the original in the same AstrBot without clobbering anything. If you are coming from stealer, one `/magpie migrate apply` brings your stickers and database over, and your old data is left untouched by default.
+It is a **fully independent plugin**: package name, command prefix, data directory, WebUI routes and LLM tool names are all different, so it can live alongside the original in the same AstrBot without clobbering anything. If you are coming from stealer, one `/mp migrate apply` brings your stickers and database over, and your old data is left untouched by default.
 
 What this fork adds on top:
 
 | Change | Details |
 |:---|:---|
-| **Data migration command** | `/magpie migrate` moves images, database rows, categories, character library, blocklist and config from the old plugin |
+| **Data migration command** | `/mp migrate` moves images, database rows, categories, character library, blocklist and config from the old plugin |
 | **LLM can supply metadata directly** | When the chat model collects an image it can state "this is character X from series Y, doing Z" instead of leaving everything to the vision model |
 | **Rate-limited batch analysis** | Batch import and batch re-analysis take a concurrency cap and a requests-per-minute cap, so hundreds of images will not trip upstream 429s |
 | **Source work field** | A new `work` field flows through ingestion, retrieval and WebUI filtering |
@@ -84,35 +98,37 @@ https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie
 ### 3. Three commands to get going
 
 ```
-/magpie on        # start collecting
-/magpie auto_on   # start attaching stickers to replies
-/magpie status    # see how many you have
+/mp on        # start collecting
+/mp auto_on   # start attaching stickers to replies
+/mp status    # see how many you have
 ```
 
-The command prefix is `/magpie`; the Chinese alias `/喜鹊` also works.
+> **About the `/` prefix**: `/` is only AstrBot's factory-default wake prefix. You can change it to `!`, `#` or `.` in AstrBot's settings, or clear it entirely (then you simply send `mp status`). This document always writes `/` — substitute whatever you actually use. Direct messages and @-mentions need no prefix at all.
+>
+> Not sure which prefix is active? Every command example the plugin prints in chat is rendered with **your** effective prefix, so you can copy it straight out of the reply. Sending `mp help` prints the full subcommand list.
 
 ### 4. Open the dashboard
 
-AstrBot plugin details page → "Sticker Manager". No extra port, no extra password.
+AstrBot plugin details page → "Meme Thief Dashboard". No extra port, no extra password.
 
 ## Migrating from the original plugin
 
-`/magpie migrate` brings `astrbot_plugin_stealer` data over. It is **idempotent** (running it twice does not duplicate anything) and **non-destructive** (files are copied by default; the old plugin's data stays exactly where it was), so it is safe to experiment with.
+`/mp migrate` brings `astrbot_plugin_stealer` data over. It is **idempotent** (running it twice does not duplicate anything) and **non-destructive** (files are copied by default; the old plugin's data stays exactly where it was), so it is safe to experiment with.
 
 Three steps:
 
 ```
-/magpie migrate check     # 1. can it find the old plugin's data directory?
-/magpie migrate           # 2. dry run: report what would move, write nothing
-/magpie migrate apply     # 3. do it (copy files, keep the originals)
+/mp migrate check     # 1. can it find the old plugin's data directory?
+/mp migrate           # 2. dry run: print what *would* happen, write nothing at all
+/mp migrate apply     # 3. do it (copy files, keep the originals)
 ```
 
-Short on disk space? Use `/magpie migrate move` instead of `apply` — it moves rather than copies, which **leaves the old plugin unusable**. Confirm with the first two steps before you do that.
+Short on disk space? Use `/mp migrate move` instead of `apply` — it moves rather than copies, which **leaves the old plugin unusable**. Confirm with the first two steps before you do that.
 
 If auto-detection fails, pass the path explicitly:
 
 ```
-/magpie migrate apply D:/astrbot/data/plugin_data/astrbot_plugin_stealer
+/mp migrate apply D:/astrbot/data/plugin_data/astrbot_plugin_stealer
 ```
 
 **What moves**
@@ -123,7 +139,7 @@ If auto-detection fails, pass the path explicitly:
 - `categories.json` / `category_info.json` / `characters.json` / `character_info.json`
 - The old plugin's config values (only keys this plugin also has; new settings keep their defaults)
 
-**What does not move**: thumbnail cache, temp files, embedding vectors. Run `/magpie rebuild_index` once after migrating.
+**What does not move**: thumbnail cache, temp files, embedding vectors. Run `/mp rebuild_index` once after migrating.
 
 You get a report at the end: how many images moved, how many were skipped (already present / file missing / duplicate hash), how many failed. Filename collisions are renamed, never overwritten.
 
@@ -225,7 +241,7 @@ Tasks can be **paused, resumed and cancelled** at any time; pausing genuinely st
 
 ## Commands
 
-Prefix `/magpie`, Chinese alias `/喜鹊`.
+Command group `mp`, aliases `magpie` and `神偷`. The table lists subcommands only — prepend your wake prefix when you send them, e.g. `/mp status` (default prefix) or `!mp status` if you changed it to `!`.
 
 ### Available to everyone
 
@@ -234,6 +250,7 @@ Prefix `/magpie`, Chinese alias `/喜鹊`.
 | `status` | Runtime status and library statistics |
 | `list [category] [per_page] [page]` | List collected stickers (10 per page, pages start at 1) |
 | `emotion_stats` | Emotion-analysis statistics and current mode |
+| `help` / `帮助` | Print the full subcommand list using your current wake prefix |
 
 ### Admin only
 
@@ -247,8 +264,8 @@ Prefix `/magpie`, Chinese alias `/喜鹊`.
 | `delete <index\|filename>` | Delete a sticker |
 | `blacklist <index\|filename>` | Delete and blocklist it so it is never collected again |
 | `scope <index\|filename> <public\|local>` | Set scope; `local` restricts sending to the source chat |
-| `clean [force]` | Clean up unclassified staging images |
-| `capacity` | Run a capacity-control pass now |
+| `clean` | Empty the `raw` staging directory; stickers already in the library are untouched |
+| `capacity` | Run a capacity-control pass now. **This really deletes the oldest stickers above the cap** (use `status` if you only want to read the numbers) |
 | `tag_stats [N]` | Tag health check: frequent tags, noisy rare tags, untagged entries (N defaults to 15) |
 | `rebuild_index` | Rebuild the retrieval index |
 | `migrate [check\|apply\|move] [path]` | Migrate data from astrbot_plugin_stealer |
@@ -329,7 +346,7 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 
 ## The dashboard
 
-Plugin details page → "Sticker Manager". Two areas:
+Plugin details page → "Meme Thief Dashboard". Two areas:
 
 - **Review queue** — where auto-collected images land. Approve or delete individually or in bulk, and edit category, tags, description, character and work before approving.
 - **Library** — filter by category, work or keyword; four sort orders (most sent / recently sent / newest / oldest, all done in SQL); bulk category change, delete, scope, character/work assignment and source-scope repair.
@@ -388,6 +405,7 @@ Yes — it has no idea what privacy is. That is why human review is on by defaul
 
 Relative to upstream `astrbot_plugin_stealer`:
 
+- **The tag-statistics command wiped the staging directory, while the cleanup command never worked** — upstream's `clean` method lost its definition line, so its whole body fell into the preceding method. `clean` therefore raised `AttributeError`, and the read-only `tag_stats` emptied the `raw` staging directory on every run (which may still hold images queued for analysis). The two are now separate, with regression tests pinning them apart.
 - **Wrong ingestion method for LLM collection** — images collected through the LLM tool were recorded with `add_method = auto`, mixing them in with automatic collection. Now recorded as `llm`.
 - **Dirty data left behind on batch analysis failure** — when the vision model returned an invalid category, upstream reverted only the category and kept the tags and description from the same bad response. Now the whole analysis result is discarded together.
 - **WebUI search missed fields** — the index fallback path searched only tags, description and scenes, so on-image text, character, work and original filename were unsearchable. Now aligned with the SQL path.
