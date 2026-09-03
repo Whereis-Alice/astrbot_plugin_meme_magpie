@@ -105,7 +105,7 @@ https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie
 
 > **About the `/` prefix**: `/` is only AstrBot's factory-default wake prefix. You can change it to `!`, `#` or `.` in AstrBot's settings, or clear it entirely (then you simply send `mp status`). This document always writes `/` — substitute whatever you actually use. Direct messages and @-mentions need no prefix at all.
 >
-> Not sure which prefix is active? Every command example the plugin prints in chat is rendered with **your** effective prefix, so you can copy it straight out of the reply. Sending `mp help` prints the full subcommand list.
+> Not sure which prefix is active? Every command example the plugin prints in chat is rendered with **your** effective prefix, so you can copy it straight out of the reply. Sending `/mp help` prints the full subcommand list.
 
 ### 4. Open the dashboard
 
