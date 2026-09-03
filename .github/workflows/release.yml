@@ -1,5 +1,8 @@
 name: Auto Release
 
+# metadata.yaml 的 version 一变就发一个 Release。
+# 正文从 CHANGELOG.md 里对应版本的那一节直接拿，而不是只贴一串 commit。
+
 on:
   push:
     branches:
@@ -19,31 +22,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # 需要完整的 tag 列表来判断这个版本是不是已经发过
+          fetch-depth: 0
 
-      - name: Get version from metadata.yaml
-        id: version
-        run: |
-          VERSION=$(grep '^version:' metadata.yaml | sed 's/version: *//')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Current version: $VERSION"
+      - name: Resolve version and release notes
+        id: meta
+        run: python3 .github/scripts/release_notes.py
 
-      - name: Check if tag exists
-        id: check_tag
-        run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Skip notice
+        if: steps.meta.outputs.tag_exists == 'true'
+        run: echo "tag ${{ steps.meta.outputs.tag }} 已存在，跳过发布"
 
       - name: Create Release
-        if: steps.check_tag.outputs.exists == 'false'
+        if: steps.meta.outputs.tag_exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: Release v${{ steps.version.outputs.version }}
-          generate_release_notes: true
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          body_path: ${{ steps.meta.outputs.notes_path }}
+          generate_release_notes: ${{ steps.meta.outputs.has_notes == 'false' }}
           draft: false
           prerelease: false
         env:
