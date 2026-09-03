@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Meme Magpie">
+  <title>Meme Magpie</title>
+  <desc>A magpie holding a sticker speech bubble in its beak, on a gold collector badge.</desc>
+  <defs>
+    <linearGradient id="badge" x1="88" y1="40" x2="428" y2="480" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbeec0"/><stop offset="0.36" stop-color="#e9c778"/>
+      <stop offset="0.72" stop-color="#d09c42"/><stop offset="1" stop-color="#a06d24"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="180" y1="120" x2="400" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334063"/><stop offset="1" stop-color="#0c1220"/>
+    </linearGradient>
+    <linearGradient id="tail" x1="336" y1="300" x2="452" y2="446" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4fe4d0"/><stop offset="0.44" stop-color="#1a8f8a"/>
+      <stop offset="1" stop-color="#083544"/>
+    </linearGradient>
+    <linearGradient id="card" x1="58" y1="240" x2="198" y2="372" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#dee5f0"/>
+    </linearGradient>
+    <path id="bird" d="M146 182C168 168 190 158 208 152C214 126 238 112 262 116C292 120 314 142 320 172C348 196 368 244 372 296C376 320 422 386 450 434C458 448 450 458 438 448C402 418 356 378 330 352C322 378 306 396 284 402C252 410 218 392 206 362C194 332 192 286 196 248C198 226 200 208 204 198C186 190 164 186 146 196Z"/>
+    <clipPath id="birdClip"><use href="#bird"/></clipPath>
+  </defs>
+
+  <rect x="24" y="24" width="464" height="464" rx="114" ry="114" fill="url(#badge)"/>
+  <rect x="32" y="32" width="448" height="448" rx="107" ry="107" fill="none"
+        stroke="#8a5f1e" stroke-opacity="0.55" stroke-width="9"/>
+
+  <g fill="#fff7dd" fill-opacity="0.9">
+    <path d="M410 108l10 28 28 10-28 10-10 28-10-28-28-10 28-10z"/>
+    <path d="M450 200l6 17 17 6-17 6-6 17-6-17-17-6 17-6z"/>
+  </g>
+
+  <use href="#bird" fill="url(#ink)"/>
+
+  <g clip-path="url(#birdClip)">
+    <path d="M276 200C324 224 354 280 364 338C368 366 360 390 342 400C338 360 324 306 302 266C288 240 274 218 276 200Z"
+          fill="#212b47" fill-opacity="0.75"/>
+    <path d="M180 238C172 300 180 362 206 396C244 424 296 412 310 388C282 364 264 320 260 278C256 246 240 228 212 228C194 228 182 230 180 238Z"
+          fill="url(#card)"/>
+    <ellipse cx="300" cy="244" rx="32" ry="13" transform="rotate(-34 300 244)" fill="#eef3fb"/>
+    <ellipse cx="306" cy="330" rx="10" ry="28" transform="rotate(20 306 330)" fill="#eef3fb"/>
+    <path d="M372 296C376 320 422 386 450 434C458 448 450 458 438 448C402 418 356 378 330 352C348 344 364 324 372 296Z"
+          fill="url(#tail)"/>
+    <path d="M374 312C384 338 418 388 442 428C434 430 428 428 424 422C398 384 366 348 344 330Z"
+          fill="#9dfbec" fill-opacity="0.4"/>
+    <path d="M352 344C378 370 404 402 424 432M368 322C384 352 406 384 428 412" fill="none"
+          stroke="#052832" stroke-opacity="0.4" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <path d="M148 184C170 170 192 160 208 154C211 164 209 173 203 177C185 181 164 184 148 184Z" fill="#3a4870"/>
+  <path d="M147 189C170 183 192 181 206 181" fill="none" stroke="#050810" stroke-width="4.5" stroke-linecap="round"/>
+
+  <ellipse cx="258" cy="160" rx="16" ry="15" fill="#ffffff"/>
+  <circle cx="255" cy="163" r="8.4" fill="#0d121d"/>
+  <circle cx="261" cy="155" r="3.2" fill="#ffffff"/>
+
+  <g transform="rotate(-6 152 196)">
+    <path d="M80 252h58l14-58 24 58h22a22 22 0 0 1 22 22v78a22 22 0 0 1-22 22H80a22 22 0 0 1-22-22v-78a22 22 0 0 1 22-22z"
+          fill="url(#card)" stroke="#131a29" stroke-width="10" stroke-linejoin="round"/>
+    <circle cx="100" cy="298" r="11" fill="#131a29"/>
+    <circle cx="152" cy="298" r="11" fill="#131a29"/>
+    <path d="M96 332q30 30 58 0" fill="none" stroke="#131a29" stroke-width="15" stroke-linecap="round"/>
+  </g>
+</svg>

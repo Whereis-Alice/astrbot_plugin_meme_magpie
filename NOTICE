@@ -1,0 +1,57 @@
+astrbot_plugin_meme_magpie — 表情包喜鹊 / Meme Magpie
+=====================================================
+
+Copyright (C) 2024-2025 nagatoquin33
+Copyright (C) 2026 Whereis-Alice
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>.
+
+
+Origin / 项目来源
+-----------------
+
+This plugin is a derivative work of:
+
+    astrbot_plugin_stealer
+    https://github.com/nagatoquin33/astrbot_plugin_stealer
+    Copyright (C) nagatoquin33
+
+Note on the upstream licence: the upstream README states MIT, while the LICENSE
+file actually committed to that repository is the GNU Affero General Public
+License v3.0 (GitHub's licence detection also reports AGPL-3.0). Because the two
+statements disagree, this fork complies with the licence that is actually
+present and more restrictive, and is therefore released under AGPL-3.0.
+
+说明：上游仓库的 README 声称 MIT，但仓库中实际提交的 LICENSE 文件是 AGPL-3.0
+（GitHub 的许可证识别结果同样是 AGPL-3.0）。两处声明冲突时，本项目按实际存在
+且更严格的 AGPL-3.0 履行义务，因此本项目同样采用 AGPL-3.0 授权。
+
+
+Third-party dependencies / 第三方依赖
+-------------------------------------
+
+Runtime dependencies are declared in requirements.txt and are licensed by their
+respective authors:
+
+    Pillow      — MIT-CMU licence
+    faiss-cpu   — MIT licence
+
+The bundled dashboard loads Vue 3 from a CDN at runtime (MIT licence) and does
+not vendor a copy of it.
+
+Artwork / 美术资源
+------------------
+
+logo.png, assets/logo.svg, assets/mascot.svg and pages/dashboard/mascot.png were
+created for this project and are released under the same AGPL-3.0 terms. They do
+not depict or derive from any third-party character or trademark.

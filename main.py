@@ -1,0 +1,1520 @@
+import asyncio
+import json
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+from PIL import Image
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import (
+    EventMessageType,
+    PermissionType,
+    PlatformAdapterType,
+)
+from astrbot.api.message_components import Image as MessageImage
+from astrbot.api.star import Context, Star
+
+from .cache_service import CacheService
+from .core.commands.command_handler import CommandHandler
+from .core.config.config import PluginConfig
+from .core.db.database_service import DatabaseService
+from .core.search.meme_selector import MemeSelector
+from .core.events.event_handler import EventHandler
+from .core.events.meme_sender_engine import MemeSenderEngine
+from .core.db.index_manager import IndexManager
+from .core.events.event_context import unwrap_event
+from .core.processing.natural_emotion_analyzer import SmartEmotionMatcher
+from .core.processing.image_processor_service import ImageProcessorService
+from .core.processing.llm_meme_hints import LlmMemeHints
+from .core.maintenance.migration_service import MigrationService
+from .core.maintenance.service import MaintenanceService
+from .core.util.normalization import canonicalize_path, normalize_label_list
+from .core.util.safe_io import safe_remove_file
+from .task_scheduler import TaskScheduler
+from .plugin_api import PluginAPI
+
+try:
+    import aiofiles  # type: ignore
+except ImportError:
+    aiofiles = None
+
+
+class Main(Star):
+    """表情包偷取与发送插件。
+
+    功能：
+    - 监听消息中的图片并自动保存到插件数据目录
+    - 使用当前会话的多模态模型进行情绪分类与标签生成
+    - 建立分类索引，支持自动与手动在合适时机发送表情包
+    """
+
+    # 常量定义
+    BACKEND_TAG = "meme_magpie"
+    SEARCH_MEME_TOOL_NAME = "magpie_search_meme"
+    SEND_MEME_TOOL_NAME = "magpie_send_meme"
+    STEAL_MEME_TOOL_NAME = "magpie_steal_meme"
+
+    # llm_steal_param_mode 的合法取值（见 core/config/config.py）
+    LLM_STEAL_PARAM_MODES = frozenset({"merge", "llm_first", "vlm_only"})
+
+    # 时间间隔常量（单位：秒）
+    RAW_CLEANUP_INTERVAL_SECONDS = 30 * 60  # 30分钟
+    CAPACITY_CONTROL_INTERVAL_SECONDS = 60 * 60  # 60分钟
+
+    # 超时和处理常量
+    IMAGE_PROCESSING_TIMEOUT_SECONDS = 120  # 图片处理超时时间（GIF动图处理需要更长时间）
+    MAX_SEARCH_RESULTS = 5  # 搜索表情包最大返回数量（避免 FC 输出过长）
+    AUTO_EMOJI_COOLDOWN_SECONDS = 20  # 同一会话自动发表情的最短间隔
+
+    # 从外部文件加载的提示词（已迁移到ImageProcessorService）
+
+    def __init__(self, context: Context, config: AstrBotConfig | None = None):
+        super().__init__(context)
+
+        # 初始化插件配置
+        self.plugin_config = PluginConfig(config, context)
+
+        self.base_dir: Path = self.plugin_config.data_dir
+        self.raw_dir: Path = self.plugin_config.raw_dir
+        self.categories_dir: Path = self.plugin_config.categories_dir
+        self.cache_dir: Path = self.plugin_config.cache_dir
+
+        # 配置统一通过 self.plugin_config 读取（pydantic 模型）。
+        # v2.7.5+ 删除了 _sync_all_config() 实例属性镜像。
+
+        # 初始化核心服务类
+        self.cache_service = CacheService(self.cache_dir)
+        self.db_service = DatabaseService(self.cache_dir / "emoji.db")
+        self.command_handler = CommandHandler(self)
+        self.web_server = None
+        self.plugin_api = PluginAPI(self)
+        self.plugin_api.register(context)
+
+        self.event_handler = EventHandler(self)
+        self.image_processor_service = ImageProcessorService(self)
+        self.meme_selector = MemeSelector(self)
+        self.task_scheduler = TaskScheduler()
+
+        # 初始化自然语言情绪分析器（新增）
+        self.smart_emotion_matcher = SmartEmotionMatcher(self)
+
+        self.index_manager = IndexManager(self)
+        self._emoji_sender_engine = MemeSenderEngine(self)
+        self.maintenance = MaintenanceService(self)
+        self.migration_service = MigrationService(self)
+
+        # 运行时属性
+        self._terminated: bool = False  # 终止标志位，防止重复清理
+        # 强制捕获窗口已迁移到 EventHandler
+
+    def __getattr__(self, name: str):
+        """将未定义的属性访问自动代理到 plugin_config。
+
+        v2.7.5+ 配置统一通过 plugin_config (Pydantic 模型) 管理，
+        但 core/ 中部分代码仍直接访问 plugin_instance.steal_meme 等。
+        通过 __getattr__ 自动代理，无需逐个修改调用方。
+        """
+        if name == "plugin_config":
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute 'plugin_config'")
+        cfg = self.__dict__.get("plugin_config")
+        if cfg is not None and hasattr(cfg, name):
+            return getattr(cfg, name)
+        # 区分：plugin_config 未初始化 vs. 属性完全不存在
+        if cfg is None:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}' "
+                f"(plugin_config 尚未初始化)"
+            )
+        raise AttributeError(
+            f"'{type(self).__name__}' object has no attribute '{name}' "
+            f"(plugin_config 中也不存在该属性)"
+        )
+
+    def _load_vision_provider_id(self) -> str:
+        """加载视觉模型提供商ID。"""
+        provider_id = getattr(self.plugin_config, "vision_provider_id", "")
+        return str(provider_id).strip() if provider_id else ""
+
+    def _apply_prompts(self, prompts: dict) -> None:
+        """应用提示词配置。"""
+        for key, value in prompts.items():
+            setattr(self, key, value)
+        final_prompts = self.plugin_config.get_prompts(prompts)
+        self.image_processor_service.update_config(
+            emoji_classification_prompt=final_prompts.get("emoji_classification_prompt"),
+            emoji_classification_with_filter_prompt=final_prompts.get(
+                "emoji_classification_with_filter_prompt"
+            ),
+        )
+
+    def _auto_merge_existing_categories(self) -> None:
+        """自动合并已存在的分类目录到配置中。
+
+        注意：基于用户当前已加载的 categories（来自 categories.json）而非
+        DEFAULT_CATEGORIES 作为合并基线。这样用户主动删除的预定义类别不会
+        被重新加回，仅自动发现磁盘上用户未配置的自定义类别。
+        """
+        current = list(getattr(self, "categories", None) or [])
+        # 兼容：若 categories 尚未加载，回退到已存储配置或默认列表
+        if not current:
+            current = list(getattr(self.plugin_config, "categories", None) or [])
+        if not current:
+            current = list(getattr(self.plugin_config, "DEFAULT_CATEGORIES", []) or [])
+        current_set = set(current)
+        protected = set(getattr(self.plugin_config, "DEFAULT_CATEGORIES", []) or [])
+        discovered: set[str] = set()
+        try:
+            if self.categories_dir.exists():
+                for child in self.categories_dir.iterdir():
+                    if not child.is_dir():
+                        continue
+                    key = child.name.strip()
+                    if not key or key == "unknown":
+                        continue
+                    try:
+                        if any(p.is_file() for p in child.iterdir()):
+                            discovered.add(key)
+                    except OSError:
+                        discovered.add(key)
+        except Exception as e:
+            logger.warning(f"[Config] 扫描分类目录时出错: {e}")
+        try:
+            index = (
+                self.db_service.get_index_cache_readonly()
+                if self.db_service.count_total() > 0
+                else {}
+            )
+            for meta in index.values():
+                if not isinstance(meta, dict):
+                    continue
+                cat = str(meta.get("category", "")).strip()
+                if not cat or cat == "unknown":
+                    continue
+                discovered.add(cat)
+        except Exception as e:
+            logger.warning(f"[Config] 从索引合并分类时出错: {e}")
+        to_add = sorted(
+            cat
+            for cat in (discovered - current_set)
+            # 仅自动发现「自定义」类别；用户已删除的预定义类别即使磁盘上
+            # 仍有残留文件也不会被重新加回（避免重启后复活已被删除的预定义分类）。
+            if cat not in protected
+        )
+        if not to_add:
+            return
+        merged_categories = current + to_add
+        self.update_config({"categories": merged_categories})
+        self.plugin_config.ensure_category_dirs(to_add)
+
+    def _validate_config(self) -> bool:
+        """验证配置参数的有效性。"""
+        cfg = self.plugin_config
+        errors = []
+        fixed = []
+        fixed_values = {}
+        if not isinstance(cfg.max_reg_num, int) or cfg.max_reg_num <= 0:
+            errors.append("最大表情数量必须大于0的整数")
+            fixed.append("最大表情数量已重置为100")
+            fixed_values["max_reg_num"] = 100
+        if not isinstance(cfg.meme_chance, (int, float)) or not (0 <= cfg.meme_chance <= 1):
+            errors.append("表情发送概率必须在0-1之间")
+            fixed.append("表情发送概率已重置为0.4")
+            fixed_values["meme_chance"] = 0.4
+        if cfg.steal_mode not in ("probability", "cooldown"):
+            errors.append(f"偷图模式 '{cfg.steal_mode}' 无效，必须为 probability 或 cooldown")
+            fixed.append("偷图模式已重置为 probability")
+            fixed_values["steal_mode"] = "probability"
+        if not isinstance(cfg.steal_chance, (int, float)) or not (0 <= cfg.steal_chance <= 1):
+            errors.append("偷图概率必须在0-1之间")
+            fixed.append("偷图概率已重置为0.6")
+            fixed_values["steal_chance"] = 0.6
+        if not isinstance(cfg.steal_pool_capacity, int) or cfg.steal_pool_capacity < 10:
+            errors.append("待审核池容量必须是不小于10的整数")
+            fixed.append("待审核池容量已重置为200")
+            fixed_values["steal_pool_capacity"] = 200
+        if errors:
+            logger.warning(f"配置验证发现问题: {'; '.join(errors)}")
+        if fixed:
+            logger.info(f"配置已自动修复: {'; '.join(fixed)}")
+            try:
+                self.update_config(fixed_values)
+            except Exception as e:
+                logger.error(f"持久化配置修复失败: {e}")
+        return True
+
+    def _get_event_handler(
+        self,
+        *,
+        log_message: str | None = None,
+        log_level: str = "warning",
+    ):
+        """获取可用的 EventHandler 实例，集中记录缺失日志。"""
+        event_handler = getattr(self, "event_handler", None)
+        if event_handler is None and log_message:
+            if log_level == "debug":
+                logger.debug(log_message)
+            elif log_level == "error":
+                logger.error(log_message)
+            else:
+                logger.warning(log_message)
+        return event_handler
+
+    def _safe_create_task(self, coro, *, name: str = "") -> asyncio.Task:
+        """创建 fire-and-forget task，并复用 TaskScheduler 的异常日志。"""
+        return TaskScheduler.create_detached_task(coro, name=name)
+
+    def _precheck_image_file(self, file_path: str) -> tuple[bool, str]:
+        """轻量校验图片，避免明显无效文件进入 VLM 流水线。"""
+        path = Path(file_path)
+        if not path.exists():
+            return False, f"图片文件不存在: {file_path}"
+        if not path.is_file():
+            return False, f"路径不是文件: {file_path}"
+        if path.suffix.lower() not in PluginAPI.ALLOWED_IMAGE_EXTS:
+            return False, f"不支持的图片类型: {path.suffix or '无扩展名'}"
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            return False, f"无法读取图片文件: {e}"
+        if size <= 0:
+            return False, "图片文件为空"
+        if size > 25 * 1024 * 1024:
+            return False, "图片文件过大，超过 25MB"
+        try:
+            with Image.open(path) as img:
+                img.verify()
+        except Exception as e:
+            return False, f"图片格式校验失败: {e}"
+        return True, ""
+
+    def get_event_target(self, event: AstrMessageEvent) -> tuple[str, str]:
+        if self.plugin_config is None:
+            return "", ""
+        try:
+            return self.plugin_config.get_event_target(event)
+        except Exception:
+            return "", ""
+
+    def _is_action_enabled_for_event(self, action: str, event: AstrMessageEvent) -> bool:
+        """检查指定操作是否在当前事件中启用。"""
+        if self.plugin_config is None:
+            return True
+        try:
+            return bool(self.plugin_config.is_action_allowed(action, event))
+        except Exception:
+            return True
+
+    def is_send_enabled_for_event(self, event: AstrMessageEvent) -> bool:
+        return self._is_action_enabled_for_event("send", event)
+
+    def is_steal_enabled_for_event(self, event: AstrMessageEvent) -> bool:
+        return self._is_action_enabled_for_event("steal", event)
+
+    def begin_force_capture(self, event: AstrMessageEvent, seconds: int) -> None:
+        """委托给 EventHandler。"""
+        event_handler = self._get_event_handler(
+            log_message="event_handler 未初始化，无法进入强制接收模式"
+        )
+        if event_handler is None:
+            return
+        event_handler.begin_force_capture(event, seconds)
+
+    def get_force_capture_entry(self, event: AstrMessageEvent) -> dict[str, object] | None:
+        """委托给 EventHandler。"""
+        event_handler = self._get_event_handler(
+            log_message="event_handler 未初始化，无法获取强制接收状态",
+            log_level="debug",
+        )
+        if event_handler is None:
+            return None
+        return event_handler.get_force_capture_entry(event)
+
+    def consume_force_capture(self, event: AstrMessageEvent) -> None:
+        """委托给 EventHandler。"""
+        event_handler = self._get_event_handler(
+            log_message="event_handler 未初始化，无法消费强制接收状态",
+            log_level="debug",
+        )
+        if event_handler is None:
+            return
+        event_handler.consume_force_capture(event)
+
+    def _apply_plugin_config_updates(self, config_dict: dict) -> None:
+        """将更新字典写回 PluginConfig，跳过已从 schema 移除的旧键。"""
+        fields = getattr(type(self.plugin_config), "model_fields", None)
+        if fields is None:
+            fields = getattr(type(self.plugin_config), "__fields__", {})
+        for k, v in config_dict.items():
+            if fields is not None and k not in fields:
+                logger.debug(f"[Config] 忽略已移除的配置键: {k}")
+                continue
+            setattr(self.plugin_config, k, v)
+        self._sync_similarity_weights()
+
+    def _sync_similarity_weights(self) -> None:
+        """把文字距离融合权重同步到 text_similarity 模块（魔法数字 → 配置项）。"""
+        try:
+            from .core.search import text_similarity
+
+            cfg = self.plugin_config
+            preset = cfg.SIM_WEIGHT_PRESETS.get(
+                getattr(cfg, "sim_weight_preset", "balanced"), cfg.SIM_WEIGHT_PRESETS["balanced"]
+            )
+            text_similarity.configure_similarity(
+                weights={
+                    "ngram": preset["ngram"],
+                    "cosine": preset["cosine"],
+                    "substring": preset["substring"],
+                    "char": preset["char"],
+                    "edit": preset["edit"],
+                },
+                negation_penalty=preset["negation"],
+            )
+        except Exception as e:
+            logger.warning(f"[Config] 同步相似度权重失败: {e}")
+
+    def _sync_image_processor_from_runtime(self) -> None:
+        cfg = self.plugin_config
+        final_prompts = cfg.get_prompts(
+            {
+                "EMOJI_CLASSIFICATION_PROMPT": getattr(self, "EMOJI_CLASSIFICATION_PROMPT", None),
+                "EMOJI_CLASSIFICATION_WITH_FILTER_PROMPT": getattr(
+                    self, "EMOJI_CLASSIFICATION_WITH_FILTER_PROMPT", None
+                ),
+            }
+        )
+        self.image_processor_service.update_config(
+            categories=list(cfg.categories or []) or list(cfg.DEFAULT_CATEGORIES),
+            content_filtration=cfg.content_filtration,
+            vision_provider_id=self._load_vision_provider_id(),
+            emoji_classification_prompt=final_prompts.get("emoji_classification_prompt"),
+            emoji_classification_with_filter_prompt=final_prompts.get(
+                "emoji_classification_with_filter_prompt"
+            ),
+        )
+
+    def update_config(self, config_dict: dict):
+        """从配置字典更新插件配置。"""
+        if not config_dict:
+            return
+        try:
+            if self.plugin_config:
+                self._apply_plugin_config_updates(config_dict)
+                self._sync_image_processor_from_runtime()
+                try:
+                    cats = list(self.plugin_config.categories or []) or list(
+                        self.plugin_config.DEFAULT_CATEGORIES
+                    )
+                    self.plugin_config.ensure_category_dirs(cats)
+                except Exception as e:
+                    logger.warning(f"[Config] 创建分类目录失败: {e}")
+                logger.debug("[Config] 配置已更新，下次 LLM 请求将使用新分类")
+        except Exception as e:
+            logger.error(f"更新配置失败: {e}")
+
+    # ===== 门面委托：MemeSenderEngine =====
+    _emoji_turn_state = lambda self, event: self._emoji_sender_engine.emoji_turn_state(event)  # noqa: E731
+    _get_auto_emoji_session_key = (  # noqa: E731
+        lambda self, event: self._emoji_sender_engine.get_auto_emoji_session_key(event)
+    )
+    _should_skip_auto_emoji_by_gate = (  # noqa: E731
+        lambda self, text: self._emoji_sender_engine.should_skip_auto_emoji_by_gate(text)
+    )
+    _is_auto_emoji_cooldown_ready = (  # noqa: E731
+        lambda self, event: self._emoji_sender_engine.is_auto_emoji_cooldown_ready(event)
+    )
+    _normalize_auto_meme_chance = (  # noqa: E731
+        lambda self: self._emoji_sender_engine.normalize_auto_meme_chance()
+    )
+    _resolve_auto_emoji_turn_permission = (  # noqa: E731
+        lambda self, event: self._emoji_sender_engine._resolve_with_log(event)
+    )
+    _claim_auto_emoji_turn = lambda self, event: self._emoji_sender_engine.claim_auto_emoji_turn(  # noqa: E731
+        event
+    )
+    _prune_auto_emoji_cooldowns = (  # noqa: E731
+        lambda self, now: self._emoji_sender_engine.prune_auto_emoji_cooldowns(now)
+    )
+    _mark_auto_emoji_sent = lambda self, event: self._emoji_sender_engine.mark_auto_emoji_sent(  # noqa: E731
+        event
+    )
+    _cancel_pending_auto_emoji = (  # noqa: E731
+        lambda self, event, reason="new_message": self._emoji_sender_engine.cancel_pending_auto_emoji(
+            event, reason
+        )
+    )
+    _schedule_auto_emoji_task = (  # noqa: E731
+        lambda self, event, task: self._emoji_sender_engine.schedule_auto_emoji_task(event, task)
+    )
+    _try_send_emoji = lambda self, event, emotions, text: self._emoji_sender_engine.try_send_emoji(  # noqa: E731
+        event, emotions, text
+    )
+    _get_meme_send_delay = lambda self: self._emoji_sender_engine.get_meme_send_delay()  # noqa: E731
+    _async_analyze_and_send_emoji = (  # noqa: E731
+        lambda self,
+        event,
+        text,
+        emotions,
+        **kw: self._emoji_sender_engine.async_analyze_and_send_emoji(event, text, emotions, **kw)
+    )
+
+    @filter.command_group("magpie", alias={"喜鹊"})
+    def magpie(self):
+        """表情包喜鹊管理指令"""
+        pass
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("on")
+    async def meme_on(self, event: AstrMessageEvent):
+        """开启表情包偷取功能，自动收集群聊中的表情包。"""
+        async for result in self.command_handler.meme_on(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("off")
+    async def meme_off(self, event: AstrMessageEvent):
+        """关闭表情包偷取功能，停止收集新表情包。"""
+        async for result in self.command_handler.meme_off(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("auto_on")
+    async def auto_on(self, event: AstrMessageEvent):
+        """开启自动发送表情包，聊天时根据情绪自动发送。"""
+        async for result in self.command_handler.auto_on(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("auto_off")
+    async def auto_off(self, event: AstrMessageEvent):
+        """关闭自动发送表情包。"""
+        async for result in self.command_handler.auto_off(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("group")
+    async def group_filter(
+        self,
+        event: AstrMessageEvent,
+        scope: str = "",
+        list_name: str = "",
+        action: str = "",
+        target: str = "",
+        target_id: str = "",
+    ):
+        """管理群聊黑白名单。用法: /magpie group <wl|bl> <add|del|clear|show> [群号]"""
+        async for result in self.command_handler.group_filter(
+            event, scope, list_name, action, target, target_id
+        ):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("偷")
+    async def capture(self, event: AstrMessageEvent):
+        """进入强制接收模式，30秒内发送的图片将直接入库。"""
+        async for result in self.command_handler.capture(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("natural_analysis")
+    async def toggle_natural_analysis(self, event: AstrMessageEvent, action: str = ""):
+        """切换情绪识别模式。用法: /magpie natural_analysis <on|off>"""
+        async for result in self.command_handler.toggle_natural_analysis(event, action):
+            yield result
+
+    @magpie.command("emotion_stats")
+    async def emotion_analysis_stats(self, event: AstrMessageEvent):
+        """查看情绪分析统计信息和当前模式。"""
+        async for result in self.command_handler.emotion_analysis_stats(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("clear_emotion_cache")
+    async def clear_emotion_cache(self, event: AstrMessageEvent):
+        """清空情绪分析缓存，释放内存。"""
+        async for result in self.command_handler.clear_emotion_cache(event):
+            yield result
+
+    @magpie.command("status")
+    async def status(self, event: AstrMessageEvent):
+        """查看插件运行状态和表情包统计信息。"""
+        async for result in self.command_handler.status(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("tag_stats")
+    async def tag_stats(self, event: AstrMessageEvent, limit: str = ""):
+        """标签/场景统计：高频标签、低频噪声标签、零标签条目（打标质量体检）。用法: /magpie tag_stats [N]"""
+        async for result in self.command_handler.tag_stats(event, limit):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("clean", priority=-100)
+    async def clean(self, event: AstrMessageEvent, mode: str = ""):
+        """清理原始图片缓存（不影响已分类的表情包）。"""
+        async for result in self.command_handler.clean(event, mode):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("capacity")
+    async def enforce_capacity(self, event: AstrMessageEvent):
+        """立即执行容量控制，清理超出上限的旧表情包。"""
+        async for result in self.command_handler.enforce_capacity(event):
+            yield result
+
+    @magpie.command("list")
+    async def list_images(
+        self,
+        event: AstrMessageEvent,
+        category: str = "",
+        limit: str = "10",
+        page: str = "1",
+    ):
+        """列出已收集的表情包。用法: /magpie list [分类] [数量]"""
+        async for result in self.command_handler.list_images(event, category, limit, page):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("delete")
+    async def delete_image(self, event: AstrMessageEvent, identifier: str = ""):
+        """删除指定表情包。用法: /magpie delete <序号|文件名>"""
+        async for result in self.command_handler.delete_image(event, identifier):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("blacklist")
+    async def blacklist_image(self, event: AstrMessageEvent, identifier: str = ""):
+        """拉黑指定表情包。用法: /magpie blacklist <序号|文件名>"""
+        async for result in self.command_handler.blacklist_image(event, identifier):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("scope")
+    async def set_image_scope(
+        self, event: AstrMessageEvent, identifier: str = "", scope_mode: str = ""
+    ):
+        """设置表情包作用域。用法: /magpie scope <序号|文件名> <public|local>"""
+        async for result in self.command_handler.set_image_scope(event, identifier, scope_mode):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("migrate")
+    async def migrate_legacy(
+        self, event: AstrMessageEvent, action: str = "", source: str = ""
+    ):
+        """从旧插件迁移数据。用法: /magpie migrate [check|apply|move] [旧数据目录]"""
+        async for result in self.command_handler.migrate_legacy(event, action, source):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @magpie.command("rebuild_index")
+    async def rebuild_index(self, event: AstrMessageEvent):
+        """重建表情包索引，用于修复索引异常或版本迁移。"""
+        async for result in self.command_handler.rebuild_index(event):
+            yield result
+
+    async def _search_meme_candidates(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        *,
+        limit: int = 5,
+        idx: dict | None = None,
+    ):
+        """委托给 MemeSelector.smart_search。"""
+        if idx is None:
+            idx = (
+                self.db_service.get_index_cache_readonly()
+                if self.db_service.count_total() > 0
+                else {}
+            )
+
+        return await self.meme_selector.smart_search(query, limit=limit, idx=idx, event=event)
+
+    def _find_similar_categories(self, query: str, top_n: int = 3) -> list[str]:
+        """找到与查询词最相似的多个分类，委托给 MemeSelector。"""
+        return self.meme_selector.find_similar_categories(query, top_n)
+
+    @filter.llm_tool(name=SEARCH_MEME_TOOL_NAME)
+    async def search_meme(self, event: AstrMessageEvent, query: str):
+        """从插件索引中搜索表情包候选；不要直接浏览表情库目录或发送本地文件。
+
+        Args:
+            query(string): 2-8 个检索关键词。优先写图上文字、角色名、画面或语气，例如“猫猫 震惊 怎么会这样”。
+
+        使用建议：
+        - 这是从表情库选图的唯一入口；不要使用文件、终端或通用消息工具绕过它
+        - 若候选不合适，换图上原文、角色名或更具体的画面词再次调用本工具
+
+        返回值：
+        返回候选表情包列表，每个包含：
+        - 编号：用于调用 magpie_send_meme
+        - 分类：浏览分区，仅供参考
+        - 角色 / 图上文字 / 描述：选图时优先看这些
+
+        根据候选的图上文字、角色和描述选择最贴合的一张，然后调用 magpie_send_meme；不要猜测或传递文件路径。
+        """
+        event = unwrap_event(event)
+        query = str(query or "").strip()
+        logger.info(f"[Tool] LLM 搜索表情包: {query}")
+
+        turn_state = self._emoji_turn_state(event)
+
+        try:
+            if not query:
+                yield "搜索失败：缺少 query 参数。请传入你当前心情词，例如：开心、无语、尴尬、感谢。"
+                return
+
+            if not self.is_send_enabled_for_event(event):
+                yield "搜索失败：当前群聊已禁用表情包功能"
+                return
+
+            if self.db_service.count_total() > 0:
+                idx = self.db_service.get_index_cache_readonly()
+            else:
+                logger.debug("索引未加载，正在加载...")
+                await self.index_manager.load_index()
+                idx = self.db_service.get_index_cache_readonly()
+
+            # smart_search 已内置关键词映射和模糊匹配（阈值0.4）
+            results = await self._search_meme_candidates(
+                event, query, limit=self.MAX_SEARCH_RESULTS, idx=idx
+            )
+
+            if not results:
+                similar = self._find_similar_categories(query, top_n=3)
+                suggestion = f"未找到与'{query}'匹配的表情包。"
+                if similar:
+                    suggestion += "\n\n您是否想找以下分类？\n- " + "\n- ".join(similar)
+                cats = self.plugin_config.get_categories()
+                suggestion += "\n\n可用分类：" + ", ".join(cats[:10])
+                if len(cats) > 10:
+                    suggestion += f" 等共{len(cats)}个分类"
+                logger.warning(f"[Tool] 未找到匹配: {query}, 推荐: {similar}")
+                yield suggestion
+                return
+
+            candidates = []
+            result_lines = [f"找到 {len(results)} 个匹配的表情包：\n"]
+
+            for i, (path, desc, emotion, tags) in enumerate(results):
+                if os.path.exists(path):
+                    meta = idx.get(path, {}) if isinstance(idx, dict) else {}
+                    raw_scenes = meta.get("scenes", None) if isinstance(meta, dict) else None
+                    if not raw_scenes:
+                        raw_scenes = meta.get("scene", None) if isinstance(meta, dict) else None
+
+                    scenes_items = normalize_label_list(raw_scenes)
+                    scenes_str = ", ".join(scenes_items)
+                    overlay_text = str(meta.get("overlay_text", "") or "") if isinstance(meta, dict) else ""
+                    character_key = str(meta.get("character", "") or "") if isinstance(meta, dict) else ""
+                    work_name = str(meta.get("work", "") or "") if isinstance(meta, dict) else ""
+                    character_name = character_key
+                    if character_key:
+                        info_map = getattr(self.plugin_config, "character_info", None) or {}
+                        info = info_map.get(character_key) if isinstance(info_map, dict) else None
+                        if isinstance(info, dict) and info.get("name"):
+                            character_name = str(info.get("name"))
+                    source = str(meta.get("source", "") or "") if isinstance(meta, dict) else ""
+                    scope_mode = str(meta.get("scope_mode", "public") or "public") if isinstance(meta, dict) else "public"
+                    origin_target = str(meta.get("origin_target", "") or "") if isinstance(meta, dict) else ""
+                    use_count = int(meta.get("use_count", 0) or 0) if isinstance(meta, dict) else 0
+
+                    candidate_id = f"emoji_{i + 1}"
+                    candidates.append(
+                        {
+                            "id": candidate_id,
+                            "path": path,
+                            "desc": desc,
+                            "emotion": emotion,
+                            "tags": tags,
+                            "scenes": scenes_str,
+                            "overlay_text": overlay_text,
+                            "character": character_key,
+                            "work": work_name,
+                            "source": source,
+                            "scope_mode": scope_mode,
+                            "origin_target": origin_target,
+                            "use_count": use_count,
+                        }
+                    )
+                    result_lines.append(f"\n[{i + 1}] 分类：{emotion}")
+                    if work_name:
+                        result_lines.append(f"    作品：{work_name}")
+                    if character_name:
+                        result_lines.append(f"    角色：{character_name}")
+                    if overlay_text:
+                        result_lines.append(f"    图上文字：{overlay_text}")
+                    if tags:
+                        result_lines.append(f"    标签：{tags}")
+                    if scenes_str:
+                        result_lines.append(f"    画面短语：{scenes_str}")
+                    result_lines.append(f"    作用域：{scope_mode}")
+                    if use_count:
+                        result_lines.append(f"    使用次数：{use_count}")
+                    if source == "qq_store":
+                        result_lines.append("    来源：QQ商城")
+                    result_lines.append(f"    描述：{desc}")
+
+            if not candidates:
+                yield "搜索失败：找到的表情包文件均已丢失"
+                return
+
+            turn_state.set_candidates(candidates)
+            result_lines.append(
+                f"\n\n下一步请从候选中选择一项，并调用 {self.SEND_MEME_TOOL_NAME}(emoji_id=编号) 发送。"
+                "候选不合适时请换关键词再次搜索；不要用文件、终端或通用消息工具直接发送表情库文件。"
+            )
+
+            result_text = "\n".join(result_lines)
+            logger.info(f"[Tool] 搜索完成，返回 {len(candidates)} 个候选")
+            yield result_text
+
+        except Exception as e:
+            logger.error(f"[Tool] 搜索表情包失败: {e}", exc_info=True)
+            yield f"搜索出错：{e}"
+
+    @filter.llm_tool(name=SEND_MEME_TOOL_NAME)
+    async def send_meme(self, event: AstrMessageEvent, emoji_id: int):
+        """发送 magpie_search_meme 返回的候选表情包；不要猜测或直接传递文件路径。
+
+        选择原则：优先发送能代表你"当前心情词"的候选项。
+
+        Args:
+            emoji_id(number): 表情包编号（从 magpie_search_meme 返回的候选列表中选择）
+
+        """
+        event = unwrap_event(event)
+        logger.info(f"[Tool] LLM 选择发送表情包编号: {emoji_id}")
+        turn_state = self._emoji_turn_state(event)
+
+        try:
+            if not self.is_send_enabled_for_event(event):
+                yield "发送失败：reason=send_disabled。当前会话已禁用表情包发送功能，请不要继续调用发送工具。"
+                return
+
+            if emoji_id is None:
+                yield f"发送失败：reason=missing_id。缺少 emoji_id 参数。请先调用 {self.SEARCH_MEME_TOOL_NAME}，再传入候选编号。"
+                return
+
+            try:
+                emoji_id = int(emoji_id)
+            except Exception:
+                yield f"发送失败：reason=invalid_id。编号 {emoji_id} 无法解析为整数，请输入有效的数字编号。"
+                return
+
+            candidates = turn_state.get_candidates()
+            if not candidates:
+                yield f"发送失败：reason=candidate_expired。没有可用候选列表。请先调用 {self.SEARCH_MEME_TOOL_NAME} 重新搜索。"
+                return
+
+            if emoji_id < 1 or emoji_id > len(candidates):
+                yield f"发送失败：reason=invalid_id。编号 {emoji_id} 无效。可选编号范围：1-{len(candidates)}，请重新选择。"
+                return
+
+            selected = candidates[emoji_id - 1]
+            path = selected["path"]
+            desc = selected["desc"]
+            emotion = selected["emotion"]
+
+            if not os.path.exists(path):
+                yield f"发送失败：reason=file_missing。表情包文件已丢失。\n你选择的是：编号 {emoji_id}，分类 {emotion}，描述 {desc}\n请重新搜索并选择其他表情包。"
+                return
+
+            if not self.meme_selector.is_path_allowed_for_event(path, event):
+                yield "发送失败：reason=scope_denied。该表情包被限制为仅来源会话可发送，请选择 public 表情或重新搜索。"
+                return
+
+            logger.info(f"[Tool] 发送选中的表情包: {path} (emotion={emotion})")
+            send_mode = await self.meme_selector.send_emoji_message(event, path)
+            if not send_mode:
+                yield "发送失败：reason=send_failed。表情包编码或平台发送失败，请重新搜索或选择其他候选。"
+                return
+            sent_as_sticker = send_mode == "telegram_sticker"
+
+            await self.meme_selector.record_emoji_usage(path, trigger="llm_tool")
+            await self._mark_auto_emoji_sent(event)
+            turn_state.mark_active_sent()
+
+            mode_desc = "Telegram贴纸" if sent_as_sticker else "图片"
+            success_msg = f"发送成功（{mode_desc}）。\n\n你发送的表情包：\n- 编号：{emoji_id}\n- 分类：{emotion}\n- 描述：{desc}"
+            logger.info(f"[Tool] {success_msg}")
+            yield success_msg
+            return
+
+        except Exception as e:
+            logger.error(f"[Tool] 发送表情包失败: {e}", exc_info=True)
+            yield f"发送出错：{e}"
+            return
+
+    @filter.llm_tool(name=STEAL_MEME_TOOL_NAME)
+    async def steal_sticker(
+        self,
+        event: AstrMessageEvent,
+        image_ref: str,
+        emotion: str = "",
+        work: str = "",
+        character: str = "",
+        action: str = "",
+        overlay_text: str = "",
+        tags: str = "",
+        desc: str = "",
+        scenes: str = "",
+    ):
+        """偷取图片入库。你可以顺手把已知信息当参数一并传入，准确率远高于事后视觉分析。
+
+        使用时机：
+        - 用户说"偷一下"/"收了这张图"时直接调用本工具。
+        - 你看到当前消息里有适合作为表情包的图片时，也可以调用本工具补充素材库。
+
+        关于标注参数（重要）：
+        - 除 image_ref 以外全部可选，但建议尽量填。视觉模型很难认出"哪部作品的哪个角色"，
+          而你往往能从对话上下文里知道。你填的字段会直接入库，空着的字段才交给视觉模型补。
+        - 最有价值的三个是 work（作品名）、character（角色名）、action（图中动作）。
+        - 只有把握时才填；不确定就留空，不要编造，也不要填"未知""不知道"之类的占位词。
+
+        注意：
+        - image_ref 必须从当前消息中已有的图片 URL 或文件路径中选择，必填。
+        - 工具返回结果会标注哪些字段来自你的参数、哪些由视觉模型补全，可用于向用户说明。
+        - 图片内容审核不可被参数绕过；当偷取总开关关闭或当前会话被黑白名单禁用时，本工具会拒绍入库。
+
+        Args:
+            image_ref(string): 图片 URL 或文件路径，从当前消息已有的 Image URL 中选择。必填。
+            emotion(string): 情绪分类，如 happy/sad/angry/troll，也可写中文"开心""无语"。不确定就留空。
+            work(string): 作品名，即图片出自哪部动画/游戏/漫画，如"排球少年""原神"。
+            character(string): 角色名，只填一个主要角色，如"五条悟""刻晴"。
+            action(string): 图中角色在做什么，如"捂脸""竖大拇指""瞪眼"。
+            overlay_text(string): 图片上印的文字，逐字照抄，没有就留空。
+            tags(string): 额外检索关键词，多个用逗号分隔，最多 3 个。
+            desc(string): 一句话描述这张图，20 字以内。
+            scenes(string): 适合发送的场景，最多 2 个，逗号分隔，如"被吐槽时,认输时"。
+        """
+        event = unwrap_event(event)
+        try:
+            if not self.plugin_config.steal_meme:
+                yield "偷取失败：表情包偷取功能未开启，请先在插件配置中启用"
+                return
+
+            if not self.is_steal_enabled_for_event(event):
+                yield "偷取失败：当前群聊已禁用偷取功能"
+                return
+
+            # LLM 自带的结构化标注（需求 2）。
+            param_mode = str(
+                getattr(self.plugin_config, "llm_steal_param_mode", "merge") or "merge"
+            ).strip().lower()
+            if param_mode not in self.LLM_STEAL_PARAM_MODES:
+                param_mode = "merge"
+
+            hints: LlmMemeHints | None = None
+            if param_mode != "vlm_only":
+                hints = LlmMemeHints.from_tool_args(
+                    self.plugin_config,
+                    emotion=emotion,
+                    character=character,
+                    work=work,
+                    action=action,
+                    overlay_text=overlay_text,
+                    tags=tags,
+                    desc=desc,
+                    scenes=scenes,
+                )
+                if hints.rejected_category:
+                    logger.debug(
+                        f"[Tool] LLM 传的分类无法识别，交给视觉模型: {hints.rejected_category!r}"
+                    )
+                if not hints.has_semantics:
+                    hints = None
+
+            # llm_first 且信息足够时跳过视觉模型，省一次多模态调用。
+            skip_vlm = bool(
+                hints is not None and param_mode == "llm_first" and hints.is_complete
+            )
+
+            event_handler = self._get_event_handler(log_message="event_handler 未初始化，无法下载图片")
+            if event_handler is None:
+                yield "偷取失败：内部服务未初始化"
+                return
+
+            image_ref, source = await self._resolve_steal_image_ref(
+                event, image_ref, event_handler
+            )
+            if not image_ref:
+                yield "偷取失败：缺少 image_ref 参数，请提供当前消息中的图片 URL"
+                return
+
+            logger.info(f"[Tool] LLM 请求偷取: ref={image_ref[:80]}")
+
+            # 下载图片
+            if image_ref.startswith("http://") or image_ref.startswith("https://"):
+                temp_path, _is_gif = await event_handler._download_to_temp(image_ref, log_download=True)
+                if not temp_path or not os.path.exists(temp_path):
+                    yield f"偷取失败：无法下载图片 {image_ref[:100]}"
+                    return
+                is_temp = True
+            elif image_ref.startswith("file:///"):
+                local_path = image_ref[8:]
+                if len(local_path) > 2 and local_path[0] == "/" and local_path[2] == ":":
+                    local_path = local_path[1:]
+                temp_path = os.path.abspath(local_path)
+                is_temp = False
+            else:
+                temp_path = os.path.abspath(image_ref)
+                is_temp = False
+
+            if not os.path.exists(temp_path):
+                hint = ""
+                # 当 LLM 传来的是非 URL 形式（相对路径/裸文件名）且仍无法定位时，
+                # 提示它从消息中已有的 Image URL 选择（issue #88）。
+                ref_value = str(image_ref or "").strip()
+                if ref_value and not (
+                    ref_value.startswith("http://")
+                    or ref_value.startswith("https://")
+                    or ref_value.startswith("file:")
+                ):
+                    hint = "（请确认 image_ref 是当前消息中的图片 URL 或本地绝对路径）"
+                yield f"偷取失败：图片文件不存在: {temp_path}{hint}"
+                return
+
+            precheck_ok, precheck_reason = self._precheck_image_file(temp_path)
+            if not precheck_ok:
+                if is_temp:
+                    await safe_remove_file(temp_path)
+                yield f"偷取失败：{precheck_reason}"
+                return
+
+            # 记下入库存前已有的路径，之后 diff 找出 VLM 分析结果
+            idx_before = await self.index_manager.load_index()
+            before_paths = set(idx_before.keys()) if idx_before else set()
+
+            if skip_vlm:
+                logger.info(f"[Tool] 使用 LLM 传参直接入库（跳过视觉模型）: {temp_path}")
+            else:
+                logger.info(f"[Tool] VLM 分析入库: {temp_path}")
+            extra_meta = self._build_steal_tool_extra_meta(
+                event, image_ref, source=source
+            )
+            success, merged_idx = await self._process_image(
+                event,
+                temp_path,
+                is_temp=is_temp,
+                extra_meta=extra_meta,
+                add_method="llm",
+                llm_hints=hints,
+                skip_vlm=skip_vlm,
+            )
+
+            if not success:
+                if skip_vlm:
+                    yield "偷取失败：图片已存在、相似度过高或存储失败"
+                    return
+                fail_open_hint = (
+                    "。已启用审核失败开放策略，但明确审核不通过或重复图片不会入库"
+                    if getattr(self, "content_filtration_fail_open", False)
+                    else ""
+                )
+                yield f"偷取失败：VLM 分析未通过（可能已存在、内容不合适或无法识别为表情包）{fail_open_hint}"
+                return
+
+            if merged_idx:
+                await self.index_manager.save_index(merged_idx)
+                new_paths = set(merged_idx.keys()) - before_paths
+                if new_paths:
+                    new_entry = next((merged_idx[p] for p in new_paths if isinstance(merged_idx.get(p), dict)), None)
+                    if new_entry and isinstance(new_entry, dict):
+                        yield self._format_steal_tool_result(
+                            new_entry, hints=hints, skip_vlm=skip_vlm
+                        )
+                        return
+                yield "偷取成功！已入库"
+            else:
+                yield "偷取成功但索引更新失败"
+
+        except Exception as e:
+            logger.error(f"[Tool] 偷取表情包失败: {e}", exc_info=True)
+            yield f"偷取出错：{e}"
+            return
+
+    async def _resolve_steal_image_ref(
+        self,
+        event: AstrMessageEvent,
+        image_ref: str,
+        event_handler: Any,
+    ) -> tuple[str, str]:
+        """Resolve an explicit or current-message image reference for steal_sticker.
+
+        修复 issue #88：LLM 偶尔会传相对路径（如 ``./image.png``）或仅文件名。
+        之前的实现直接把 ``explicit_ref`` 原样返回，下游 ``os.path.abspath``
+        会拼到 CWD（如 ``/AstrBot/image.png``），触发"图片文件不存在"。
+
+        现在对非 URL 形式的 ``image_ref``，优先在当前消息的 ``Image`` 组件中
+        按 basename 匹配，再回退到组件自带的 url/file/path/convert_to_file_path。
+        """
+        explicit_ref = str(image_ref or "").strip()
+
+        # 1. URL 形式（http/https/file 协议）直接信任 LLM 传入
+        if explicit_ref and (
+            explicit_ref.startswith("http://")
+            or explicit_ref.startswith("https://")
+            or explicit_ref.startswith("file:")
+        ):
+            return explicit_ref, "llm_tool"
+
+        # 2. 尝试把显式 ref 解析为消息内某张图片的真实位置
+        resolved_explicit = ""
+        if explicit_ref:
+            resolved_explicit = await self._resolve_image_ref_against_event(
+                event, explicit_ref
+            )
+            if resolved_explicit:
+                return resolved_explicit, "llm_tool"
+
+        # 3. 未提供 ref 或 ref 解析失败：取当前消息中第一张可用图片
+        try:
+            for comp in event.get_messages():
+                if not isinstance(comp, MessageImage):
+                    continue
+                for attr in ("url", "file", "path"):
+                    value = str(getattr(comp, attr, "") or "").strip()
+                    if value:
+                        return value, "llm_tool"
+                if hasattr(comp, "convert_to_file_path"):
+                    path = await comp.convert_to_file_path()
+                    path = str(path or "").strip()
+                    if path:
+                        return path, "llm_tool"
+        except Exception:
+            pass
+
+        # 4. 兜底：QQ 商城表情 URL
+        try:
+            store_urls = event_handler._extract_store_emoji_urls(event)
+        except Exception:
+            store_urls = []
+        if store_urls:
+            return str(store_urls[0] or "").strip(), "qq_store"
+
+        # 5. 都没有的话才把显式 ref 原样回传（让下游报错时提示更准确）
+        return explicit_ref, "llm_tool"
+
+    async def _resolve_image_ref_against_event(
+        self,
+        event: AstrMessageEvent,
+        image_ref: str,
+    ) -> str:
+        """在当前消息的 Image 组件中按 basename / 绝对路径 / 已有本地路径匹配。
+
+        返回：
+            - 命中组件时：组件真实的 url/file/path，或 ``convert_to_file_path()`` 结果；
+            - 未命中或异常时：空串。
+        """
+        ref_norm = image_ref.replace("\\", "/").strip()
+        ref_basename = Path(ref_norm).name if ref_norm else ""
+
+        try:
+            comps = list(event.get_messages())
+        except Exception:
+            return ""
+
+        for comp in comps:
+            if not isinstance(comp, MessageImage):
+                continue
+
+            # a. basename 命中组件的 url/file/path
+            if ref_basename:
+                for attr in ("url", "file", "path"):
+                    value = str(getattr(comp, attr, "") or "").strip()
+                    if not value:
+                        continue
+                    value_norm = value.replace("\\", "/").split("?", 1)[0].split("#", 1)[0]
+                    value_basename = value_norm.rsplit("/", 1)[-1]
+                    if value_basename and value_basename == ref_basename:
+                        return value
+
+            # b. ref 是已存在的绝对路径且等于组件本地路径
+            if os.path.isabs(image_ref):
+                for attr in ("file", "path"):
+                    value = str(getattr(comp, attr, "") or "").strip()
+                    if value and canonicalize_path(value) == canonicalize_path(image_ref):
+                        return value
+
+            # c. 调用组件自身方法把图片落到本地，返回真实可读路径
+            if hasattr(comp, "convert_to_file_path"):
+                try:
+                    path = await comp.convert_to_file_path()
+                    path = str(path or "").strip()
+                except Exception:
+                    path = ""
+                if not path:
+                    continue
+                path_norm = path.replace("\\", "/")
+                path_basename = path_norm.rsplit("/", 1)[-1].split("?")[0]
+                if ref_basename and path_basename == ref_basename:
+                    return path
+                if os.path.isabs(image_ref) and canonicalize_path(path) == canonicalize_path(
+                    image_ref
+                ):
+                    return path
+
+        return ""
+
+    def _build_steal_tool_extra_meta(
+        self,
+        event: AstrMessageEvent,
+        image_ref: str,
+        *,
+        source: str = "llm_tool",
+    ) -> dict[str, Any] | None:
+        extra_meta: dict[str, Any] = {}
+        try:
+            scope, target_id = self.get_event_target(event)
+        except Exception:
+            scope, target_id = "", ""
+        if scope and target_id:
+            extra_meta["origin_target"] = f"{scope}:{target_id}"
+
+        if image_ref.startswith("http://") or image_ref.startswith("https://"):
+            extra_meta["origin_url"] = image_ref
+        if source:
+            extra_meta["source"] = source
+        return extra_meta or None
+
+    def _format_steal_tool_result(
+        self,
+        entry: dict[str, Any],
+        *,
+        hints: LlmMemeHints | None = None,
+        skip_vlm: bool = False,
+    ) -> str:
+        """拼出给 LLM 看的入库回报，并标注字段来源。"""
+
+        def _join(value: Any) -> str:
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(v) for v in value if str(v).strip())
+            return str(value or "")
+
+        lines = [f"- 分类：{entry.get('category', '?')}"]
+        for label, key in (("作品", "work"), ("角色", "character")):
+            value = str(entry.get(key) or "").strip()
+            if value:
+                lines.append(f"- {label}：{value}")
+        lines.append(f"- 标签：{_join(entry.get('tags')) or '无'}")
+        lines.append(f"- 描述：{str(entry.get('desc') or '') or '无'}")
+        lines.append(f"- 场景：{_join(entry.get('scenes')) or '无'}")
+        overlay = str(entry.get("overlay_text") or "").strip()
+        if overlay:
+            lines.append(f"- 图上文字：{overlay}")
+
+        provided = hints.provided_fields() if hints is not None else []
+        if provided and skip_vlm:
+            origin = f"（全部采用你传的参数：{'、'.join(provided)}，未调用视觉模型）"
+        elif provided:
+            origin = f"（你提供：{'、'.join(provided)}；其余由视觉模型补全）"
+        else:
+            origin = "（全部由视觉模型分析）"
+
+        return "偷取成功！" + origin + "\n" + "\n".join(lines)
+
+    async def _process_image(
+        self,
+        event: AstrMessageEvent | None,
+        file_path: str,
+        is_temp: bool = False,
+        idx: dict[str, Any] | None = None,
+        is_platform_emoji: bool = False,
+        extra_meta: dict[str, Any] | None = None,
+        to_pending: bool = False,
+        add_method: str = "auto",
+        llm_hints: LlmMemeHints | None = None,
+        skip_vlm: bool = False,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """统一处理图片的方法，包括过滤、分类、存储和索引更新。"""
+        try:
+            success, updated_idx = await asyncio.wait_for(
+                self.image_processor_service.process_image(
+                    event=event,
+                    file_path=file_path,
+                    is_temp=is_temp,
+                    idx=idx,
+                    categories=self.plugin_config.get_categories(),
+                    content_filtration=self.plugin_config.content_filtration,
+                    is_platform_emoji=is_platform_emoji,
+                    extra_meta=extra_meta,
+                    to_pending=to_pending,
+                    add_method=add_method,
+                    llm_hints=llm_hints,
+                    skip_vlm=skip_vlm,
+                ),
+                timeout=self.IMAGE_PROCESSING_TIMEOUT_SECONDS,
+            )
+            if idx is None and updated_idx is not None and not to_pending:
+                full_idx = await self.index_manager.load_index()
+                full_idx.update(updated_idx)
+                return success, full_idx
+            return success, updated_idx
+        except asyncio.TimeoutError:
+            logger.warning(f"图片处理超时: {file_path}")
+            if is_temp:
+                await safe_remove_file(file_path)
+            return False, idx if idx is not None else {}
+        except Exception as e:
+            logger.error(f"处理图片失败: {e}")
+            if is_temp:
+                await safe_remove_file(file_path)
+            return False, idx if idx is not None else {}
+
+    @filter.event_message_type(EventMessageType.ALL)
+    @filter.platform_adapter_type(PlatformAdapterType.ALL)
+    async def on_message(self, event: AstrMessageEvent):
+        """消息监听：偷取消息中的图片并分类存储。"""
+        # 每条新消息到达时重置回合状态，防止上一轮的标记影响当前对话
+        if getattr(self, "auto_meme_cancel_on_new_message", True):
+            self._cancel_pending_auto_emoji(event)
+        self._emoji_sender_engine.reset_turn_state(event)
+        event_handler = self._get_event_handler(
+            log_message="[Magpie] event_handler 未初始化，跳过消息处理",
+            log_level="debug",
+        )
+        if event_handler is None:
+            return
+        try:
+            await event_handler.on_message(event)
+        except Exception as e:
+            logger.error(f"[Magpie] 处理消息时发生错误: {e}", exc_info=True)
+
+    @filter.on_llm_tool_respond()
+    async def _track_external_image_delivery(
+        self,
+        event: AstrMessageEvent,
+        tool,
+        tool_args: dict | None,
+        tool_result,
+    ) -> None:
+        """记录 LLM 通过 AstrBot 通用消息工具发送的图片，避免同轮再被动发表情。"""
+        if str(getattr(tool, "name", "") or "") != "send_message_to_user":
+            return
+        if not getattr(event, "_has_send_oper", False):
+            return
+        result_contents = getattr(tool_result, "content", None)
+        if not isinstance(result_contents, list) or not any(
+            "Message sent to session" in str(getattr(item, "text", "") or "")
+            for item in result_contents
+        ):
+            return
+        messages = tool_args.get("messages") if isinstance(tool_args, dict) else None
+        if not isinstance(messages, list):
+            return
+        sent_image = any(
+            isinstance(item, dict)
+            and str(item.get("type", "") or "").strip().lower() == "image"
+            for item in messages
+        )
+        if not sent_image:
+            return
+        self._emoji_turn_state(event).mark_active_sent()
+        logger.debug("[Magpie] LLM 已通过通用消息工具发送图片，跳过本轮被动表情")
+
+    @filter.on_decorating_result(priority=100)
+    async def _prepare_emoji_response(self, event: AstrMessageEvent):
+        """LLM 回复完成后异步发送表情包（不阻塞回复）。"""
+        result = event.get_result()
+        if result is None:
+            return False
+        if not result.is_llm_result():
+            return False
+        if any(isinstance(comp, MessageImage) for comp in getattr(result, "chain", [])):
+            return False
+        turn_state = self._emoji_turn_state(event)
+        if turn_state.is_active_sent():
+            return False
+        text = result.get_plain_text() or ""
+        if not text.strip():
+            return False
+
+        turn_allowed = await self._resolve_auto_emoji_turn_permission(event)
+        if not turn_allowed:
+            return False
+        if self._should_skip_auto_emoji_by_gate(text):
+            return False
+
+        if not self._claim_auto_emoji_turn(event):
+            return False
+        user_message = ""
+        try:
+            user_message = event.get_message_str() or ""
+        except Exception:
+            pass
+        task = self._safe_create_task(
+            self._async_analyze_and_send_emoji(event, text, [], user_message=user_message),
+            name="emoji_analyze_passive",
+        )
+        self._schedule_auto_emoji_task(event, task)
+        return True
+
+    async def initialize(self):
+        """初始化插件运行时资源。
+
+        加载情绪映射和提示词等运行时需要的资源。
+        __init__ 仅做属性赋值，IO/目录/密码等操作统一在此执行。
+        """
+        await super().initialize()
+        try:
+            self._validate_config()
+            if (
+                self._get_event_handler(
+                    log_message="[Magpie] event_handler 未初始化，插件无法启动",
+                    log_level="error",
+                )
+                is None
+            ):
+                raise RuntimeError("event_handler 未初始化")
+            self.plugin_config.ensure_base_dirs()
+            self.plugin_config.ensure_category_dirs(
+                list(self.plugin_config.categories or []) or list(
+                    self.plugin_config.DEFAULT_CATEGORIES
+                )
+            )
+            await self.image_processor_service._auto_migrate_categories()
+            self._auto_merge_existing_categories()
+            try:
+                plugin_dir = Path(__file__).parent
+                prompts_path = plugin_dir / "prompts.json"
+                if prompts_path.exists():
+                    if aiofiles:
+                        async with aiofiles.open(prompts_path, encoding="utf-8-sig") as f:
+                            content = await f.read()
+                        content = content.lstrip("\ufeff")
+                        prompts = json.loads(content)
+                    else:
+                        with open(prompts_path, encoding="utf-8-sig") as f:
+                            prompts = json.loads(f.read().lstrip("\ufeff"))
+                    self._apply_prompts(prompts)
+            except Exception as e:
+                logger.error(f"初始化提示词失败: {e}")
+            await self.index_manager.load_index()
+            await self._migrate_blacklist_to_db()
+            await self.maintenance.run_startup_cleanup()
+            self._sync_image_processor_from_runtime()
+            self._sync_similarity_weights()  # 启动时把持久化的文字距离权重同步到 text_similarity 模块
+            self.maintenance.start_periodic_tasks()
+            await self.event_handler.start_background_workers()
+
+            self._hint_legacy_migration()
+
+            # 初始化嵌入向量服务 + 回填旧数据（仅在开启嵌入检索时）
+            if self.plugin_config.enable_embedding_search:
+                try:
+                    smart_service = getattr(self.meme_selector, "_smart_select_service", None)
+                    if smart_service and smart_service._embedding_service:
+                        await smart_service._embedding_service.initialize()
+                        # 同步回填旧数据（分批处理，每批 20 条）
+                        backfilled = await smart_service._embedding_service.backfill_existing(batch_size=20)
+                        if backfilled > 0:
+                            logger.info(f"[Embedding] 旧数据回填完成: {backfilled} 条新向量")
+                except Exception as e:
+                    logger.warning(f"[Embedding] 初始化失败: {e}")
+
+            logger.info("[Magpie] 插件初始化完成")
+        except Exception as e:
+            logger.error(f"初始化插件失败: {e}")
+            raise
+
+    def _hint_legacy_migration(self) -> None:
+        """首次启动且本地还没有数据时，提示可以从旧插件迁移。"""
+        try:
+            if self.db_service.count_total() > 0:
+                return
+            info = self.migration_service.detect_legacy()
+            if not info.get("found"):
+                return
+            total = int(info.get("emoji_count") or 0) + int(info.get("pending_count") or 0)
+            if total <= 0:
+                return
+            logger.info(
+                f"[Magpie] 检测到旧插件数据（{info.get('source_dir')}，约 {total} 张），"
+                "可发送 /magpie migrate 预演迁移，确认后 /magpie migrate apply 执行。"
+            )
+        except Exception as e:
+            logger.debug(f"[Magpie] 旧数据探测跳过: {e}")
+
+    async def terminate(self):
+        """插件销毁生命周期钩子。"""
+        if self._terminated:
+            return
+        self._terminated = True
+        try:
+            await self.task_scheduler.cancel_task("raw_cleanup_loop")
+            await self.task_scheduler.cancel_task("capacity_control_loop")
+        except Exception:
+            pass
+        if self.cache_service:
+            try:
+                await self.cache_service.cleanup()
+            except Exception:
+                pass
+        if self.task_scheduler:
+            try:
+                await self.task_scheduler.cleanup()
+            except Exception:
+                pass
+        # 关闭嵌入向量服务
+        try:
+            smart_service = getattr(self.meme_selector, "_smart_select_service", None)
+            if smart_service and smart_service._embedding_service:
+                await smart_service._embedding_service.close()
+        except Exception:
+            pass
+
+        if self.image_processor_service:
+            try:
+                self.image_processor_service.cleanup()
+            except Exception:
+                pass
+        if self.command_handler:
+            try:
+                self.command_handler.cleanup()
+            except Exception:
+                pass
+        if self.event_handler:
+            try:
+                await self.event_handler.stop_background_workers()
+            except Exception:
+                pass
+            try:
+                await self.event_handler.cleanup_async()
+            except Exception:
+                pass
+            try:
+                self.event_handler.cleanup()
+            except Exception:
+                pass
+        await super().terminate()
+        logger.info("[Magpie] 插件资源清理完成")
+
+    async def _migrate_blacklist_to_db(self) -> None:
+        """将旧的 blacklist_cache.json 迁移到数据库 blacklist 表。
+
+        幂等：DB 已有同样 hash 时跳过。迁移后保留 JSON 文件直到下一次写黑名单不再写它，
+        避免在长期运行实例中破坏现有读取链路。
+        """
+        try:
+            db = getattr(self, "db_service", None)
+            if db is None or not hasattr(db, "add_blacklist_batch"):
+                return
+            cached = self.cache_service.get_cache("blacklist_cache") or {}
+            if not isinstance(cached, dict) or not cached:
+                return
+            hashes: dict[str, int] = {}
+            for h, ts in cached.items():
+                try:
+                    hashes[str(h)] = int(ts) if ts else int(time.time())
+                except Exception:
+                    hashes[str(h)] = 0
+            imported = await db.add_blacklist_batch(hashes)
+            if imported > 0:
+                logger.info(f"[DB] 黑名单从缓存迁移完成，新增 {imported} 条")
+        except Exception as e:
+            logger.warning(f"[DB] 黑名单迁移失败: {e}")

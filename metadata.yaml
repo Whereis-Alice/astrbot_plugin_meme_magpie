@@ -1,0 +1,63 @@
+name: astrbot_plugin_meme_magpie
+display_name: 表情包喜鹊
+author: Whereis-Alice
+author_url: https://github.com/Whereis-Alice
+desc: 让 AstrBot 自动收集群聊里的表情包，用视觉模型识别内容并分类入库，聊天时按情绪自动挑一张发出去。支持 LLM 主动检索/发送/收录表情包（可由 LLM 直接回填作品、角色、动作等参数），提供 WebUI 管理面板、批量导入与批量重新识别（可配置并发与速率上限，避免触发上游 429）、语义检索、存储清理，并内置从 astrbot_plugin_stealer 迁移数据的指令。
+short_desc: 自动收集群聊表情包，AI 识别分类入库，聊天时按情绪自动发送，并提供 WebUI 管理。
+repo: https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie
+category: 娱乐
+tags:
+  - 表情包
+  - 图片识别
+  - 情绪匹配
+  - 语义检索
+  - LLM 工具调用
+  - WebUI
+  - 群聊
+help: |
+  表情包喜鹊：自动收集群聊表情包，用视觉模型识别分类入库，聊天时按情绪自动发送。
+
+  命令前缀为 /magpie，也可用中文别名 /喜鹊。
+
+  查询指令（所有人可用）：
+  - /magpie status：查看运行状态与表情包统计
+  - /magpie list [分类] [每页数量] [页码]：列出已收集的表情包
+  - /magpie emotion_stats：查看情绪分布统计
+
+  开关指令（仅管理员）：
+  - /magpie on | /magpie off：开启 / 关闭表情包收集
+  - /magpie auto_on | /magpie auto_off：开启 / 关闭自动发送
+  - /magpie group：查看或切换当前会话的收集开关
+  - /magpie 偷：进入 30 秒强制收录模式，期间群里的图片一律收下
+  - /magpie natural_analysis：切换「自然语言分析」开关
+
+  管理指令（仅管理员）：
+  - /magpie delete <序号|文件名>：删除表情包
+  - /magpie blacklist <序号|文件名>：删除并加入黑名单，之后不再重复收录
+  - /magpie scope <序号|文件名> <public|local>：设置表情包的可见范围
+  - /magpie clean [force]：清理未分类的暂存图片
+  - /magpie capacity：查看容量与磁盘占用
+  - /magpie tag_stats [N]：标签体检（高频 / 低频 / 零标签）
+  - /magpie clear_emotion_cache：清空情绪匹配缓存
+  - /magpie rebuild_index：重建检索索引
+
+  数据迁移（仅管理员，用于从 astrbot_plugin_stealer 搬家）：
+  - /magpie migrate：预演迁移，只报告将要搬多少数据，不写入
+  - /magpie migrate check：检查是否能找到旧插件的数据目录
+  - /magpie migrate apply：执行迁移（复制文件，旧数据保留，可重复执行）
+  - /magpie migrate move：执行迁移并移动文件（不保留旧副本，慎用）
+
+  对话中 LLM 可自动调用三个工具：magpie_search_meme 检索表情包、magpie_send_meme 发送表情包、
+  magpie_steal_meme 主动收录图片（LLM 可以顺手把作品名、角色、动作、情绪等信息一起写进库里）。
+
+  WebUI：在插件详情页点击「表情包管理」进入管理面板，可浏览 / 编辑 / 批量导入 / 批量重新识别，
+  批量任务支持设置并发数与每分钟请求上限，并实时显示进度、预计剩余时间和失败明细。
+version: 1.0.0
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - qq_official
+astrbot_version: ">=4.24.1"
+pages:
+  - name: dashboard
+    title: 表情包管理
