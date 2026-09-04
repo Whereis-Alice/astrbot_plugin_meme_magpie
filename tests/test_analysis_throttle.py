@@ -184,6 +184,13 @@ def test_fatal_markers_win_over_retryable_markers():
     assert is_retryable(exc_cn) is False
 
 
+def test_mime_rejection_is_fatal_even_with_retryable_status():
+    # 中转常把「这个图片格式我不收」包成 500，只看状态码会一直空转重试。
+    assert is_retryable(_FakeHTTPError(500, "mime type is not supported by Gemini")) is False
+    assert is_retryable(_FakeHTTPError(500, "convert_request_failed")) is False
+    assert is_retryable(_FakeHTTPError(503, "unsupported image")) is False
+
+
 def test_bool_attributes_are_ignored():
     exc = RuntimeError("weird")
     exc.status = True

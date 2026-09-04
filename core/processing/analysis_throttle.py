@@ -45,6 +45,13 @@ _FATAL_MARKERS: tuple[str, ...] = (
     "arrearage",
     "余额不足",
     "欠费",
+    # 上游明确不收这个图片格式：换格式由 VLM 调用层负责，队列层重试没有意义
+    "mime type is not supported",
+    "mime_type is not supported",
+    "unsupported mime",
+    "convert_request_failed",
+    "unsupported image",
+    "不支持的图片格式",
 )
 _RETRYABLE_MARKERS: tuple[str, ...] = (
     "429",
@@ -110,15 +117,17 @@ def is_retryable(exc: BaseException) -> bool:
     """判断异常是否属于「上游临时性错误」，退避后重试有意义。"""
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
+    # 文本里的致命特征优先于状态码：不少中转会把「这张图/这个 key 永远不行」
+    # 包成 500 这类看起来可重试的状态码返回，只看状态码会一直空转重试。
+    text = f"{type(exc).__name__} {exc}".lower()
+    if any(marker in text for marker in _FATAL_MARKERS):
+        return False
     status = _extract_status(exc)
     if status is not None:
         if status in _FATAL_STATUSES:
             return False
         if status in _RETRYABLE_STATUSES:
             return True
-    text = f"{type(exc).__name__} {exc}".lower()
-    if any(marker in text for marker in _FATAL_MARKERS):
-        return False
     return any(marker in text for marker in _RETRYABLE_MARKERS)
 
 
