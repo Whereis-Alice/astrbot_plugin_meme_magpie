@@ -2453,6 +2453,234 @@ input, select, textarea {
     color: #f6a5a5;
 }
 
+/* ===== 识别失败检测（描述为空的清单） ===== */
+.md-badge {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 9px;
+    background: rgba(239, 68, 68, 0.85);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.md-scope-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.md-scope-tab {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 12px;
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.md-scope-tab:hover {
+    border-color: var(--gold-dim);
+}
+
+.md-scope-tab.active {
+    border-color: var(--gold-primary);
+    background: rgba(var(--accent-rgb), 0.1);
+}
+
+.md-scope-tab b {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-main);
+}
+
+.md-scope-tab.active b {
+    color: var(--gold-bright);
+}
+
+.md-scope-tab em {
+    font-style: normal;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.md-list {
+    display: grid;
+    gap: 10px;
+}
+
+.md-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+}
+
+.md-row.is-done {
+    border-color: rgba(var(--accent-rgb), 0.45);
+    background: rgba(var(--accent-rgb), 0.06);
+}
+
+.md-thumb {
+    width: 96px;
+    height: 96px;
+    flex: 0 0 96px;
+    object-fit: contain;
+    background: var(--bg-main);
+    border: 1px solid var(--glass-border);
+    border-radius: 6px;
+}
+
+.md-thumb-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    text-align: center;
+}
+
+.md-row-body {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 8px;
+}
+
+.md-row-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.md-chip {
+    padding: 2px 8px;
+    border: 1px solid var(--glass-border);
+    border-radius: 999px;
+    background: rgba(var(--accent-soft-rgb, 212 175 55), 0.06);
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.md-chip.warn {
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(239, 68, 68, 0.08);
+    color: #f6a5a5;
+}
+
+.md-row-body textarea.codex-input {
+    padding: 8px 10px;
+    font-size: 0.85rem;
+    resize: vertical;
+}
+
+.md-row-actions {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 96px;
+}
+
+.md-btn {
+    padding: 6px 10px;
+    border: 1px solid var(--glass-border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-main);
+    font-family: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.md-btn:hover:not(:disabled) {
+    border-color: var(--gold-primary);
+    color: var(--gold-bright);
+}
+
+.md-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.md-btn.primary {
+    border-color: var(--gold-dim);
+    background: rgba(var(--accent-rgb), 0.12);
+    color: var(--gold-bright);
+}
+
+.md-done-tag {
+    text-align: center;
+    font-size: 0.7rem;
+    color: var(--gold-bright);
+    letter-spacing: 0.05em;
+}
+
+.md-empty {
+    padding: 32px 16px;
+    border: 1px dashed var(--glass-border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-align: center;
+}
+
+.md-empty.is-error {
+    border-style: solid;
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #f6a5a5;
+}
+
+.md-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 12px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏：缩略图变小、按钮横排，避免行内被挤成一条 */
+@media (max-width: 640px) {
+    .md-thumb {
+        width: 64px;
+        height: 64px;
+        flex: 0 0 64px;
+    }
+
+    .md-row {
+        flex-wrap: wrap;
+    }
+
+    .md-row-actions {
+        flex-direction: row;
+        width: 100%;
+        min-width: 0;
+    }
+
+    .md-btn {
+        flex: 1;
+    }
+
+    .md-done-tag {
+        align-self: center;
+    }
+}
+
 
 .inventory-grid .item-slot {
     animation: fadeIn 0.3s ease-out both;

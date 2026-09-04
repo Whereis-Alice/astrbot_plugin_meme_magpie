@@ -351,7 +351,8 @@
         "assign_character": "Assign Character",
         "open_navigation": "Open navigation",
         "assign_work": "Set work",
-        "reanalyze": "Re-analyze"
+        "reanalyze": "Re-analyze",
+        "missing_desc": "Missing description"
       },
       "empty": {
         "library_title": "No stickers yet",
@@ -633,7 +634,29 @@
         "auto_switched": "\"{from}\" has 0 images right now, so it switched to \"{to}\" automatically.",
         "empty_library": "The library is empty right now, so there is nothing to re-analyze.",
         "empty_pending": "The review queue is empty right now, so there is nothing to re-analyze.",
-        "scan_failed": "Could not read the image counts - the backend or network may be down. Close and reopen this dialog to try again."
+        "scan_failed": "Could not read the image counts - the backend or network may be down. Close and reopen this dialog to try again.",
+        "target_no_desc": "Only those with no description",
+        "target_hint_no_desc": "\"No description\" is the narrower option: it only picks entries whose description is empty. Those are effectively unsearchable, so they are worth fixing first.",
+        "target_empty": "\"{target}\" has 0 images right now - pick a different scope before you start."
+      },
+      "missing_desc": {
+        "title": "Missing descriptions",
+        "tip": "Find entries with an empty description - the ones the list shows as \"No description\" - and fill them in one by one or re-analyze the whole batch",
+        "intro": "These entries have no description, which is what the list shows as \"No description\". They are usually left behind by a timeout, upstream rate limiting, or a model that returned nothing. Description is the main thing search matches on, so an empty one is effectively unsearchable. Write one by hand, or hand the whole batch to bulk re-analysis.",
+        "loading": "Checking…",
+        "empty": "Nothing on this side is missing a description.",
+        "no_tags": "No tags either",
+        "placeholder": "Describe what the image expresses, e.g. a cat with wide eyes, completely shocked",
+        "done": "Filled",
+        "analyze_one": "Analyze this one",
+        "analyze_tip": "Run vision analysis again; the result only goes into the box and is written when you click Save Only",
+        "analyze_filled": "The result went into the box. Click Save Only to write it.",
+        "analyze_empty": "This run returned no description. Write one yourself, or try again later.",
+        "empty_draft": "The description is still empty - type one, or click Analyze this one first.",
+        "saved": "Description saved.",
+        "truncated": "The review queue holds {total} records; this check covered the newest {cap}. Clear this batch and reopen to keep going further down.",
+        "batch": "Re-analyze these {n}",
+        "load_failed": "Could not load the list - the backend or network may be down."
       }
     }
   }

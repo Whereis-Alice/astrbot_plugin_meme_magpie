@@ -285,6 +285,15 @@ export const TEMPLATE = `
                             </svg>
                             {{ t('pages.dashboard.actions.reanalyze', '重新识别') }}
                         </button>
+                        <button @click="openMissingDescModal()" class="codex-btn"
+                            :title="t('pages.dashboard.missing_desc.tip', '找出描述为空、也就是列表里显示「暂无描述」的条目，逐张补写或整批重新识别')">
+                            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.5 0L3.2 16.25A2 2 0 005 19z" />
+                            </svg>
+                            {{ t('pages.dashboard.actions.missing_desc', '识别失败') }}
+                            <span v-if="stats.no_desc > 0" class="md-badge">{{ stats.no_desc }}</span>
+                        </button>
                         <button @click="runStorageCleanup" class="codex-btn">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1205,6 +1214,17 @@ export const TEMPLATE = `
                             </span>
                         </label>
                         <label class="reanalyze-target"
+                            :class="{ 'is-disabled': !reanalyzeScanning && reanalyzeNoDescCount === 0 }">
+                            <input type="radio" value="no_desc" v-model="reanalyzeForm.target"
+                                @change="onReanalyzeTargetPick"
+                                :disabled="!reanalyzeScanning && reanalyzeNoDescCount === 0">
+                            <span>
+                                <b>{{ t('pages.dashboard.reanalyze.target_no_desc', '只补没有描述的') }}</b>
+                                <em v-if="reanalyzeScanning">{{ t('pages.dashboard.reanalyze.counting', '统计中…') }}</em>
+                                <em v-else>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeNoDescCount) }}</em>
+                            </span>
+                        </label>
+                        <label class="reanalyze-target"
                             :class="{ 'is-disabled': !reanalyzeScanning && reanalyzeAllCount === 0 }">
                             <input type="radio" value="all" v-model="reanalyzeForm.target"
                                 @change="onReanalyzeTargetPick"
@@ -1225,9 +1245,13 @@ export const TEMPLATE = `
                         <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.empty_pending', '待审核池现在是空的，没有可以重新识别的图片。') }}</span>
                         <span v-else>{{ t('pages.dashboard.reanalyze.empty_library', '表情库现在是空的，没有可以重新识别的图片。') }}</span>
                     </p>
+                    <p v-else-if="reanalyzeTargetEmptyNote" class="hint-text reanalyze-note">{{ reanalyzeTargetEmptyNote }}</p>
                     <p class="hint-text" style="margin:8px 0 0">
                         <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_hint_pending', '「缺失标注」指没有标签或没有描述的待审核图片，常见于识别失败或超时留下的记录。') }}</span>
                         <span v-else>{{ t('pages.dashboard.reanalyze.target_hint', '「缺失标注」指没有标签或没有描述的表情包，通常是手动上传或早期入库的。') }}</span>
+                    </p>
+                    <p class="hint-text" style="margin:4px 0 0">
+                        {{ t('pages.dashboard.reanalyze.target_hint_no_desc', '「没有描述」是更窄的一档：只挑描述为空的，这类图基本搜不出来，值得优先补。') }}
                     </p>
                 </div>
 
@@ -1832,6 +1856,101 @@ export const TEMPLATE = `
             </button>
             <button @click="savePendingEdit(true)" class="codex-btn primary" style="flex:1">
                 {{ t('pages.dashboard.actions.save_and_approve', 'Save & Approve') }}
+            </button>
+        </div>
+    </div>
+</div>
+
+<div v-if="missingDescOpen" class="modal-overlay" data-modal-guard="missingDesc"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeMissingDescModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
+    <div class="modal-panel modal-lg">
+        <div class="modal-panel-corner-bl"></div>
+        <div class="modal-panel-corner-br"></div>
+
+        <div class="modal-header">
+            <h2>{{ t('pages.dashboard.missing_desc.title', '识别失败检测') }}</h2>
+            <button @click="closeMissingDescModal" class="modal-close">
+                <svg style="width:20px;height:20px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="modal-content">
+            <div class="modal-pad" style="width:100%">
+                <p class="hint-text" style="margin:0 0 14px">
+                    {{ t('pages.dashboard.missing_desc.intro', '这里列出描述为空的条目，也就是列表里显示「暂无描述」的那些，一般是识别超时、被限流或模型没返回内容留下的。描述是搜索的主要依据，空着就基本搜不出来。可以逐张手写补上，也可以整批交给「批量重新识别」。') }}
+                </p>
+
+                <div class="md-scope-tabs">
+                    <button type="button" class="md-scope-tab" :class="{ active: missingDescScope === 'library' }"
+                        @click="switchMissingDescScope('library')">
+                        <b>{{ t('pages.dashboard.reanalyze.scope_library', '表情库') }}</b>
+                        <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', missingDescCounts.library) }}</em>
+                    </button>
+                    <button type="button" class="md-scope-tab" :class="{ active: missingDescScope === 'pending' }"
+                        @click="switchMissingDescScope('pending')">
+                        <b>{{ t('pages.dashboard.reanalyze.scope_pending', '待审核') }}</b>
+                        <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', missingDescCounts.pending) }}</em>
+                    </button>
+                </div>
+
+                <div v-if="missingDescLoading" class="md-empty">{{ t('pages.dashboard.missing_desc.loading', '正在检查…') }}</div>
+                <div v-else-if="missingDescError" class="md-empty is-error">{{ missingDescError }}</div>
+                <div v-else-if="missingDescItems.length === 0" class="md-empty">
+                    {{ t('pages.dashboard.missing_desc.empty', '这一边没有描述为空的条目，挺好。') }}
+                </div>
+                <div v-else class="md-list">
+                    <div v-for="item in missingDescItems" :key="missingDescKey(item)" class="md-row"
+                        :class="{ 'is-done': missingDescDone[missingDescKey(item)] }">
+                        <img v-if="imageDataUrls[item.hash]" :src="imageDataUrls[item.hash]" class="md-thumb" alt="">
+                        <div v-else class="md-thumb md-thumb-empty">{{ t('pages.dashboard.messages.no_preview', 'No preview') }}</div>
+                        <div class="md-row-body">
+                            <div class="md-row-meta">
+                                <span class="md-chip">{{ getCategoryName(item.category) }}</span>
+                                <span v-if="item.work" class="md-chip">{{ item.work }}</span>
+                                <span v-if="item.character" class="md-chip">{{ item.character }}</span>
+                                <span v-for="tag in (item.tags || []).slice(0, 4)" :key="tag" class="md-chip">{{ tag }}</span>
+                                <span v-if="!item.tags || item.tags.length === 0" class="md-chip warn">{{ t('pages.dashboard.missing_desc.no_tags', '连标签也没有') }}</span>
+                            </div>
+                            <textarea v-model="missingDescDrafts[missingDescKey(item)]" rows="2" class="codex-input"
+                                :placeholder="t('pages.dashboard.missing_desc.placeholder', '写一句这张图在表达什么，例如「猫猫瞪大眼睛，一脸震惊」')"></textarea>
+                        </div>
+                        <div class="md-row-actions">
+                            <span v-if="missingDescDone[missingDescKey(item)]" class="md-done-tag">{{ t('pages.dashboard.missing_desc.done', '已补') }}</span>
+                            <button type="button" class="md-btn" @click="analyzeMissingDescRow(item)" :disabled="analyzing"
+                                :title="t('pages.dashboard.missing_desc.analyze_tip', '重跑一次视觉识别，结果只填进输入框，确认后再点「仅保存」')">
+                                <span v-if="analyzing">{{ t('pages.dashboard.actions.analyzing', 'Analyzing...') }}</span>
+                                <span v-else>{{ t('pages.dashboard.missing_desc.analyze_one', '识别这张') }}</span>
+                            </button>
+                            <button type="button" class="md-btn primary" @click="saveMissingDesc(item)"
+                                :disabled="missingDescSaving[missingDescKey(item)]">
+                                {{ t('pages.dashboard.actions.save_only', 'Save') }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="missingDescPageCount > 1" class="md-pager">
+                    <button type="button" class="md-btn" :disabled="missingDescPage <= 1"
+                        @click="missingDescGoPage(missingDescPage - 1)">{{ t('pages.dashboard.pagination.prev', 'Previous') }}</button>
+                    <span>{{ missingDescPage }} / {{ missingDescPageCount }}</span>
+                    <button type="button" class="md-btn" :disabled="missingDescPage >= missingDescPageCount"
+                        @click="missingDescGoPage(missingDescPage + 1)">{{ t('pages.dashboard.pagination.next', 'Next') }}</button>
+                </div>
+
+                <p v-if="missingDescTruncated" class="hint-text reanalyze-note">
+                    {{ t('pages.dashboard.missing_desc.truncated', '待审核池共 {total} 条，本次只检查了最新的 {cap} 条。把这批处理完再打开一次，会接着往下检查。').replace('{total}', missingDescScanned).replace('{cap}', missingDescMaxItems) }}
+                </p>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" @click="closeMissingDescModal" class="codex-btn">{{ t('pages.dashboard.actions.close', 'Close') }}</button>
+            <button type="button" @click="startMissingDescBatch" :disabled="missingDescRemaining === 0"
+                class="codex-btn primary">
+                {{ t('pages.dashboard.missing_desc.batch', '批量重新识别这 {n} 张').replace('{n}', missingDescRemaining) }}
             </button>
         </div>
     </div>

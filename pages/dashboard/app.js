@@ -41,7 +41,7 @@ createApp({
         const sidebarOpen = ref(false);
         const images = ref([]);
         const categories = ref([]);
-        const stats = reactive({ total: 0, categories: 0, today: 0 });
+        const stats = reactive({ total: 0, categories: 0, today: 0, no_desc: 0 });
         const loading = ref(true);
         const searchQuery = ref('');
         const selectedCategory = ref('');
@@ -240,6 +240,8 @@ createApp({
             upload: () => Boolean(uploadFile.value),
             batchUpload: () => batchFiles.value.length > 0,
             pendingEdit: () => Boolean(singleReanalyze.text),
+            // 「识别失败检测」里逐行手写的描述同样是草稿，没保存就不该被手滑点没
+            missingDesc: () => missingDescHasDraft(),
         };
         // 窗口里挂着后台任务的进度：此时表单已经被进度视图替掉，关掉就再也翻不回来，同样不能手滑关
         const modalBusyExtra = {
@@ -321,7 +323,9 @@ createApp({
             scope: 'library',
         });
         const reanalyzeScan = ref({
-            total: 0, missing: 0, pending_total: 0, pending_missing: 0, max_items: 5000,
+            total: 0, missing: 0, no_desc: 0,
+            pending_total: 0, pending_missing: 0, pending_no_desc: 0,
+            max_items: 5000,
         });
         const reanalyzeScanning = ref(false);
         // 用户手动点过档位后就不再自动兜底，免得抢走他的选择
@@ -329,6 +333,31 @@ createApp({
         const reanalyzeSwitchFrom = ref('');
         const reanalyzeSwitchTo = ref('');
         const reanalyzeScanFailed = ref(false);
+        // ── 识别失败检测 ───────────────────────────────────────────────
+        // 列表里显示「暂无描述」的条目，等于识别那一步没成功。描述是语义检索的主要
+        // 依据，空着基本等于这张图搜不出来，所以单独开一个窗口集中处理。
+        const missingDescOpen = ref(false);
+        const missingDescScope = ref('library');
+        const missingDescLoading = ref(false);
+        const missingDescError = ref(null);
+        const missingDescItems = ref([]);
+        const missingDescTotal = ref(0);
+        // scanned / maxItems 只用于把「这次只检查了多少条」说清楚
+        const missingDescScanned = ref(0);
+        const missingDescMaxItems = ref(5000);
+        const missingDescTruncated = ref(false);
+        const missingDescPage = ref(1);
+        const missingDescPageSize = 24;
+        // 两个作用范围各自的待补张数，用于标签页角标与底部按钮
+        const missingDescCounts = reactive({ library: 0, pending: 0 });
+        const missingDescDrafts = reactive({});
+        const missingDescSaving = reactive({});
+        const missingDescDone = reactive({});
+        // 本次窗口内已写库的张数，按作用范围分开记：关窗时据此决定刷新哪边的列表
+        const missingDescFixed = reactive({ library: 0, pending: 0 });
+        const missingDescHasDraft = () => Object.entries(missingDescDrafts).some(
+            ([key, value]) => !missingDescDone[key] && String(value || '').trim(),
+        );
         const batchTaskId = ref(null);
         const batchTaskStatus = ref(null);
         const batchTaskTotal = ref(0);
@@ -1905,8 +1934,10 @@ createApp({
                     reanalyzeScan.value = {
                         total: Number(data.total || 0),
                         missing: Number(data.missing || 0),
+                        no_desc: Number(data.no_desc || 0),
                         pending_total: Number(data.pending_total || 0),
                         pending_missing: Number(data.pending_missing || 0),
+                        pending_no_desc: Number(data.pending_no_desc || 0),
                         max_items: Number(data.max_items || 5000),
                     };
                     autoPickReanalyzeTarget();
@@ -1932,6 +1963,10 @@ createApp({
             reanalyzeIsPending.value ? reanalyzeScan.value.pending_missing : reanalyzeScan.value.missing
         ));
 
+        const reanalyzeNoDescCount = computed(() => (
+            reanalyzeIsPending.value ? reanalyzeScan.value.pending_no_desc : reanalyzeScan.value.no_desc
+        ));
+
         const reanalyzeAllCount = computed(() => (
             reanalyzeIsPending.value ? reanalyzeScan.value.pending_total : reanalyzeScan.value.total
         ));
@@ -1943,6 +1978,7 @@ createApp({
                     : t('pages.dashboard.reanalyze.target_selected', '当前勾选的表情');
             }
             if (key === 'missing') return t('pages.dashboard.reanalyze.target_missing', '只补缺失标注的');
+            if (key === 'no_desc') return t('pages.dashboard.reanalyze.target_no_desc', '只补没有描述的');
             return reanalyzeIsPending.value
                 ? t('pages.dashboard.reanalyze.target_all_pending', '全部待审核图片')
                 : t('pages.dashboard.reanalyze.target_all', '全部表情包');
@@ -1954,10 +1990,13 @@ createApp({
             const counts = {
                 selected: reanalyzeSelectedCount.value,
                 missing: reanalyzeMissingCount.value,
+                no_desc: reanalyzeNoDescCount.value,
                 all: reanalyzeAllCount.value,
             };
             const current = reanalyzeForm.target;
-            const next = ['selected', 'missing', 'all'].find((key) => (counts[key] || 0) > 0);
+            const next = ['selected', 'missing', 'no_desc', 'all'].find(
+                (key) => (counts[key] || 0) > 0,
+            );
             if ((counts[current] || 0) > 0 || !next || next === current) {
                 reanalyzeSwitchFrom.value = '';
                 reanalyzeSwitchTo.value = '';
@@ -1985,7 +2024,17 @@ createApp({
         const reanalyzeTargetCount = computed(() => {
             if (reanalyzeForm.target === 'selected') return reanalyzeSelectedCount.value;
             if (reanalyzeForm.target === 'missing') return reanalyzeMissingCount.value;
+            if (reanalyzeForm.target === 'no_desc') return reanalyzeNoDescCount.value;
             return reanalyzeAllCount.value;
+        });
+
+        // 从别处带着指定档位跳进来时（例如「识别失败检测」直接指定「只补没有描述的」），
+        // 自动兜底是关掉的。这时候档位正好 0 张，得把话说明白，别让人对着灰按钮猜。
+        const reanalyzeTargetEmptyNote = computed(() => {
+            if (reanalyzeScanning.value || reanalyzeSwitchNote.value) return '';
+            if (reanalyzeAllCount.value === 0 || reanalyzeTargetCount.value > 0) return '';
+            return t('pages.dashboard.reanalyze.target_empty', '「{target}」当前是 0 张，换一个处理范围再开始。')
+                .replace('{target}', reanalyzeTargetLabel(reanalyzeForm.target));
         });
 
         // 实际会跑的张数：受「最多处理」输入与后端硬上限双重约束
@@ -2176,10 +2225,13 @@ createApp({
                 : selectedImages.value.size > 0;
             // 张数先归零并进入「统计中」，避免上一次的旧数字先闪一下
             reanalyzeScan.value = {
-                total: 0, missing: 0, pending_total: 0, pending_missing: 0, max_items: 5000,
+                total: 0, missing: 0, no_desc: 0,
+                pending_total: 0, pending_missing: 0, pending_no_desc: 0,
+                max_items: 5000,
             };
             reanalyzeScanning.value = true;
-            reanalyzeTargetTouched.value = false;
+            // 调用方明确点名了档位就当作「用户已选」，不再自动挪走
+            reanalyzeTargetTouched.value = Boolean(target);
             reanalyzeSwitchFrom.value = '';
             reanalyzeSwitchTo.value = '';
             Object.assign(reanalyzeForm, {
@@ -2610,6 +2662,208 @@ createApp({
             );
         };
 
+        // ── 识别失败检测：先摆清单，再决定手写还是整批重跑 ─────────────────
+        const missingDescIsPending = computed(() => missingDescScope.value === 'pending');
+
+        // 表情库用 hash 定位，待审核用自增 id，加前缀避免两边撞键
+        const missingDescKey = (item) => (
+            missingDescIsPending.value ? `p:${item?.id ?? ''}` : `l:${item?.hash ?? ''}`
+        );
+
+        const missingDescRemaining = computed(
+            () => Math.max(0, Number(missingDescCounts[missingDescScope.value] || 0)),
+        );
+
+        const missingDescPageCount = computed(
+            () => Math.max(1, Math.ceil(missingDescTotal.value / missingDescPageSize)),
+        );
+
+        // 只取张数填标签页角标。这里刻意不复用 fetchReanalyzeScan：那个会顺手改
+        // reanalyzeForm 的档位，从这个窗口调用会把批量弹窗的表单搅乱。
+        const fetchMissingDescCounts = async () => {
+            try {
+                const res = await apiFetch('api/images/reanalyze-scan');
+                const data = await res.json();
+                if (!data.success) return;
+                missingDescCounts.library = Number(data.no_desc || 0);
+                missingDescCounts.pending = Number(data.pending_no_desc || 0);
+            } catch (e) {
+                console.error('Missing description scan error:', e);
+            }
+        };
+
+        const fetchMissingDesc = async (page = 1) => {
+            missingDescLoading.value = true;
+            missingDescError.value = null;
+            try {
+                const query = new URLSearchParams({
+                    scope: missingDescScope.value,
+                    page: String(page),
+                    size: String(missingDescPageSize),
+                });
+                const res = await apiFetch(`api/images/missing-description?${query.toString()}`);
+                const data = await res.json();
+                if (!data.success) {
+                    missingDescError.value = data.error
+                        || t('pages.dashboard.missing_desc.load_failed', '清单没读出来，可能是后端或网络出了问题。');
+                    return;
+                }
+                const items = Array.isArray(data.images) ? data.images : [];
+                missingDescItems.value = items;
+                missingDescTotal.value = Number(data.total || 0);
+                missingDescScanned.value = Number(data.scanned || 0);
+                missingDescMaxItems.value = Number(data.max_items || 5000);
+                missingDescTruncated.value = Boolean(data.truncated);
+                missingDescPage.value = Number(data.page || page) || 1;
+                // 后端每次都重扫，返回的张数就是最新口径，直接盖掉本地计数
+                missingDescCounts[missingDescScope.value] = missingDescTotal.value;
+                items.forEach((item) => {
+                    const key = missingDescKey(item);
+                    if (missingDescDrafts[key] === undefined) missingDescDrafts[key] = '';
+                    loadImageData(item.hash);
+                });
+            } catch (e) {
+                missingDescError.value = t('pages.dashboard.missing_desc.load_failed', '清单没读出来，可能是后端或网络出了问题。');
+                console.error('Missing description list error:', e);
+            } finally {
+                missingDescLoading.value = false;
+            }
+        };
+
+        const openMissingDescModal = (scope = 'library') => {
+            missingDescScope.value = scope === 'pending' ? 'pending' : 'library';
+            missingDescOpen.value = true;
+            missingDescItems.value = [];
+            missingDescTotal.value = 0;
+            missingDescScanned.value = 0;
+            missingDescTruncated.value = false;
+            missingDescPage.value = 1;
+            missingDescError.value = null;
+            [missingDescDrafts, missingDescSaving, missingDescDone].forEach((table) => {
+                Object.keys(table).forEach((key) => { delete table[key]; });
+            });
+            missingDescFixed.library = 0;
+            missingDescFixed.pending = 0;
+            fetchMissingDescCounts();
+            fetchMissingDesc(1);
+        };
+
+        const closeMissingDescModal = () => {
+            missingDescOpen.value = false;
+            // 这个窗口里写进库的改动，要反映到背后的列表和统计上
+            if (missingDescFixed.library > 0) {
+                fetchImages(currentPage.value || 1);
+                fetchStats();
+            }
+            if (missingDescFixed.pending > 0) {
+                fetchPendingImages(pendingCurrentPage.value || 1);
+                fetchPendingStats();
+            }
+            missingDescFixed.library = 0;
+            missingDescFixed.pending = 0;
+        };
+
+        // 切标签页只换清单，保留已填的草稿：两边的键带前缀，不会串
+        const switchMissingDescScope = (scope) => {
+            const next = scope === 'pending' ? 'pending' : 'library';
+            if (next === missingDescScope.value) return;
+            missingDescScope.value = next;
+            missingDescItems.value = [];
+            missingDescTotal.value = 0;
+            missingDescTruncated.value = false;
+            missingDescPage.value = 1;
+            missingDescError.value = null;
+            fetchMissingDesc(1);
+        };
+
+        const missingDescGoPage = (page) => {
+            if (missingDescLoading.value) return;
+            const next = Math.min(Math.max(1, Number(page) || 1), missingDescPageCount.value);
+            if (next === missingDescPage.value) return;
+            fetchMissingDesc(next);
+        };
+
+        const saveMissingDesc = async (item) => {
+            const key = missingDescKey(item);
+            if (missingDescSaving[key]) return;
+            const text = String(missingDescDrafts[key] || '').trim();
+            if (!text) {
+                showAlert(
+                    t('pages.dashboard.missing_desc.empty_draft', '描述还是空的：自己写一句，或者先点「识别这张」。'),
+                    'error',
+                );
+                return;
+            }
+            missingDescSaving[key] = true;
+            try {
+                const isPending = missingDescIsPending.value;
+                const res = await apiFetch(isPending ? 'api/pending/update' : 'api/images/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(
+                        isPending ? { id: item.id, desc: text } : { hash: item.hash, desc: text },
+                    ),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    showAlert(data.error || t('pages.dashboard.alerts.save_failed', 'Save failed.'), 'error');
+                    return;
+                }
+                const scope = isPending ? 'pending' : 'library';
+                if (!missingDescDone[key]) {
+                    missingDescFixed[scope] += 1;
+                    missingDescCounts[scope] = Math.max(0, (missingDescCounts[scope] || 0) - 1);
+                }
+                missingDescDone[key] = true;
+                item.desc = text;
+                showAlert(t('pages.dashboard.missing_desc.saved', '描述已写入。'), 'success');
+                // 草稿全落库了就把窗口解锁，点外面能正常关
+                if (!missingDescHasDraft()) releaseModal('missingDesc');
+            } catch (e) {
+                showAlert(t('pages.dashboard.alerts.save_failed', 'Save failed.'), 'error');
+            } finally {
+                missingDescSaving[key] = false;
+            }
+        };
+
+        // 单张识别只把结果填进输入框，仍然要人点保存才写库；
+        // 顺手把已填的作品 / 角色作为已知信息带给模型，识别准确率会明显好一些。
+        const analyzeMissingDescRow = async (item) => {
+            if (!item || analyzing.value) return;
+            const key = missingDescKey(item);
+            try {
+                const payload = missingDescIsPending.value
+                    ? { pending_id: item.id }
+                    : { hash: item.hash };
+                if (item.work) payload.work = item.work;
+                if (item.character) payload.character = item.character;
+                const data = await imageAnalyzer.analyzePayload(payload);
+                const desc = String(data.description || '').trim();
+                if (!desc) {
+                    showAlert(
+                        t('pages.dashboard.missing_desc.analyze_empty', '这次识别没给出描述。可以自己写一句，或者过一会儿再试。'),
+                        'error',
+                    );
+                    return;
+                }
+                missingDescDrafts[key] = desc;
+                touchModal('missingDesc');
+                showAlert(
+                    t('pages.dashboard.missing_desc.analyze_filled', '识别结果已填进输入框，点「仅保存」才会写入。'),
+                    'success',
+                );
+            } catch (e) {
+                showAlert(e.message || t('pages.dashboard.alerts.analyze_failed', 'Analyze failed.'), 'error');
+            }
+        };
+
+        // 整批交给批量重新识别：换成那个窗口后，进度、并发和限速都能看见
+        const startMissingDescBatch = () => {
+            const scope = missingDescScope.value;
+            closeMissingDescModal();
+            openBatchReanalyzeModal('no_desc', scope);
+        };
+
         const openEmotionsModal = () => {
             emotionsOpen.value = true;
             fetchEmotions();
@@ -2839,6 +3093,7 @@ createApp({
             { key: 'batchCharacter', open: batchCharacterOpen, close: closeBatchCharacterModal },
             { key: 'batchScope', open: batchScopeOpen, close: closeBatchScopeModal },
             { key: 'pendingEdit', open: pendingEditOpen, close: closePendingEdit },
+            { key: 'missingDesc', open: missingDescOpen, close: closeMissingDescModal },
         ];
         // 每次重新打开都按「干净」算，别让上一次的输入痕迹一直把窗口锁着
         guardedModals.forEach((modal) => {
@@ -3091,6 +3346,34 @@ createApp({
             submitBatchModal,
             reanalyzeChangedCount,
             reanalyzeSuggestions,
+            reanalyzeNoDescCount,
+            reanalyzeTargetEmptyNote,
+
+            missingDescOpen,
+            missingDescScope,
+            missingDescIsPending,
+            missingDescLoading,
+            missingDescError,
+            missingDescItems,
+            missingDescTotal,
+            missingDescScanned,
+            missingDescMaxItems,
+            missingDescTruncated,
+            missingDescPage,
+            missingDescPageCount,
+            missingDescCounts,
+            missingDescDrafts,
+            missingDescSaving,
+            missingDescDone,
+            missingDescRemaining,
+            missingDescKey,
+            openMissingDescModal,
+            closeMissingDescModal,
+            switchMissingDescScope,
+            missingDescGoPage,
+            saveMissingDesc,
+            analyzeMissingDescRow,
+            startMissingDescBatch,
 
             emotionsOpen,
             newEmotion,

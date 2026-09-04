@@ -1,11 +1,15 @@
-"""批量重新识别相关纯函数的单元测试（不触发真实 VLM 与磁盘写入）。"""
+"""批量重新识别与「识别失败检测」的单元测试（不触发真实 VLM 与磁盘写入）。"""
 
+import asyncio
 import sys
 import types
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from astrbot_plugin_meme_magpie import plugin_api as plugin_api_module
 from astrbot_plugin_meme_magpie.plugin_api import PluginAPI
 
 
@@ -512,3 +516,285 @@ class TestMergeReanalysisFields:
         updates = PluginAPI._merge_reanalysis({}, self.ANALYSIS, overwrite=True)
         assert "category" not in updates
         assert updates["tags"] == ["笑"]
+# ── 识别失败（描述为空）检测 ─────────────────────────────
+
+
+class TestMissingDescription:
+    def test_blank_desc_is_missing(self):
+        assert PluginAPI._missing_description({"tags": ["笑"], "desc": ""}) is True
+        assert PluginAPI._missing_description({"tags": ["笑"], "desc": "  \n "}) is True
+        assert PluginAPI._missing_description({"desc": None}) is True
+        assert PluginAPI._missing_description({}) is True
+
+    def test_desc_present_is_enough(self):
+        # 和 _needs_reanalysis 的关键差别：只看描述，缺标签不算「识别失败」。
+        assert PluginAPI._missing_description({"tags": [], "desc": "一只笑猫"}) is False
+
+
+def _desc_index():
+    """比 _index() 多一条「有描述但没标签」，用来区分 missing 与 no_desc。"""
+    return {
+        "/d/a.png": {"hash": "h1", "tags": [], "desc": "", "created_at": 300},
+        "/d/b.png": {"hash": "h2", "tags": ["笑"], "desc": "有描述", "created_at": 100},
+        "/d/c.png": {"hash": "h3", "tags": ["哭"], "desc": "   ", "created_at": 200},
+        "/d/d.png": {"hash": "h4", "tags": [], "desc": "有描述没标签", "created_at": 50},
+    }
+
+
+def _desc_pending_rows():
+    """待审核池版本的同一组数据：id 4 是「有描述没标签」。"""
+    return [
+        {"id": 1, "path": "/p/a.png", "tags": [], "desc": "", "created_at": 300},
+        {"id": 2, "path": "/p/b.png", "tags": ["笑"], "desc": "有描述", "created_at": 100},
+        {"id": 3, "path": "/p/c.png", "tags": ["哭"], "desc": "   ", "created_at": 200},
+        {"id": 4, "path": "/p/d.png", "tags": [], "desc": "有描述没标签", "created_at": 50},
+    ]
+
+
+def _desc_api(index=None, rows=None, pending_total=None, pending_error=False):
+    """同时带正式库索引和待审核池的 PluginAPI。"""
+
+    def get_pending_paginated(page=1, page_size=20, **kwargs):
+        if pending_error:
+            raise RuntimeError("待审核查询挂了")
+        data = _desc_pending_rows() if rows is None else rows
+        total = len(data) if pending_total is None else pending_total
+        return list(data), total, {}
+
+    db = types.SimpleNamespace(
+        get_index_cache_readonly=lambda: dict(_desc_index() if index is None else index),
+        get_pending_paginated=get_pending_paginated,
+    )
+    plugin = types.SimpleNamespace(
+        db_service=db,
+        plugin_config=types.SimpleNamespace(categories=["开心"]),
+        base_dir=Path("."),
+        cache_service=None,
+    )
+    return PluginAPI(plugin)
+
+
+class _Args:
+    """伪造 quart 的 request.args，支持 get(key, default, type=int)。"""
+
+    def __init__(self, values):
+        self._values = {k: str(v) for k, v in (values or {}).items()}
+
+    def get(self, key, default=None, type=None):
+        if key not in self._values:
+            return default
+        raw = self._values[key]
+        if type is None:
+            return raw
+        try:
+            return type(raw)
+        except (TypeError, ValueError):
+            return default
+
+
+@pytest.fixture()
+def api_query(monkeypatch):
+    """jsonify 直接回传 dict；返回的函数用来伪造 querystring。"""
+    monkeypatch.setattr(plugin_api_module, "jsonify", lambda payload: payload)
+
+    def _set(**query):
+        monkeypatch.setattr(
+            plugin_api_module,
+            "request",
+            types.SimpleNamespace(args=_Args(query), method="GET"),
+        )
+
+    _set()
+    return _set
+
+
+class TestNoDescTarget:
+    def test_registered_as_a_target(self):
+        assert "no_desc" in PluginAPI.REANALYZE_TARGETS
+
+    def test_library_picks_blank_desc_only(self):
+        items, error = _desc_api()._collect_reanalyze_targets(
+            target="no_desc", hashes=[], limit=None
+        )
+        assert error == ""
+        assert {i["path"] for i in items} == {"/d/a.png", "/d/c.png"}
+
+    def test_library_missing_is_wider_than_no_desc(self):
+        items, _error = _desc_api()._collect_reanalyze_targets(
+            target="missing", hashes=[], limit=None
+        )
+        assert {i["path"] for i in items} == {"/d/a.png", "/d/c.png", "/d/d.png"}
+
+    def test_library_respects_limit(self):
+        items, _error = _desc_api()._collect_reanalyze_targets(
+            target="no_desc", hashes=[], limit=1
+        )
+        assert len(items) == 1
+
+    def test_library_without_match_returns_error(self):
+        api = _desc_api(index={"/d/b.png": {"hash": "h2", "tags": ["笑"], "desc": "有描述"}})
+        items, error = api._collect_reanalyze_targets(target="no_desc", hashes=[], limit=None)
+        assert items == []
+        assert "没有符合条件" in error
+
+    def test_pending_picks_blank_desc_only(self):
+        items, error = _desc_api()._collect_pending_reanalyze_targets(
+            target="no_desc", ids=[], limit=None
+        )
+        assert error == ""
+        assert {i["pending_id"] for i in items} == {1, 3}
+
+    def test_pending_missing_is_wider_than_no_desc(self):
+        items, _error = _desc_api()._collect_pending_reanalyze_targets(
+            target="missing", ids=[], limit=None
+        )
+        assert {i["pending_id"] for i in items} == {1, 3, 4}
+
+    def test_pending_scope_routing(self):
+        items, error = _desc_api()._collect_reanalyze_targets(
+            target="no_desc", hashes=[], limit=None, scope="pending", ids=[]
+        )
+        assert error == ""
+        assert {i["pending_id"] for i in items} == {1, 3}
+
+
+class TestReanalyzeScanCounts:
+    def test_counts_both_sides(self, api_query):
+        payload = asyncio.run(_desc_api().handle_reanalyze_scan())
+        assert payload["success"] is True
+        assert (payload["total"], payload["missing"], payload["no_desc"]) == (4, 3, 2)
+        assert payload["pending_total"] == 4
+        assert payload["pending_missing"] == 3
+        assert payload["pending_no_desc"] == 2
+        assert payload["max_items"] == PluginAPI.REANALYZE_MAX_ITEMS
+
+    def test_pending_failure_keeps_library_counts(self, api_query):
+        payload = asyncio.run(_desc_api(pending_error=True).handle_reanalyze_scan())
+        assert payload["success"] is True
+        assert payload["no_desc"] == 2
+        assert payload["pending_total"] == 0
+        assert payload["pending_no_desc"] == 0
+
+
+class TestStatsNoDesc:
+    def test_stats_expose_no_desc(self, api_query):
+        payload = asyncio.run(_desc_api().handle_get_stats())
+        assert payload["stats"]["total"] == 4
+        assert payload["stats"]["no_desc"] == 2
+
+
+class TestHandleMissingDescription:
+    def test_library_is_default_and_sorts_oldest_first(self, api_query):
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert payload["success"] is True
+        assert payload["scope"] == "library"
+        assert payload["total"] == 2
+        assert payload["scanned"] == 4
+        assert payload["truncated"] is False
+        assert payload["max_items"] == PluginAPI.REANALYZE_MAX_ITEMS
+        assert [i["hash"] for i in payload["images"]] == ["h3", "h1"]
+
+    def test_pending_scope_sorts_oldest_first(self, api_query):
+        api_query(scope="pending")
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert payload["scope"] == "pending"
+        assert payload["total"] == 2
+        assert payload["scanned"] == 4
+        assert [i["id"] for i in payload["images"]] == [3, 1]
+
+    def test_unknown_scope_falls_back_to_library(self, api_query):
+        api_query(scope="somewhere")
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert payload["scope"] == "library"
+        assert payload["total"] == 2
+
+    def test_scope_is_trimmed_and_lowercased(self, api_query):
+        api_query(scope=" PENDING ")
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert payload["scope"] == "pending"
+
+    def test_pagination_slices_the_list(self, api_query):
+        api_query(page=2, size=1)
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert (payload["page"], payload["size"], payload["total"]) == (2, 1, 2)
+        assert [i["hash"] for i in payload["images"]] == ["h1"]
+
+    def test_page_beyond_the_end_is_empty(self, api_query):
+        api_query(page=9, size=1)
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert payload["total"] == 2
+        assert payload["images"] == []
+
+    def test_page_and_size_are_clamped(self, api_query):
+        api_query(page=0, size=999)
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert (payload["page"], payload["size"]) == (1, 200)
+
+    def test_bad_numbers_fall_back_to_defaults(self, api_query):
+        api_query(page="abc", size="abc")
+        payload = asyncio.run(_desc_api().handle_missing_description())
+        assert (payload["page"], payload["size"]) == (1, 24)
+
+    def test_pending_reports_pool_size_and_truncation(self, api_query):
+        api_query(scope="pending")
+        api = _desc_api(
+            rows=[{"id": 1, "path": "/p/a.png", "desc": "", "created_at": 1}],
+            pending_total=PluginAPI.REANALYZE_MAX_ITEMS + 1,
+        )
+        payload = asyncio.run(api.handle_missing_description())
+        # scanned 是待审核池的总条数，不是这次返回的条数
+        assert payload["scanned"] == PluginAPI.REANALYZE_MAX_ITEMS + 1
+        assert payload["truncated"] is True
+        assert payload["total"] == 1
+
+    def test_pending_without_db_support_returns_empty(self, api_query):
+        api_query(scope="pending")
+        payload = asyncio.run(_api(_desc_index()).handle_missing_description())
+        assert payload["success"] is True
+        assert (payload["total"], payload["scanned"]) == (0, 0)
+        assert payload["images"] == []
+
+    def test_non_dict_meta_is_skipped(self, api_query):
+        api = _desc_api(index={"/d/x.png": "broken", "/d/a.png": {"hash": "h1", "desc": ""}})
+        payload = asyncio.run(api.handle_missing_description())
+        assert payload["scanned"] == 1
+        assert [i["hash"] for i in payload["images"]] == ["h1"]
+
+    def test_legacy_string_created_at_does_not_break_sorting(self, api_query):
+        api = _desc_api(
+            index={
+                "/d/a.png": {"hash": "h1", "desc": "", "created_at": "2026-01-01"},
+                "/d/b.png": {"hash": "h2", "desc": "", "created_at": 5},
+            }
+        )
+        payload = asyncio.run(api.handle_missing_description())
+        assert payload["success"] is True
+        assert [i["hash"] for i in payload["images"]] == ["h1", "h2"]
+
+    def test_index_failure_returns_error(self, api_query):
+        def boom():
+            raise RuntimeError("索引读挂了")
+
+        plugin = types.SimpleNamespace(
+            db_service=types.SimpleNamespace(get_index_cache_readonly=boom),
+            plugin_config=types.SimpleNamespace(),
+            base_dir=Path("."),
+            cache_service=None,
+        )
+        payload = asyncio.run(PluginAPI(plugin).handle_missing_description())
+        assert payload["success"] is False
+        assert "索引读挂了" in payload["error"]
+
+    def test_route_is_registered(self):
+        calls: list[tuple] = []
+        context = types.SimpleNamespace(
+            register_web_api=lambda path, handler, methods, desc: calls.append(
+                (path, handler, tuple(methods))
+            )
+        )
+        api = _desc_api()
+        api.register(context)
+        hit = [c for c in calls if c[0].endswith("/images/missing-description")]
+        assert len(hit) == 1
+        assert hit[0][1] == api.handle_missing_description
+        assert hit[0][2] == ("GET",)

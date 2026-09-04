@@ -44,7 +44,7 @@ class PluginAPI:
     BATCH_MAX_RESULTS_KEPT = 2000
     # 单次批量重新识别的硬上限，避免误点「全部」后排出十万级任务。
     REANALYZE_MAX_ITEMS = 5000
-    REANALYZE_TARGETS = frozenset({"selected", "missing", "all"})
+    REANALYZE_TARGETS = frozenset({"selected", "missing", "no_desc", "all"})
     # 重新识别的作用范围：已入库表情库 / 待审核池。
     REANALYZE_SCOPES = frozenset({"library", "pending"})
     # 重新识别时允许模型回填的字段（分类不在内，改分类要移动文件）。
@@ -77,6 +77,7 @@ class PluginAPI:
             ("/images/batch-upload-control", "handle_batch_upload_control", ["POST"]),
             ("/images/batch-reanalyze", "handle_batch_reanalyze", ["POST"]),
             ("/images/reanalyze-scan", "handle_reanalyze_scan", ["GET"]),
+            ("/images/missing-description", "handle_missing_description", ["GET"]),
             ("/images/scope-repair", "handle_scope_repair", ["POST"]),
             ("/analyze", "handle_analyze_image", ["POST"]),
             ("/storage/scan", "handle_storage_scan", ["GET"]),
@@ -887,10 +888,19 @@ class PluginAPI:
                 if isinstance(m, dict) and m.get("created_at", 0) >= today_start
             )
             cat_count = len(self._cfg.categories) if hasattr(self.plugin, "plugin_config") else 0
+            # 描述为空＝识别失败/没识别过，WebUI 用这个数字给「识别失败检测」挂角标
+            no_desc = sum(
+                1 for m in index.values() if isinstance(m, dict) and self._missing_description(m)
+            )
             return jsonify(
                 {
                     "success": True,
-                    "stats": {"total": len(index), "categories": cat_count, "today": today_count},
+                    "stats": {
+                        "total": len(index),
+                        "categories": cat_count,
+                        "today": today_count,
+                        "no_desc": no_desc,
+                    },
                 }
             )
         except Exception as e:
@@ -2070,6 +2080,15 @@ class PluginAPI:
         """
         return not (meta.get("tags") or []) or not str(meta.get("desc") or "").strip()
 
+    @staticmethod
+    def _missing_description(meta: dict) -> bool:
+        """判断条目是不是「识别失败」：描述为空。
+
+        WebUI 列表里这类条目显示成「暂无描述」。描述是语义检索的主要依据，
+        描述空着基本等于这张图搜不出来，所以单独拎出来一档，方便集中补。
+        """
+        return not str(meta.get("desc") or "").strip()
+
     def _collect_reanalyze_targets(
         self,
         *,
@@ -2107,6 +2126,8 @@ class PluginAPI:
                 if not isinstance(meta, dict):
                     continue
                 if target == "missing" and not self._needs_reanalysis(meta):
+                    continue
+                if target == "no_desc" and not self._missing_description(meta):
                     continue
                 picked.append((path, meta))
             picked.sort(key=lambda kv: str(kv[1].get("created_at", "")))
@@ -2158,6 +2179,8 @@ class PluginAPI:
                     continue
             elif target == "missing" and not self._needs_reanalysis(row):
                 continue
+            elif target == "no_desc" and not self._missing_description(row):
+                continue
             picked.append(
                 {
                     "kind": "pending",
@@ -2184,24 +2207,30 @@ class PluginAPI:
             index = self._build_full_index_snapshot()
             total = 0
             missing = 0
+            no_desc = 0
             for meta in index.values():
                 if not isinstance(meta, dict):
                     continue
                 total += 1
                 if self._needs_reanalysis(meta):
                     missing += 1
+                if self._missing_description(meta):
+                    no_desc += 1
             pending_total = 0
             pending_missing = 0
+            pending_no_desc = 0
             db = self._db
             if db and hasattr(db, "get_pending_paginated"):
                 try:
                     rows, pending_total, _counts = db.get_pending_paginated(
                         page=1, page_size=self.REANALYZE_MAX_ITEMS
                     )
+                    valid_rows = [row for row in rows or [] if isinstance(row, dict)]
                     pending_missing = sum(
-                        1
-                        for row in rows or []
-                        if isinstance(row, dict) and self._needs_reanalysis(row)
+                        1 for row in valid_rows if self._needs_reanalysis(row)
+                    )
+                    pending_no_desc = sum(
+                        1 for row in valid_rows if self._missing_description(row)
                     )
                 except Exception as scan_error:
                     logger.debug(f"[PluginAPI] 统计待审核重识别范围失败: {scan_error}")
@@ -2209,14 +2238,85 @@ class PluginAPI:
                 "success": True,
                 "total": total,
                 "missing": missing,
+                "no_desc": no_desc,
                 "pending_total": int(pending_total or 0),
                 "pending_missing": pending_missing,
+                "pending_no_desc": pending_no_desc,
             }
             payload.update(self._batch_throttle_defaults())
             payload["max_items"] = self.REANALYZE_MAX_ITEMS
             return jsonify(payload)
         except Exception as e:
             logger.error(f"扫描重新识别范围失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    async def handle_missing_description(self):
+        """GET /images/missing-description —— 列出识别失败（描述为空）的条目。
+
+        scope=library 查已入库表情库，scope=pending 查待审核池。WebUI 的「识别失败
+        检测」先用它把清单摆出来，再让用户决定逐张手写还是交给批量重跑。
+        """
+        try:
+            scope = str(request.args.get("scope", "library") or "library").strip().lower()
+            if scope not in self.REANALYZE_SCOPES:
+                scope = "library"
+            page = max(1, request.args.get("page", 1, type=int) or 1)
+            page_size = max(1, min(request.args.get("size", 24, type=int) or 24, 200))
+
+            items: list[dict[str, Any]] = []
+            scanned = 0
+            truncated = False
+            if scope == "pending":
+                db = self._db
+                if db and hasattr(db, "get_pending_paginated"):
+                    rows, pending_total, _counts = db.get_pending_paginated(
+                        page=1, page_size=self.REANALYZE_MAX_ITEMS
+                    )
+                    scanned = int(pending_total or 0)
+                    truncated = scanned > self.REANALYZE_MAX_ITEMS
+                    for row in rows or []:
+                        if not isinstance(row, dict) or not self._missing_description(row):
+                            continue
+                        item = self._build_pending_item(row)
+                        if item:
+                            items.append(item)
+                    items.sort(key=lambda it: self._optional_int(it.get("created_at")) or 0)
+            else:
+                for path_str, meta in self._build_full_index_snapshot().items():
+                    if not isinstance(meta, dict):
+                        continue
+                    scanned += 1
+                    if not self._missing_description(meta):
+                        continue
+                    item = self._build_image_item(path_str, meta)
+                    if item:
+                        items.append(item)
+                # 老的先补：入库时间正序，和批量重新识别的处理顺序保持一致
+                items.sort(
+                    key=lambda it: (
+                        self._optional_int(it.get("created_at")) or 0,
+                        str(it.get("hash", "")),
+                    )
+                )
+
+            total = len(items)
+            start = (page - 1) * page_size
+            return jsonify(
+                {
+                    "success": True,
+                    "scope": scope,
+                    "page": page,
+                    "size": page_size,
+                    "total": total,
+                    "scanned": scanned,
+                    "truncated": truncated,
+                    # 前端用它把「只检查了最新 N 条」说清楚，别让人以为清单就是全部
+                    "max_items": self.REANALYZE_MAX_ITEMS,
+                    "images": items[start : start + page_size],
+                }
+            )
+        except Exception as e:
+            logger.error(f"列出识别失败条目失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
     async def handle_batch_reanalyze(self):
