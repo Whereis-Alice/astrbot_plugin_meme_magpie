@@ -384,7 +384,9 @@
         "character_manager": "Character Manager",
         "batch_character": "Assign Character",
         "batch_work": "Set work in bulk",
-        "batch_reanalyze": "Batch Re-analyze"
+        "batch_reanalyze": "Batch Re-analyze",
+        "keep_open_hint": "You have unsaved input here, so clicking outside won't close it. Use × or Cancel to close.",
+        "keep_open_busy_hint": "Task progress is still showing in this window, so clicking outside won't close it. Use × in the corner to close."
       },
       "fields": {
         "category": "Category",

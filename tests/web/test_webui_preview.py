@@ -6,6 +6,7 @@
 
 import base64
 import io
+import re
 
 import pytest
 
@@ -116,6 +117,40 @@ def test_server_theme_overrides_host_query_after_prefs_load():
     assert "setThemeMode(resolveThemeValue(data.theme), false)" in prefs_block
     assert "hostThemeFromQuery" in app_js
     assert "themeMode = ref(resolveThemeValue(readStored" in app_js
+
+
+def test_modal_overlays_guard_against_misclick_dismiss():
+    """带表单的弹窗不能「手滑点一下外面就没了」，新加的弹窗也必须接上防误关钩子。"""
+    template = (DASHBOARD_DIR / "template.js").read_text(encoding="utf-8")
+    app_js = (DASHBOARD_DIR / "app.js").read_text(encoding="utf-8")
+
+    tails = re.findall(r'class="modal-overlay"(.*?)>', template, re.DOTALL)
+    # 保证下面的逐个检查没漏掉任何遮罩（比如有人写成 class="modal-overlay extra"）
+    assert len(tails) == template.count("modal-overlay") >= 12
+
+    guarded_keys: list[str] = []
+    for tail in tails:
+        key = re.search(r'data-modal-guard="(\w+)"', tail)
+        if key is None:
+            # 只有确认框 / 输入框允许点外面直接关：点外面等于「取消」，不会丢掉填了一半的内容
+            handler = re.search(r'@click\.self="(\w+)"', tail)
+            assert handler and handler.group(1) in {"onConfirmNo", "onPromptCancel"}, tail
+            continue
+        guarded_keys.append(key.group(1))
+        assert '@pointerdown.capture="onOverlayPointerDown"' in tail, key.group(1)
+        assert '@click.self="onOverlayClick($event, ' in tail, key.group(1)
+        assert '@input.capture="onOverlayInput"' in tail, key.group(1)
+        assert '@change.capture="onOverlayInput"' in tail, key.group(1)
+
+    assert len(guarded_keys) == len(set(guarded_keys)), guarded_keys
+    registered = set(re.findall(r"\{ key: '(\w+)', open: \w+, close: \w+ \}", app_js))
+    assert registered == set(guarded_keys), (registered, guarded_keys)
+
+    for name in ("onOverlayPointerDown", "onOverlayClick", "onOverlayInput"):
+        # 模板用得到就必须 return 出去，否则 Vue 只会静默不生效
+        assert re.search(rf"^\s+{name},$", app_js, re.M), name
+    # 取消 / 保存编辑后要清掉「脏」标记，否则预览弹窗会变成点外面永远关不掉
+    assert app_js.count("releaseModal('preview')") >= 2
 
 
 @pytest.mark.asyncio

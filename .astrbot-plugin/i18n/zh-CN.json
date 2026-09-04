@@ -384,7 +384,9 @@
         "character_manager": "角色管理",
         "batch_character": "批量分配角色",
         "batch_work": "批量填写作品",
-        "batch_reanalyze": "批量重新识别"
+        "batch_reanalyze": "批量重新识别",
+        "keep_open_hint": "窗口里有你填过、还没保存的内容，点外面不会关闭；要关掉请点右上角 × 或「取消」。",
+        "keep_open_busy_hint": "任务进度正显示在这个窗口里，点外面不会关闭；要关掉请点右上角的 ×。"
       },
       "fields": {
         "category": "分类",

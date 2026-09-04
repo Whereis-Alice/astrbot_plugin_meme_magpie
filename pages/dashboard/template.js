@@ -611,7 +611,9 @@ export const TEMPLATE = `
     </div>
 </footer>
 
-<div v-if="previewOpen" class="modal-overlay" @click.self="closePreview">
+<div v-if="previewOpen" class="modal-overlay" data-modal-guard="preview"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closePreview)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -877,7 +879,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="uploadOpen" class="modal-overlay" @click.self="closeUploadModal">
+<div v-if="uploadOpen" class="modal-overlay" data-modal-guard="upload"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeUploadModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-md">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1012,7 +1016,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="batchUploadOpen" class="modal-overlay" @click.self="closeBatchUploadModal">
+<div v-if="batchUploadOpen" class="modal-overlay" data-modal-guard="batchUpload"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeBatchUploadModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-lg">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1437,7 +1443,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="emotionsOpen" class="modal-overlay" @click.self="closeEmotionsModal">
+<div v-if="emotionsOpen" class="modal-overlay" data-modal-guard="emotions"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeEmotionsModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-lg">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1489,7 +1497,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="charactersOpen" class="modal-overlay" @click.self="closeCharactersModal">
+<div v-if="charactersOpen" class="modal-overlay" data-modal-guard="characters"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeCharactersModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-lg">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1537,7 +1547,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="batchMoveOpen" class="modal-overlay" @click.self="closeBatchMoveModal">
+<div v-if="batchMoveOpen" class="modal-overlay" data-modal-guard="batchMove"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeBatchMoveModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-narrow">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1565,7 +1577,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="batchWorkOpen" class="modal-overlay" @click.self="closeBatchWorkModal">
+<div v-if="batchWorkOpen" class="modal-overlay" data-modal-guard="batchWork"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeBatchWorkModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-narrow">
         <div class="modal-header">
             <h2>{{ t('pages.dashboard.modal.batch_work', '批量填写作品') }}</h2>
@@ -1584,7 +1598,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="batchCharacterOpen" class="modal-overlay" @click.self="closeBatchCharacterModal">
+<div v-if="batchCharacterOpen" class="modal-overlay" data-modal-guard="batchCharacter"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeBatchCharacterModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-narrow">
         <div class="modal-header">
             <h2>{{ t('pages.dashboard.modal.batch_character', '批量分配角色') }}</h2>
@@ -1603,7 +1619,9 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="batchScopeOpen" class="modal-overlay" @click.self="closeBatchScopeModal">
+<div v-if="batchScopeOpen" class="modal-overlay" data-modal-guard="batchScope"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeBatchScopeModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel modal-narrow">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>
@@ -1688,7 +1706,9 @@ export const TEMPLATE = `
 </div>
 
 <!-- 审核区编辑弹窗（issue #87） -->
-<div v-if="pendingEditOpen" class="modal-overlay" @click.self="closePendingEdit">
+<div v-if="pendingEditOpen" class="modal-overlay" data-modal-guard="pendingEdit"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closePendingEdit)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
     <div class="modal-panel">
         <div class="modal-panel-corner-bl"></div>
         <div class="modal-panel-corner-br"></div>

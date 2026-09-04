@@ -1,5 +1,5 @@
 import { TEMPLATE } from './template.js';
-const { createApp, ref, reactive, computed, onMounted, onUnmounted, nextTick } = Vue;
+const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
 const PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
@@ -229,6 +229,72 @@ createApp({
             clearTimeout(toastTimer);
             toastTimer = setTimeout(() => { toastOpen.value = false; }, 3000);
         };
+        // ── 弹窗防误关：手滑点到窗口外，不该把刚填的内容清空 ──────────────
+        // 规则：窗口里一个字都没动过 → 点遮罩、按 Esc 照旧关闭（纯看看的场景不添麻烦）；
+        // 已经填过东西 → 不关，只抖一下面板 + 提示走 × 或「取消」，让「丢草稿」必须是明确动作。
+        const modalTouched = reactive({});
+        // 程序自己写进表单的内容（AI 识别结果、拖进来的文件）不会触发 input 事件，
+        // 这里额外兜底，避免识别完手一抖就白跑一趟。
+        const modalDirtyExtra = {
+            preview: () => isEditing.value,
+            upload: () => Boolean(uploadFile.value),
+            batchUpload: () => batchFiles.value.length > 0,
+            pendingEdit: () => Boolean(singleReanalyze.text),
+        };
+        // 窗口里挂着后台任务的进度：此时表单已经被进度视图替掉，关掉就再也翻不回来，同样不能手滑关
+        const modalBusyExtra = {
+            batchUpload: () => Boolean(batchTaskId.value),
+        };
+        const touchModal = (key) => { if (key) modalTouched[key] = true; };
+        const releaseModal = (key) => { if (key) delete modalTouched[key]; };
+        const isModalBusy = (key) => Boolean(modalBusyExtra[key]?.());
+        const isModalDirty = (key) => (
+            isModalBusy(key) || Boolean(modalTouched[key]) || Boolean(modalDirtyExtra[key]?.())
+        );
+        // 抖动走 Web Animations API：不碰 CSS 的 animation 属性，就不会把入场动画重新播一遍
+        const nudgeModalPanel = (overlayEl) => {
+            const panel = overlayEl?.querySelector?.('.modal-panel');
+            if (!panel || typeof panel.animate !== 'function') return;
+            if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return;
+            panel.animate([
+                { transform: 'translateX(0)' },
+                { transform: 'translateX(-7px)' },
+                { transform: 'translateX(6px)' },
+                { transform: 'translateX(-4px)' },
+                { transform: 'translateX(2px)' },
+                { transform: 'translateX(0)' },
+            ], { duration: 420, easing: 'ease-in-out' });
+        };
+        const guardedOverlayEl = (key) => (
+            key ? document.querySelector(`.modal-overlay[data-modal-guard="${key}"]`) : null
+        );
+        const refuseModalClose = (key, overlayEl) => {
+            nudgeModalPanel(overlayEl || guardedOverlayEl(key));
+            const hint = isModalBusy(key)
+                ? t(
+                    'pages.dashboard.modal.keep_open_busy_hint',
+                    '任务进度正显示在这个窗口里，点外面不会关闭；要关掉请点右上角的 ×。',
+                )
+                : t(
+                    'pages.dashboard.modal.keep_open_hint',
+                    '窗口里有你填过、还没保存的内容，点外面不会关闭；要关掉请点右上角 × 或「取消」。',
+                );
+            showAlert(hint, 'info');
+        };
+        // 在面板里按下、拖到遮罩上才松手（选中一段文字、拖着预览图平移），不该算「点了外面」
+        let overlayPressStartedOnSelf = false;
+        const onOverlayPointerDown = (event) => {
+            overlayPressStartedOnSelf = event.target === event.currentTarget;
+        };
+        const onOverlayInput = (event) => { touchModal(event.currentTarget?.dataset?.modalGuard); };
+        const onOverlayClick = (event, closeFn) => {
+            if (event.target !== event.currentTarget) return;
+            if (!overlayPressStartedOnSelf) return;
+            const key = event.currentTarget?.dataset?.modalGuard;
+            if (isModalDirty(key)) { refuseModalClose(key, event.currentTarget); return; }
+            closeFn();
+        };
+
         const uploadForm = reactive({ emotion: '', tags: '', scene: '', desc: '', overlay_text: '', character: '', work: '' });
         const availableEmotions = ref([]);
         const analysisScenes = ref([]);
@@ -1204,8 +1270,14 @@ createApp({
 
         const handleKeydown = (e) => {
             if (isTypingTarget(e)) return;
+            // 上面压着确认框 / 输入框时，Esc 不该穿透去关下面那层弹窗
+            if (confirmOpen.value || promptOpen.value) return;
             if (previewOpen.value) {
-                if (isEditing.value) return;
+                // 编辑态下 Esc 不直接关窗（刚填的内容会没），给个提示指向「取消」
+                if (isEditing.value) {
+                    if (e.key === 'Escape') { e.preventDefault(); refuseModalClose('preview'); }
+                    return;
+                }
                 if (e.key === 'ArrowLeft') prevImage();
                 else if (e.key === 'ArrowRight') nextImage();
                 else if (e.key === 'Escape') closePreview();
@@ -1214,6 +1286,7 @@ createApp({
                 else if (e.key === '0') resetPreviewZoom();
                 return;
             }
+            if (e.key === 'Escape' && closeTopGuardedModal()) { e.preventDefault(); return; }
             if (anyModalOpen()) return;
             if (activeSection.value !== 'pending' || !pendingImages.value.length) return;
             switch (e.key) {
@@ -1262,6 +1335,7 @@ createApp({
         const cancelEdit = () => {
             resetSingleReanalyze();
             isEditing.value = false;
+            releaseModal('preview');
         };
 
         const saveEdit = async () => {
@@ -1274,6 +1348,7 @@ createApp({
                 const data = await res.json();
                 if (data.success) {
                     isEditing.value = false;
+                    releaseModal('preview');
                     const refreshedImages = await fetchImages(currentPage.value);
                     const refreshedItem = refreshedImages.find((item) => item.hash === previewItem.value.hash);
                     if (refreshedItem) {
@@ -2581,6 +2656,7 @@ createApp({
                     newEmotion.key = '';
                     newEmotion.name = '';
                     newEmotion.desc = '';
+                    releaseModal('emotions');
                 } else {
                     showAlert(data.error || t('pages.dashboard.alerts.add_failed', 'Add failed.'));
                 }
@@ -2628,6 +2704,7 @@ createApp({
                     characters.value = data.characters || currentList;
                     newCharacter.key = '';
                     newCharacter.name = '';
+                    releaseModal('characters');
                     await fetchImages(currentPage.value);
                 } else {
                     showAlert(data.error || t('pages.dashboard.alerts.add_failed', 'Add failed.'));
@@ -2750,6 +2827,34 @@ createApp({
                 }
             }, 300);
         };
+        // 受保护弹窗登记表：顺序＝模板里的叠放顺序，Esc 先处理最上面那个
+        const guardedModals = [
+            { key: 'preview', open: previewOpen, close: closePreview },
+            { key: 'upload', open: uploadOpen, close: closeUploadModal },
+            { key: 'batchUpload', open: batchUploadOpen, close: closeBatchUploadModal },
+            { key: 'emotions', open: emotionsOpen, close: closeEmotionsModal },
+            { key: 'characters', open: charactersOpen, close: closeCharactersModal },
+            { key: 'batchMove', open: batchMoveOpen, close: closeBatchMoveModal },
+            { key: 'batchWork', open: batchWorkOpen, close: closeBatchWorkModal },
+            { key: 'batchCharacter', open: batchCharacterOpen, close: closeBatchCharacterModal },
+            { key: 'batchScope', open: batchScopeOpen, close: closeBatchScopeModal },
+            { key: 'pendingEdit', open: pendingEditOpen, close: closePendingEdit },
+        ];
+        // 每次重新打开都按「干净」算，别让上一次的输入痕迹一直把窗口锁着
+        guardedModals.forEach((modal) => {
+            watch(modal.open, (isOpen) => { if (isOpen) releaseModal(modal.key); });
+        });
+        const closeTopGuardedModal = () => {
+            for (let i = guardedModals.length - 1; i >= 0; i -= 1) {
+                const modal = guardedModals[i];
+                if (!modal.open.value) continue;
+                if (isModalDirty(modal.key)) refuseModalClose(modal.key);
+                else modal.close();
+                return true;
+            }
+            return false;
+        };
+
         onMounted(() => {
             updateDocumentMeta();
             syncThemeFromContext();
@@ -2908,6 +3013,9 @@ createApp({
             analyzing,
             analyzeImage,
             singleReanalyze,
+            onOverlayPointerDown,
+            onOverlayClick,
+            onOverlayInput,
             reanalyzePreviewItem,
             reanalyzePendingItem,
 
