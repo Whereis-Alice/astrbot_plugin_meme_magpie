@@ -60,6 +60,7 @@ What this fork adds on top:
 | **Batch re-analysis** | Re-run vision analysis over images already in the library that are missing tags or descriptions, optionally fill-blanks-only |
 | **Known facts feed the prompt** | Work and character values you already filled in are written into the analysis prompt, so the model adopts them instead of guessing — biggest win on anime art |
 | **Re-analysis for the review queue** | Images waiting for review can be re-analysed in bulk as well, and there the category does get corrected |
+| **Missing-description detector** | Lists every entry with an empty description in one click, so you can fill them in individually or re-run the whole batch |
 | **Multi-adapter support** | LLBot / NapCat / SnowLuma differences around marketplace stickers and sticker flags are all absorbed |
 | **Message-splitting plugin support** | A new `attach` delivery mode lets stickers ride along in the reply's own message chain |
 | **Upstream bug fixes** | See [What got fixed](#what-got-fixed) |
@@ -75,7 +76,7 @@ What this fork adds on top:
 | **Emotion matching** | Extracts search terms and an emotion prior from the bot's reply. The reply text itself is never modified |
 | **LLM-driven usage** | During conversation the model can search, send and collect stickers on its own |
 | **Character & work library** | Manually file "who is this / what is it from", independent of emotion categories |
-| **WebUI dashboard** | Review queue + library: browse, edit, sort, bulk actions, batch import, batch re-analysis, storage cleanup |
+| **WebUI dashboard** | Review queue + library: browse, edit, sort, bulk actions, batch import, batch re-analysis, missing-description detector, storage cleanup |
 | **Chat filtering** | Separate allow/block lists for collecting and sending, with `group:<id>` and `user:<id>` entries |
 | **Duplicate cleanup** | Perceptual hashing (pHash) finds visually identical images |
 | **Localized UI** | 中文 / English / Русский |
@@ -232,12 +233,24 @@ You can also set a character and a source work for the whole batch up front.
 
 Re-runs vision analysis over images already in the library. Useful when early imports have no tags, or when you have switched to a better vision model and want everything re-labelled.
 
-- **Scope**: selected images / images missing tags or descriptions / everything
+- **Scope**: selected images / images missing tags or descriptions / only those with no description / everything
 - **Overwrite existing values**: off by default, so it only fills blanks and never touches descriptions you wrote by hand
 - **Item limit**: cap the batch size and test the waters first
 - Re-analysis deliberately **does not change categories** — that would mean moving files, which is risky under concurrency. It reports a *suggested* category and leaves the decision to you.
 
 **The review queue can be re-analysed too**: pending images support the same bulk or single re-run, with the same three scopes. The one difference is that **a pending item's category does get corrected** — there it is only a database field, and changing it moves no files. Library categories map to real directories, which is why those stay advisory.
+
+### Finding entries with no description
+
+Analysis fails once in a while — a timeout, an upstream rate limit, or a model that returns nothing all leave behind a record with an image but no description. The description is what search leans on most, so an empty one effectively makes that image unfindable.
+
+Both the library and the review queue have a **Missing description** button in the toolbar. It lists every entry whose description is empty, i.e. everything showing *No description* in the list. Each row offers three ways out:
+
+- write a description yourself and hit **Save Only**;
+- click **Analyze this one** to re-run just that image — the result is **placed in the input box first**, so nothing is written to the database until you confirm it;
+- or hand the whole set to batch re-analysis in one click.
+
+When the review queue is very large only the most recent slice is checked; the dialog says how many it looked at, and reopening it continues down the list.
 
 ### Picking concurrency and rate so you do not get 429ed
 
@@ -332,7 +345,7 @@ Everything is editable in the AstrBot plugin config page. The notable ones:
 | Intent gate | `true` | Checks whether the reply is a good fit for a sticker at all; cuts down on non-sequitur sends |
 | Cancel pending sticker on new message | `true` | A new message in the same chat cancels a sticker still waiting out its delay |
 | Send probability | `0.2` | 0.0 – 1.0 |
-| Send as GIF | `false` | Feels more like a real sticker, but forcing very large images to GIF spikes memory |
+| Send as GIF | `false` | Feels more like a real sticker; the cost is re-encoding the animation on every send. The conversion keeps at most 30 frames and is capped by total pixels (very large animations automatically keep fewer), peaking around 15MB for a 512-square animation. Leave it off if memory is tight |
 | Fixed delay (s) | `5.0` | Keeps out of the way of message-splitting plugins; 0 sends immediately |
 | Randomize delay | `false` | Pick a random delay between the fixed and maximum values |
 | Per-character delay (s) | `0.3` | Extra wait scaled by reply length, simulating "read the text, then react" |
@@ -463,6 +476,9 @@ Almost always a vision-model problem. Check the AstrBot log for errors and confi
 **Batch analysis keeps returning 429.**
 Drop concurrency to 1 and RPM to 6–10. If it still throttles, your quota is genuinely tight: use the item limit to process a few dozen at a time.
 
+**My server only has 1GB (or 512MB) of RAM. Will analysing hundreds of images blow it up?**
+No, but keep concurrency low. Peak memory per image is now decoupled from image size: a 512-square 60-frame animation takes about 17MB, a 1920×480 120-frame animation about 22MB, a 4000×4000 still about 45MB (before 1.3.0 those three were 89MB, 331MB and 185MB). A batch peaks at roughly *per-image peak × concurrency*, so on a small box leave batch concurrency at the default 2 or drop it to 1 — hundreds of images will just take longer, not run you out of memory. Also note that “send as GIF” adds one more encode at send time, so leave it off when memory is tight.
+
 **Stickers come too often / too rarely.**
 Adjust the send probability. If they arrive at odd moments, make sure the intent gate is on.
 
@@ -500,11 +516,19 @@ Relative to upstream `astrbot_plugin_stealer`:
 - **"Work" typed in the review queue was not saved** — the pending-update endpoint's writable-field allowlist was missing `work` and `overlay_text`, so filling them in and hitting save silently dropped them. This dates back to 1.0.0, when the work dimension was introduced.
 - **Re-analysis suggested a category change redundantly** — the suggestion still appeared when it matched the current category, or when that change was already part of the same update.
 
+1.3.0 fixed these too:
+
+- **Still GIFs always failed analysis** — some upstream gateways only accept a whitelist of image formats (png / jpeg / webp and friends) and answer a GIF with `mime type is not supported`. The old code treated that as an ordinary failure and retried into the same wall, burning quota. Non-whitelisted formats are now converted to PNG before upload, and if a request is still rejected on mime grounds it is transcoded locally and retried once without consuming the retry budget. "Format not supported" is also no longer lumped in with genuine rate limiting.
+- **Analysing high-frame-rate animations exhausted memory** — the old implementation decoded up to 60 frames into full-size RGBA and held them all in a list; a 1920×480 animation needed 300MB+ for that step alone. It now runs in two passes: 32×32 thumbnail fingerprints pick the most distinct frames, then only the chosen 12 are decoded and released right after being pasted. See the memory FAQ entry for measured peaks. PNG `optimize=True` is also gone — it burned 0.6–0.8s to save 12% of the bytes and was the other reason older versions stuttered on animations.
+- **Converting to GIF at send time doubled memory** — the old code held both an RGBA copy of every frame and the palette copy Pillow builds while saving (5 bytes per pixel combined). Frames are now quantized as soon as they are read and released as encoding proceeds, with budgets on both frame count and total pixels. A 512-square 60-frame animation went from 41MB to 17MB with no quality change.
+- **Half-filled dialogs vanished on a stray click** — the sticker-management and tag-editing dialogs used to close on any click on the backdrop or an Esc press, dropping you back to the main page and losing everything you had typed. Once a dialog has content, both the backdrop and Esc now just shake it and point you at the Cancel button. Three related bugs went with it: releasing a text drag outside the dialog closed it, Esc inside a confirm box fell through to the dialog underneath, and the preview layer could not be dismissed after cancelling an edit.
+- **The batch re-analysis dialog overflowed its panel** — enough options pushed the buttons out of view. The body scrolls now and the actions stick to the bottom; the dialog also opens on the first scope that actually has items, and zero-item scopes are greyed out.
+
 ## Notes
 
 - **A vision model is mandatory**; without one, nothing that involves recognition works.
 - Deleting a category in the WebUI deletes the image files inside it.
-- With "send as GIF" enabled, forcing very large images to GIF causes memory spikes — leave it off on small machines.
+- With "send as GIF" enabled, every send re-encodes the animation. Peak memory is budget-capped now (see [Sending](#sending)) but still higher than sending the original file — leave it off if memory is tight.
 - Sticker content and copyright belong to their creators. Follow your platform's rules and do not use this to spread prohibited content.
 
 ## Licence and credits
