@@ -20,11 +20,19 @@ try:
         LANCZOS = PILImage.Resampling.LANCZOS
     except AttributeError:
         LANCZOS = PILImage.LANCZOS
+    try:
+        ADAPTIVE_PALETTE = PILImage.Palette.ADAPTIVE
+    except AttributeError:
+        ADAPTIVE_PALETTE = PILImage.ADAPTIVE
 except Exception:
     PILImage = None
     PILImageDraw = None
     PILImageFont = None
     LANCZOS = None
+    ADAPTIVE_PALETTE = None
+
+# 已经是调色板图的帧不用再转，直接留着最省内存也最不掉色
+PALETTE_FRAME_MODES = ("P", "L", "1")
 
 
 class ImageRenderService:
@@ -33,6 +41,10 @@ class ImageRenderService:
     GIF_CACHE_MAX_SIZE = 50
     GIF_CACHE_MAX_SIZE_BYTES = 10 * 1024 * 1024
     CACHE_EXPIRE_TIME = 3600
+    # 发送侧转 GIF 时最多保留多少帧
+    GIF_SEND_MAX_FRAMES = 30
+    # 待编码的帧加起来最多占多少像素（调色板图 1 像素 1 字节，64M 像素约等于 64MB）
+    GIF_SEND_MAX_TOTAL_PIXELS = 64_000_000
 
     def __init__(self, plugin_instance: Any = None) -> None:
         self.plugin = plugin_instance
@@ -54,6 +66,49 @@ class ImageRenderService:
         except Exception as e:
             logger.error(f"文件转换为base64失败: {e}")
             return ""
+
+    @classmethod
+    def gif_frame_budget(cls, size: tuple[int, int], n_frames: int) -> int:
+        """算出这张动图最多留几帧。
+
+        常规表情包（100 万像素以内，也就是 1000x1000 上下）照旧拿满 30 帧，尺寸和帧数
+        都跟以前一样。只有画面特别大的动图才会按总像素预算往下压帧数：4000x4000 的动图
+        留 30 帧要占 480MB 内存，小内存机器上一张图就能把内存吃光。
+        """
+        width, height = size
+        pixels = max(1, int(width) * int(height))
+        budget = cls.GIF_SEND_MAX_TOTAL_PIXELS // pixels
+        return max(1, min(int(n_frames), cls.GIF_SEND_MAX_FRAMES, int(budget)))
+
+    @staticmethod
+    def to_gif_frame(frame: Any) -> Any:
+        """把动图的一帧转成 GIF 能直接写进去的调色板图。
+
+        Pillow 存 GIF 时本来就会对每一帧做同样的转换（`convert("P", palette=ADAPTIVE)`，
+        再从调色板里挑出全透明色写成 transparency），这里只是把这一步从"保存时"提前到
+        "刚读出这一帧时"。排队等编码的帧于是每像素只占 1 字节，而不是 RGBA 的 4 字节，
+        1920x480 的 30 帧动图从约 110MB 降到约 30MB，输出的 GIF 与之前一致。
+
+        帧本身已经是调色板图时（源文件是 GIF 的常见情况）原样留下：既省掉一次量化的
+        开销，也不会因为重新量化而掉色。
+        """
+        if frame.mode in PALETTE_FRAME_MODES:
+            return frame.copy()
+
+        rgba = frame.convert("RGBA")
+        try:
+            paletted = rgba.convert("P", palette=ADAPTIVE_PALETTE)
+        finally:
+            if rgba is not frame:
+                rgba.close()
+
+        palette = paletted.palette
+        if palette is not None and getattr(palette, "mode", "") == "RGBA":
+            for color, index in palette.colors.items():
+                if len(color) > 3 and color[3] == 0:
+                    paletted.info["transparency"] = index
+                    break
+        return paletted
 
     async def file_to_gif_base64(self, file_path: str) -> str:
         """将文件转换为 GIF 格式的 base64 编码（用于发送侧强制 GIF）。"""
@@ -77,9 +132,6 @@ class ImageRenderService:
             if PILImage is None:
                 return await self.file_to_base64(file_path)
 
-            # GIF 转换限制常量：不改尺寸不改 optimize
-            MAX_FRAMES = 30
-
             def _sync_convert_to_gif(fp: str) -> str:
                 with PILImage.open(fp) as im:
                     buf = BytesIO()
@@ -87,30 +139,35 @@ class ImageRenderService:
                     n_frames = int(getattr(im, "n_frames", 1) or 1)
 
                     if is_animated and n_frames > 1:
-                        actual_frames = min(n_frames, MAX_FRAMES)
-                        frames = []
-                        durations = []
-                        frame_step = max(1, n_frames // actual_frames)
+                        budget = self.gif_frame_budget(im.size, n_frames)
+                        frames: list[Any] = []
+                        durations: list[int] = []
+                        frame_step = max(1, n_frames // budget)
                         for frame_idx in range(0, n_frames, frame_step):
-                            if len(frames) >= MAX_FRAMES:
+                            if len(frames) >= budget:
                                 break
                             im.seek(frame_idx)
-                            frame = im.convert("RGBA")
-                            # 保留帧原始尺寸，避免二次缩放
-                            frames.append(frame)
+                            # 尺寸保持原样，只是把帧提前压成调色板图，省的是内存不是画质
+                            frames.append(self.to_gif_frame(im))
                             durations.append(im.info.get("duration", 100))
 
-                        if frames:
-                            frames[0].save(
-                                buf,
-                                format="GIF",
-                                save_all=True,
-                                append_images=frames[1:],
-                                duration=durations,
-                                loop=0,
-                                optimize=False,
-                                disposal=2,
-                            )
+                        try:
+                            if frames:
+                                frames[0].save(
+                                    buf,
+                                    format="GIF",
+                                    save_all=True,
+                                    append_images=frames[1:],
+                                    duration=durations,
+                                    loop=0,
+                                    optimize=False,
+                                    disposal=2,
+                                )
+                        finally:
+                            # 字节已经写进 buf，帧可以立刻放掉，不用等 GC
+                            for frame in frames:
+                                frame.close()
+                            frames.clear()
                     else:
                         # 保留原图尺寸，禁用 optimize，避免二次压缩
                         im.save(buf, format="GIF", optimize=False)
