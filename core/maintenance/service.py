@@ -12,6 +12,41 @@ if TYPE_CHECKING:
     from ...main import Main  # noqa: F401
 
 
+def format_capacity_warning(
+    total: int, max_reg: int, auto_cleanup: bool, capacity_cmd: str
+) -> str | None:
+    """拼一条「表情库超出容量上限」的告警。
+
+    启动巡检和每小时巡检共用同一套措辞，免得两处各写一版、说法还不一致。
+
+    Args:
+        total: 当前表情包总数。
+        max_reg: 配置的容量上限，<= 0 表示不限制。
+        auto_cleanup: 是否开启了「容量超限自动清理」。
+        capacity_cmd: 手动清理命令（按用户实际唤醒前缀渲染好的）。
+
+    Returns:
+        告警文本；没设上限或没超限时返回 None。
+    """
+    if max_reg <= 0 or total <= max_reg:
+        return None
+    overflow = total - max_reg
+    head = f"[容量控制] 表情包 {total} 张，超出上限 {max_reg} 共 {overflow} 张。"
+    if auto_cleanup:
+        return (
+            head + "「容量超限自动清理」是开启的，后台每小时会永久删除最旧的 "
+            f"{overflow} 张（含图片文件，收藏的不删）。"
+            "想全部留着请把「最大表情包数量」调大或设为 0（不限制），"
+            "也可以直接关掉「容量超限自动清理」"
+        )
+    return (
+        head + "自动清理是关闭的，没有删除任何文件。"
+        f"要清理请手动执行 {capacity_cmd}；不想再看到这条提醒，"
+        "就把「最大表情包数量」调大或设为 0（不限制）；"
+        "想让它每小时自动删最旧的，请打开「容量超限自动清理」"
+    )
+
+
 class MaintenanceService:
     """统一管理插件的维护任务：
 
@@ -150,20 +185,54 @@ class MaintenanceService:
         if not getattr(cfg, "capacity_auto_cleanup", False):
             if self._capacity_warned_count != len(idx):
                 self._capacity_warned_count = len(idx)
-                cmd = self.plugin.cmd("capacity")
-                logger.warning(
-                    f"[容量控制] 表情包 {len(idx)} 张，超出上限 {max_reg} 共 {overflow} 张。"
-                    f"自动清理是关闭的，没有删除任何文件。"
-                    f"要清理请手动执行 {cmd}；不想再看到这条提醒，"
-                    f"就把「最大表情包数量」调大或设为 0（不限制）；"
-                    f"想让它每小时自动删最旧的，请打开「容量超限自动清理」"
+                msg = format_capacity_warning(
+                    len(idx), max_reg, False, self.plugin.cmd("capacity")
                 )
+                if msg:
+                    logger.warning(msg)
             return
 
         handler = getattr(self.plugin, "event_handler", None)
         if handler:
             await handler._enforce_capacity(idx)
         await self.plugin.index_manager.save_index(idx)
+
+    async def warn_capacity_pressure(self) -> str | None:
+        """启动时报一次容量超限，只告警、绝不删除。
+
+        每小时那轮巡检要先 sleep 一小时才跑第一次，重启频繁的机器可能永远
+        等不到它；而容量上限是本插件唯一会永久删表情包的开关，出事的典型
+        顺序是「从旧版本升级 → 配置文件里还存着老默认值 100 → 删掉最旧的
+        几十张 → 几天后才在 WebUI 发现少了」。所以启动时就把话讲清楚。
+
+        Returns:
+            实际写进日志的告警文本；没设上限或没超限时返回 None。
+        """
+        cfg = getattr(self.plugin, "plugin_config", None)
+        if cfg is None:
+            return None
+        try:
+            max_reg = int(getattr(cfg, "max_reg_num", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if max_reg <= 0:
+            return None  # 0 = 不限制容量
+        try:
+            idx = await self.plugin.index_manager.load_index()
+        except Exception as e:
+            logger.debug(f"[容量控制] 启动巡检跳过: {e}")
+            return None
+        msg = format_capacity_warning(
+            len(idx),
+            max_reg,
+            bool(getattr(cfg, "capacity_auto_cleanup", False)),
+            self.plugin.cmd("capacity"),
+        )
+        if msg:
+            # 记下来，免得一小时后那轮巡检把同一句话再念一遍
+            self._capacity_warned_count = len(idx)
+            logger.warning(msg)
+        return msg
 
     async def _cleanup_orphans(self) -> None:
         """清理无文件索引 / 无索引文件。"""

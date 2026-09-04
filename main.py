@@ -1499,6 +1499,9 @@ class Main(Star):
             await self.event_handler.start_background_workers()
 
             self._hint_legacy_migration()
+            # 容量上限是唯一会永久删表情包的开关，每小时那轮巡检要先睡一小时
+            # 才跑第一次，重启频繁的机器可能永远等不到告警，所以启动时先报一次
+            await self.maintenance.warn_capacity_pressure()
 
             # 初始化嵌入向量服务 + 回填旧数据（仅在开启嵌入检索时）
             if self.plugin_config.enable_embedding_search:

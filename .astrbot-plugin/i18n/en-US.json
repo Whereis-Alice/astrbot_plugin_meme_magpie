@@ -5,6 +5,18 @@
     "desc": "Files away the stickers that show up in chat: a vision model classifies and tags them, and the plugin picks a semantically and emotionally fitting one when replying. Includes LLM tools for searching and collecting stickers (the model can pass work, character and action parameters directly), a WebUI library with batch import (configurable concurrency and rate limit), a review queue, duplicate cleanup, storage reclaim, and one-command data migration from astrbot_plugin_stealer."
   },
   "config": {
+    "_capacity_section": {
+      "description": "=== Capacity and safety (important) ===",
+      "hint": ""
+    },
+    "max_reg_num": {
+      "description": "Maximum emoji count (0 = unlimited)",
+      "hint": "Library size limit; 0 means unlimited. Once exceeded, the oldest stickers are permanently deleted (favorites are kept) together with their image files, which cannot be recovered - hence the generous default. Note: after upgrading from an older release this field still shows the value stored in your config file (the default before 1.4.0 was only 100), so please double-check it once."
+    },
+    "capacity_auto_cleanup": {
+      "description": "Auto-clean when over capacity",
+      "hint": "Off (default): only a log warning is emitted and nothing is deleted; run mp capacity manually when you want to clean up. On: an hourly background check permanently deletes the oldest stickers."
+    },
     "_steal_section": {
       "description": "=== Collecting ===",
       "hint": ""
@@ -211,14 +223,6 @@
     "_storage_section": {
       "description": "=== Storage and advanced ===",
       "hint": ""
-    },
-    "max_reg_num": {
-      "description": "Maximum emoji count",
-      "hint": "Library size limit; 0 means unlimited. Once exceeded, the oldest stickers are permanently deleted (favorites are kept) together with their image files, which cannot be recovered - hence the generous default."
-    },
-    "capacity_auto_cleanup": {
-      "description": "Auto-clean when over capacity",
-      "hint": "Off (default): only a log warning is emitted and nothing is deleted; run mp capacity manually when you want to clean up. On: an hourly background check permanently deletes the oldest stickers."
     },
     "storage_cleanup_strategy": {
       "description": "Storage cleanup strategy",

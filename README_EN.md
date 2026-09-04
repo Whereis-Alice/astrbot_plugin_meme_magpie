@@ -389,7 +389,7 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| Max stickers | `2000` | Library cap; `0` = unlimited. Going over the cap **permanently deletes** the oldest entries (favourites excluded) — see [Library capacity cap](#library-capacity-cap) |
+| Max stickers | `2000` | Library cap; `0` = unlimited. Going over the cap **permanently deletes** the oldest entries (favourites excluded). Lives in the "Capacity and safety" group at the very top of the config page — see [Library capacity cap](#library-capacity-cap) |
 | Auto-clean over capacity | `false` | Off: overflow only logs a warning and nothing is deleted. On: the background job prunes the oldest every hour |
 | Cleanup strategy | `balanced` | `conservative` stale index + temp only / `balanced` also orphan files and thumbnails / `aggressive` also the `raw` originals (smallest footprint, no way back to the original file) |
 | Send / collect allow and block lists | `[]` | `group:<id>` or `user:<id>`; both lists can be active at once |
@@ -400,12 +400,16 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 
 This is the only mechanism in the plugin that deletes your data on its own, so it gets its own section:
 
+- **Where to change it**: the very first group on the AstrBot plugin config page, "=== Capacity and safety (important) ===". "Max stickers" is the first field in it. (Before 1.4.1 it sat at position 46, so you had to scroll all the way down to find it.)
 - "Max stickers" is a hard cap. Above it, the oldest entries go first and **the image files go with them — there is no undo** (entries marked as favourite are never touched).
 - Default `2000`, plenty for almost everyone. Set `0` for unlimited (bounded only by your disk).
 - By default **nothing is deleted automatically**: going over the cap only writes one warning to the log (search for `容量控制`) telling you the current count and the overflow. Run `/mp capacity` to actually prune, or turn on "auto-clean over capacity" to have it done hourly.
+- The plugin also runs this check once at startup and says so in the log if you are over the cap (warning only, nothing is deleted).
 - `/mp status` only reads the numbers. `/mp capacity` is the one that deletes.
 
 > **In 1.3.0 and earlier this setting defaulted to `100`**, the hourly background job pruned automatically, and `/mp rebuild_index` pruned as a side effect too. If stickers ever vanished on you in an older version, this was almost certainly why — grep the log for `容量控制` to confirm. Since 1.4.0 the default is 2000 and overflow only warns.
+>
+> ⚠️ **Raising the default does not rewrite a config you have already saved.** AstrBot only fills in defaults for missing keys, so if your config file still holds `100`, it stays `100` after the upgrade. Coming from 1.3.x, please open the top of the config page and check the number yourself.
 
 ## Platform and protocol adapters
 
@@ -507,7 +511,7 @@ It should not happen — editing a description updates the vector immediately, a
 `2000` by default, `0` means unlimited. By default going over the cap **only warns and deletes nothing** — you have to run `/mp capacity` yourself, or turn on "auto-clean over capacity".
 
 **Dozens of stickers disappeared without a word?**
-Grep the log for `容量控制` first. In 1.3.0 and earlier the cap defaulted to 100 and the hourly background job pruned the oldest entries above it, logging a single INFO line that is easy to miss — people who migrated several hundred images from the old plugin hit this most often. 1.4.0 raises the default to 2000 and no longer prunes by default; see [Library capacity cap](#library-capacity-cap).
+Grep the log for `容量控制` first. In 1.3.0 and earlier the cap defaulted to 100 and the hourly background job pruned the oldest entries above it, logging a single INFO line that is easy to miss — people who migrated several hundred images from the old plugin hit this most often. 1.4.0 raises the default to 2000 and no longer prunes by default, **but upgrading never rewrites a value you already saved**, so open the "Capacity and safety" group at the top of the config page and check what "max stickers" says right now. See [Library capacity cap](#library-capacity-cap).
 
 **Will it collect someone's private screenshot?**
 Yes — it has no idea what privacy is. That is why human review is on by default, why there is a `local` scope (sendable only in the chat it came from), and why there is a blocklist. Keep review enabled and use the collect blocklist to exclude sensitive chats.

@@ -1,4 +1,26 @@
 {
+  "_capacity_section": {
+    "description": "=== 容量与安全（重要）===",
+    "type": "text",
+    "invisible": true
+  },
+  "max_reg_num": {
+    "description": "最大表情包数量（0 = 不限制）",
+    "type": "int",
+    "default": 2000,
+    "slider": {
+      "min": 0,
+      "max": 20000,
+      "step": 50
+    },
+    "hint": "表情库上限，填 0 = 不限制。超出上限时会永久删除最旧的表情包（收藏的不删），图片文件一并删除且无法恢复，所以默认值给得比较宽松。注意：从旧版本升级上来时这里显示的仍是你配置文件里存着的旧值（1.4.0 之前的默认值只有 100），升级后请手动确认一次。"
+  },
+  "capacity_auto_cleanup": {
+    "description": "容量超限自动清理",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭（默认）：超出上限时只在日志里告警，一张都不删，需要清理时手动执行 mp capacity。开启：后台每小时检查一次，自动永久删除最旧的表情包。"
+  },
   "_steal_section": {
     "description": "=== 偷图设置 ===",
     "type": "text",
@@ -363,23 +385,6 @@
     "description": "=== 存储及进阶管理 ===",
     "type": "text",
     "invisible": true
-  },
-  "max_reg_num": {
-    "description": "最大表情包数量",
-    "type": "int",
-    "default": 2000,
-    "slider": {
-      "min": 0,
-      "max": 20000,
-      "step": 50
-    },
-    "hint": "表情库上限，填 0 = 不限制。超出上限时会永久删除最旧的表情包（收藏的不删），图片文件一并删除且无法恢复，所以默认值给得比较宽松。"
-  },
-  "capacity_auto_cleanup": {
-    "description": "容量超限自动清理",
-    "type": "bool",
-    "default": false,
-    "hint": "关闭（默认）：超出上限时只在日志里告警，一张都不删，需要清理时手动执行 mp capacity。开启：后台每小时检查一次，自动永久删除最旧的表情包。"
   },
   "storage_cleanup_strategy": {
     "description": "存储清理策略",

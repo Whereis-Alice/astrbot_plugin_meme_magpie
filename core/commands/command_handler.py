@@ -285,6 +285,9 @@ class CommandHandler:
 
         image_index = await self.plugin.index_manager.load_index()
         total_count = len(image_index)
+        # max_reg_num 允许填 0 表示不限制容量，不能直接拿它当除数
+        max_reg = int(getattr(self.plugin.plugin_config, "max_reg_num", 0) or 0)
+        capacity_auto = bool(getattr(self.plugin.plugin_config, "capacity_auto_cleanup", False))
 
         # 添加视觉模型信息
         vision_model = self.plugin._load_vision_provider_id() or "未设置（将使用当前会话默认模型）"
@@ -307,7 +310,12 @@ class CommandHandler:
         # 后台任务状态
         status_text += "⚙️ 后台任务:\n"
         status_text += "Raw清理: 自动 (30min)\n"
-        status_text += "容量控制: 自动 (60min)\n\n"
+        if max_reg <= 0:
+            status_text += "容量控制: 未设上限（不会清理）\n\n"
+        elif capacity_auto:
+            status_text += f"容量控制: 自动清理 (60min，上限 {max_reg})\n\n"
+        else:
+            status_text += f"容量控制: 仅告警 (60min，不删图，上限 {max_reg})\n\n"
 
         # 表情包统计信息
         if total_count == 0:
@@ -322,7 +330,13 @@ class CommandHandler:
 
             # 构建统计信息
             status_text += "📊 表情包统计:\n"
-            status_text += f"总数量: {total_count}/{self.plugin.plugin_config.max_reg_num} ({total_count / self.plugin.plugin_config.max_reg_num * 100:.1f}%)\n\n"
+            if max_reg > 0:
+                status_text += (
+                    f"总数量: {total_count}/{max_reg} "
+                    f"({total_count / max_reg * 100:.1f}%)\n\n"
+                )
+            else:
+                status_text += f"总数量: {total_count}（未设上限）\n\n"
 
             # 分类统计 - 只显示前5个最多的分类
             status_text += "📂 分类统计 (前5):\n"
@@ -430,7 +444,16 @@ class CommandHandler:
             image_index = await self.plugin.index_manager.load_index()
 
             current_count = len(image_index)
-            max_count = self.plugin.plugin_config.max_reg_num
+            max_count = int(getattr(self.plugin.plugin_config, "max_reg_num", 0) or 0)
+
+            # 填 0 = 不限制。这里必须先拦一下，否则 current_count <= 0 不成立，
+            # 会一路走到清理逻辑，最后报一句「删除了 0 个」把人绕晕。
+            if max_count <= 0:
+                yield event.plain_result(
+                    f"容量上限已关闭（配置项「最大表情包数量」填的是 0）\n"
+                    f"当前 {current_count} 张，不会清理任何表情包"
+                )
+                return
 
             if current_count <= max_count:
                 yield event.plain_result(
@@ -448,7 +471,7 @@ class CommandHandler:
 
             yield event.plain_result(
                 f"容量控制完成\n"
-                f"删除了 {removed_count} 个最旧的表情包\n"
+                f"永久删除了 {removed_count} 个最旧的表情包（含图片文件，收藏的不删）\n"
                 f"当前数量: {new_count}/{max_count}"
             )
         except Exception as e:
