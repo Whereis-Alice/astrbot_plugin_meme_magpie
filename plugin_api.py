@@ -294,8 +294,16 @@ class PluginAPI:
                 getattr(self.plugin, "meme_selector", None), "_smart_select_service", None
             )
             if smart and getattr(smart, "_embedding_service", None):
-                await smart._embedding_service.delete_by_path(path)
-                await smart._embedding_service.insert_emoji(path, entry)
+                service = smart._embedding_service
+                # 旧向量没删干净就不能再插新的：否则同一张图会同时存在新旧两条文档，
+                # 检索时旧描述照样命中。跳过的这条会在下次回填时按文本指纹自动补上。
+                if await service.delete_by_path(path):
+                    await service.insert_emoji(path, entry)
+                else:
+                    logger.warning(
+                        "[Embedding] 旧向量未能删除，本次跳过重建，"
+                        f"下次重启回填会按文本指纹自动修复: {path}"
+                    )
                 smart._invalidate_embedding_index()
         except Exception as e:
             logger.debug(f"[Embedding] 角色更新后重建向量失败: {e}")
@@ -568,6 +576,9 @@ class PluginAPI:
             Path(path_str)
             return {
                 "hash": meta.get("hash", ""),
+                # 文件名是每张图真正唯一的标识：极少数情况下会出现两条记录 hash 相同
+                # （早期去重漏判留下的），前端拿 hash 当列表 key 会让其中一张显示不出来。
+                "file_name": Path(path_str).name,
                 "category": meta.get("category", "unknown"),
                 "tags": meta.get("tags", []),
                 "desc": meta.get("desc", ""),

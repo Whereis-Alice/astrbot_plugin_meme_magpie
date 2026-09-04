@@ -22,9 +22,58 @@ class MaintenanceService:
     RAW_CLEANUP_INTERVAL_SECONDS = 30 * 60
     CAPACITY_CONTROL_INTERVAL_SECONDS = 60 * 60
 
+    # 一次孤儿清理最多允许删掉多少比例的文件，超过就只告警不动手。
+    # 孤儿判定完全依赖「数据库里有没有这条记录」，只要数据库读得不完整，
+    # 这里就会把用户正常的表情包当垃圾删掉，所以必须设上限。
+    ORPHAN_DELETE_RATIO_LIMIT = 0.2
+    ORPHAN_DELETE_MIN_COUNT = 20
+
     def __init__(self, plugin: "Main") -> None:
         self.plugin = plugin
         self._tasks: list[asyncio.Task] = []
+        # 容量超限告警去重：同一个数量只提醒一次，避免每小时刷日志
+        self._capacity_warned_count: int = -1
+
+    @staticmethod
+    def _norm_path(value: object) -> str:
+        """统一路径写法后再比较。
+
+        大小写、斜杠方向、`.` / `..` 都会让两个指向同一个文件的字符串不相等，
+        直接用原始字符串比对会把正常文件误判成孤儿。
+        """
+        try:
+            return os.path.normcase(os.path.abspath(os.path.normpath(str(value))))
+        except Exception:
+            return str(value)
+
+    async def _remove_orphan_files(
+        self, orphans: list[str], total_files: int, scope: str
+    ) -> None:
+        """删除未登记文件，带比例上限保护。"""
+        if not orphans:
+            return
+
+        limit = max(
+            self.ORPHAN_DELETE_MIN_COUNT,
+            int(total_files * self.ORPHAN_DELETE_RATIO_LIMIT),
+        )
+        if len(orphans) > limit:
+            logger.warning(
+                f"[Orphan] {scope} 目录里有 {len(orphans)}/{total_files} 个文件不在数据库中，"
+                f"超过安全阈值 {limit}，本次不删除任何文件。"
+                f"这通常说明索引损坏或数据目录被改动过，建议先重建索引再排查"
+            )
+            return
+
+        preview = ", ".join(os.path.basename(p) for p in orphans[:10])
+        if len(orphans) > 10:
+            preview += " …"
+        logger.info(
+            f"[Orphan] 清理 {scope} 目录 {len(orphans)} 个未登记文件"
+            f"（目录共 {total_files} 个）: {preview}"
+        )
+        for fpath in orphans:
+            await safe_remove_file(fpath)
 
     async def run_startup_cleanup(self) -> None:
         """启动阶段调用：执行一次性清理（遗留文件 + 孤儿扫描）。"""
@@ -69,16 +118,52 @@ class MaintenanceService:
         while True:
             try:
                 await asyncio.sleep(self.CAPACITY_CONTROL_INTERVAL_SECONDS)
-                idx = await self.plugin.index_manager.load_index()
-                if len(idx) > self.plugin.plugin_config.max_reg_num:
-                    handler = getattr(self.plugin, "event_handler", None)
-                    if handler:
-                        await handler._enforce_capacity(idx)
-                    await self.plugin.index_manager.save_index(idx)
+                await self._check_capacity_once()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"容量控制循环出错: {e}")
+
+    async def _check_capacity_once(self) -> None:
+        """每小时巡检容量。
+
+        默认只告警不删除：后台静默删掉用户攒了几个月的表情包，
+        从日志里只能看到一行 INFO，用户根本无从察觉。
+        想恢复自动清理请打开配置项 capacity_auto_cleanup。
+        """
+        cfg = getattr(self.plugin, "plugin_config", None)
+        if cfg is None:
+            return
+        try:
+            max_reg = int(getattr(cfg, "max_reg_num", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if max_reg <= 0:
+            return  # 0 = 不限制容量
+
+        idx = await self.plugin.index_manager.load_index()
+        overflow = len(idx) - max_reg
+        if overflow <= 0:
+            self._capacity_warned_count = -1
+            return
+
+        if not getattr(cfg, "capacity_auto_cleanup", False):
+            if self._capacity_warned_count != len(idx):
+                self._capacity_warned_count = len(idx)
+                cmd = self.plugin.cmd("capacity")
+                logger.warning(
+                    f"[容量控制] 表情包 {len(idx)} 张，超出上限 {max_reg} 共 {overflow} 张。"
+                    f"自动清理是关闭的，没有删除任何文件。"
+                    f"要清理请手动执行 {cmd}；不想再看到这条提醒，"
+                    f"就把「最大表情包数量」调大或设为 0（不限制）；"
+                    f"想让它每小时自动删最旧的，请打开「容量超限自动清理」"
+                )
+            return
+
+        handler = getattr(self.plugin, "event_handler", None)
+        if handler:
+            await handler._enforce_capacity(idx)
+        await self.plugin.index_manager.save_index(idx)
 
     async def _cleanup_orphans(self) -> None:
         """清理无文件索引 / 无索引文件。"""
@@ -93,6 +178,20 @@ class MaintenanceService:
                 stale_paths = [
                     p for p in all_paths if p and not os.path.isfile(str(p))
                 ]
+                if stale_paths:
+                    # 数据目录没挂载好 / 被整体移动时，这里会看到「全部文件都不见了」。
+                    # 旧代码会把整张索引表清空，等目录回来时数据已经没了。
+                    stale_limit = max(
+                        self.ORPHAN_DELETE_MIN_COUNT,
+                        int(len(all_paths) * self.ORPHAN_DELETE_RATIO_LIMIT),
+                    )
+                    if len(stale_paths) > stale_limit:
+                        logger.warning(
+                            f"[Orphan] {len(stale_paths)}/{len(all_paths)} 条索引指向的文件都不存在，"
+                            f"超过安全阈值 {stale_limit}，本次不改动数据库。"
+                            f"请先确认数据目录是否挂载正常或被移动过"
+                        )
+                        stale_paths = []
                 if stale_paths:
                     await db.delete_paths(stale_paths)
                     logger.info(
@@ -116,27 +215,39 @@ class MaintenanceService:
                 if db_count == 0:
                     return
 
-                db_paths = set(all_paths)
-                pending_db_paths = set(
-                    r.get("path")
+                db_paths = {self._norm_path(p) for p in all_paths}
+                pending_db_paths = {
+                    self._norm_path(r.get("path"))
                     for r in (pending_rows[0] if pending_rows else [])
                     if r.get("path")
-                )
+                }
 
                 categories_dir = str(self.plugin.plugin_config.categories_dir)
                 if os.path.isdir(categories_dir):
+                    cat_total = 0
+                    cat_orphans: list[str] = []
                     for root, _dirs, files in os.walk(categories_dir):
                         for fname in files:
+                            cat_total += 1
                             fpath = os.path.join(root, fname)
-                            if fpath not in db_paths:
-                                await safe_remove_file(fpath)
+                            if self._norm_path(fpath) not in db_paths:
+                                cat_orphans.append(fpath)
+                    await self._remove_orphan_files(cat_orphans, cat_total, "categories")
 
                 pending_dir = str(self.plugin.plugin_config.pending_dir)
                 if os.path.isdir(pending_dir):
+                    pending_total = 0
+                    pending_orphans: list[str] = []
                     for fname in os.listdir(pending_dir):
                         fpath = os.path.join(pending_dir, fname)
-                        if os.path.isfile(fpath) and fpath not in pending_db_paths:
-                            await safe_remove_file(fpath)
+                        if not os.path.isfile(fpath):
+                            continue
+                        pending_total += 1
+                        if self._norm_path(fpath) not in pending_db_paths:
+                            pending_orphans.append(fpath)
+                    await self._remove_orphan_files(
+                        pending_orphans, pending_total, "pending"
+                    )
         except Exception as e:
             logger.debug(f"[Orphan] 孤儿扫描异常（不阻塞）: {e}")
 

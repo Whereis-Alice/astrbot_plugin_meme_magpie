@@ -214,7 +214,11 @@
     },
     "max_reg_num": {
       "description": "Maximum emoji count",
-      "hint": "Storage limit. When the limit is reached, old emoji are automatically removed per the cleanup strategy."
+      "hint": "Library size limit; 0 means unlimited. Once exceeded, the oldest stickers are permanently deleted (favorites are kept) together with their image files, which cannot be recovered - hence the generous default."
+    },
+    "capacity_auto_cleanup": {
+      "description": "Auto-clean when over capacity",
+      "hint": "Off (default): only a log warning is emitted and nothing is deleted; run mp capacity manually when you want to clean up. On: an hourly background check permanently deletes the oldest stickers."
     },
     "storage_cleanup_strategy": {
       "description": "Storage cleanup strategy",

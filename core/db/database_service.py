@@ -27,7 +27,7 @@ class DatabaseService:
     _RELATED_FETCH_CHUNK_SIZE = 400
 
     # 表结构版本，用于迁移检测
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, db_path: str | Path | None = None):
         """初始化数据库服务。
@@ -134,6 +134,11 @@ class DatabaseService:
 
                 if current_version < 7:
                     self._migrate_v7(conn)
+
+                # v8: 向量新鲜度表 emoji_embedding_state（由 _create_tables 用 IF NOT EXISTS 建好）
+                # 老库升级上来时该表为空，回填只补指纹、不调用嵌入模型，避免升级后全库重算
+                if current_version < 8:
+                    logger.info("[DB] migration: emoji_embedding_state table ready")
 
     def _create_tables(self, conn: sqlite3.Connection) -> None:
         """创建所有数据表。"""
@@ -261,6 +266,17 @@ class DatabaseService:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_model ON emoji_embedding(model_sig)")
+
+        # 向量新鲜度：记录每条向量对应的嵌入文本指纹。
+        # 回填时用它发现「表情包内容改过、但向量还是旧的」，与向量存储后端无关。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS emoji_embedding_state (
+                path TEXT PRIMARY KEY,
+                text_hash TEXT NOT NULL,
+                updated_at INTEGER DEFAULT 0,
+                FOREIGN KEY (path) REFERENCES emoji(path) ON DELETE CASCADE
+            )
+        """)
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_emoji_category ON emoji(category)")
         try:
@@ -586,9 +602,13 @@ class DatabaseService:
         return tuple(values)
 
     def clear_all_embeddings(self) -> None:
-        """清空文本向量，用于嵌入语料格式升级后重建。"""
+        """清空文本向量与向量指纹，用于嵌入语料格式升级或强制重建。"""
         with self._get_connection() as conn:
             conn.execute("DELETE FROM emoji_embedding")
+            try:
+                conn.execute("DELETE FROM emoji_embedding_state")
+            except sqlite3.OperationalError:
+                pass
 
     def get_meta_value(self, key: str) -> str | None:
         with self._get_connection() as conn:
@@ -1946,6 +1966,51 @@ class DatabaseService:
     def delete_embedding(self, path: str) -> None:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM emoji_embedding WHERE path = ?", (path,))
+
+    # ── 向量新鲜度指纹 (emoji_embedding_state) ──
+
+    def get_all_embedding_hashes(self) -> dict[str, str]:
+        """已记录的向量文本指纹：path -> text_hash。
+
+        与向量存储后端无关（FaissVecDB / SQLite 通用），用于判断向量是否已过期。
+        """
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT path, text_hash FROM emoji_embedding_state").fetchall()
+            return {str(r["path"]): str(r["text_hash"]) for r in rows if r["path"]}
+
+    def set_embedding_hash(self, path: str, text_hash: str) -> None:
+        """记录/更新某 path 当前向量对应的文本指纹。"""
+        self.set_embedding_hashes([(path, text_hash)])
+
+    def set_embedding_hashes(self, items: list[tuple[str, str]]) -> None:
+        """批量写入文本指纹，一次连接搞定，避免逐条开库。"""
+        now = int(time.time())
+        rows = [(str(p), str(h), now) for p, h in items if p and h]
+        if not rows:
+            return
+        sql = """
+            INSERT INTO emoji_embedding_state (path, text_hash, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                text_hash = excluded.text_hash,
+                updated_at = excluded.updated_at
+        """
+        with self._get_connection() as conn:
+            try:
+                conn.executemany(sql, rows)
+            except sqlite3.IntegrityError:
+                # 个别 path 已不在 emoji 表里（外键约束），逐条写入跳过坏行
+                for row in rows:
+                    try:
+                        conn.execute(sql, row)
+                    except sqlite3.IntegrityError:
+                        continue
+
+    def delete_embedding_hash(self, path: str) -> None:
+        if not path:
+            return
+        with self._get_connection() as conn:
+            conn.execute("DELETE FROM emoji_embedding_state WHERE path = ?", (path,))
 
     def load_embeddings_by_sig(self, model_sig: str) -> list[dict[str, Any]]:
         """加载某 model_sig 的所有向量行，用于构建内存索引矩阵。"""

@@ -346,7 +346,7 @@ export const TEMPLATE = `
             </div>
 
             <div v-else class="inventory-grid" :class="{ 'list-mode': viewMode === 'list' }">
-                <div v-for="img in images" :key="img.hash" class="item-slot"
+                <div v-for="img in images" :key="img.file_name || img.hash" class="item-slot"
                     :class="{ selected: selectedImages.has(img.hash) }"
                     @mouseenter="onItemSlotEnter($event)"
                     @click="isBatchMode ? toggleSelection(img) : openPreview(img)">

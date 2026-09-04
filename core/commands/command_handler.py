@@ -150,6 +150,49 @@ class CommandHandler:
         async for result in IndexRebuildCommand(self.plugin).rebuild_index(event):
             yield result
 
+    async def rebuild_vectors(self, event):
+        """强制重建语义检索向量：清空后整库重新嵌入。
+
+        正常情况下不需要手动跑：改描述会即时更新向量，重启也会按文本指纹补差。
+        这条命令是兜底，用于历史版本留下的错位向量（搜出来还是旧描述）。
+        """
+        smart = getattr(
+            getattr(self.plugin, "meme_selector", None), "_smart_select_service", None
+        )
+        service = getattr(smart, "_embedding_service", None) if smart else None
+        if service is None:
+            yield event.plain_result("❌ 语义检索没有启用，不需要重建向量")
+            return
+
+        yield event.plain_result(
+            "🔄 开始重建语义检索向量：会按表情包总量重新调用一遍嵌入模型，请耐心等待…"
+        )
+        try:
+            result = await service.rebuild_vectors()
+        except Exception as e:
+            logger.error(f"[Embedding] 重建向量失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 重建向量失败：{e}")
+            return
+
+        if not result.get("ok"):
+            yield event.plain_result(
+                "❌ 语义检索当前不可用（没配置嵌入模型或已关闭），没有改动任何数据"
+            )
+            return
+
+        written = int(result.get("written") or 0)
+        total = int(result.get("total") or 0)
+        if smart is not None and hasattr(smart, "_invalidate_embedding_index"):
+            try:
+                smart._invalidate_embedding_index()
+            except Exception:
+                pass
+
+        msg = f"✅ 语义向量重建完成：{written}/{total} 条"
+        if total and written < total:
+            msg += "\n没写入的通常是描述为空，或嵌入模型临时不可用；下次重启会自动补齐"
+        yield event.plain_result(msg)
+
     # ===== CommandHandler 核心逻辑 =====
 
     async def capture(self, event: AstrMessageEvent):
@@ -459,7 +502,11 @@ class CommandHandler:
                     (c("clean"), "清理还没分类的原始图缓存，不动已入库的表情包"),
                     (c("capacity"), "立刻执行容量上限清理"),
                     (c("clear_emotion_cache"), "清空情绪分析缓存，释放内存"),
-                    (c("rebuild_index"), "重建索引，用于修复检索异常"),
+                    (c("rebuild_index"), "重建索引，用于修复检索异常（不会删图）"),
+                    (
+                        c("rebuild_vectors"),
+                        "重建语义检索向量，怀疑搜出来的还是旧描述时用",
+                    ),
                 ],
             ),
             (

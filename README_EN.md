@@ -146,7 +146,9 @@ If auto-detection fails, pass the path explicitly:
 - `categories.json` / `category_info.json` / `characters.json` / `character_info.json`
 - The old plugin's config values (only keys this plugin also has; new settings keep their defaults)
 
-**What does not move**: thumbnail cache, temp files, embedding vectors. Run `/mp rebuild_index` once after migrating.
+**What does not move**: thumbnail cache, temp files, semantic vectors. Vectors are topped up automatically on startup — you do not have to do anything. Only run `/mp rebuild_index` if the index itself looks broken (files are there but nothing shows up in search); it rebuilds the index only and **never deletes images**.
+
+After migrating, check that "max stickers" is large enough. If you just brought in several hundred images while the cap is still a small number, everything above the cap counts as overflow. The default is `2000` and overflow only produces a log warning by default — see [Library capacity cap](#library-capacity-cap).
 
 You get a report at the end: how many images moved, how many were skipped (already present / file missing / duplicate hash), how many failed. Filename collisions are renamed, never overwritten.
 
@@ -310,9 +312,10 @@ Command group `mp`, aliases `magpie` and `神偷`. The table lists subcommands o
 | `blacklist <index\|filename>` | Delete and blocklist it so it is never collected again |
 | `scope <index\|filename> <public\|local>` | Set scope; `local` restricts sending to the source chat |
 | `clean` | Empty the `raw` staging directory; stickers already in the library are untouched |
-| `capacity` | Run a capacity-control pass now. **This really deletes the oldest stickers above the cap** (use `status` if you only want to read the numbers) |
+| `capacity` | Run a capacity-control pass now. **This permanently deletes the oldest stickers above the cap** (favourites are kept; use `status` if you only want to read the numbers) |
 | `tag_stats [N]` | Tag health check: frequent tags, noisy rare tags, untagged entries (N defaults to 15) |
-| `rebuild_index` | Rebuild the retrieval index |
+| `rebuild_index` | Rebuild the retrieval index. Index only — it **never deletes images** |
+| `rebuild_vectors` | Wipe and rebuild the semantic search vectors. Use it when you edited a description but search still returns the old one; says so and does nothing if no embedding model is configured |
 | `migrate [check\|apply\|move] [path]` | Migrate data from astrbot_plugin_stealer |
 | `group show` | Show the collect/send list configuration |
 | `group <send\|steal> priority <wl\|bl>` | Which list wins when both match |
@@ -386,11 +389,23 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| Max stickers | `100` | Oldest entries are pruned past this; raise it if you want a big library |
+| Max stickers | `2000` | Library cap; `0` = unlimited. Going over the cap **permanently deletes** the oldest entries (favourites excluded) — see [Library capacity cap](#library-capacity-cap) |
+| Auto-clean over capacity | `false` | Off: overflow only logs a warning and nothing is deleted. On: the background job prunes the oldest every hour |
 | Cleanup strategy | `balanced` | `conservative` stale index + temp only / `balanced` also orphan files and thumbnails / `aggressive` also the `raw` originals (smallest footprint, no way back to the original file) |
 | Send / collect allow and block lists | `[]` | `group:<id>` or `user:<id>`; both lists can be active at once |
 | List priority | `whitelist_first` | Who wins when both match |
 | VLM prompts (plain / with moderation) | built-in | Empty uses the bundled `prompts.json` templates |
+
+### Library capacity cap
+
+This is the only mechanism in the plugin that deletes your data on its own, so it gets its own section:
+
+- "Max stickers" is a hard cap. Above it, the oldest entries go first and **the image files go with them — there is no undo** (entries marked as favourite are never touched).
+- Default `2000`, plenty for almost everyone. Set `0` for unlimited (bounded only by your disk).
+- By default **nothing is deleted automatically**: going over the cap only writes one warning to the log (search for `容量控制`) telling you the current count and the overflow. Run `/mp capacity` to actually prune, or turn on "auto-clean over capacity" to have it done hourly.
+- `/mp status` only reads the numbers. `/mp capacity` is the one that deletes.
+
+> **In 1.3.0 and earlier this setting defaulted to `100`**, the hourly background job pruned automatically, and `/mp rebuild_index` pruned as a side effect too. If stickers ever vanished on you in an older version, this was almost certainly why — grep the log for `容量控制` to confirm. Since 1.4.0 the default is 2000 and overflow only warns.
 
 ## Platform and protocol adapters
 
@@ -485,8 +500,14 @@ Adjust the send probability. If they arrive at odd moments, make sure the intent
 **Is an embedding model required?**
 No. Without one it uses BM25 keyword search; only cases where wording differs but meaning matches will be weaker.
 
-**Is 100 stickers not a bit low?**
-It is a conservative default — raise it. Note that exceeding the cap prunes the oldest entries, so check before lowering it.
+**I edited a description but search still returns the old text?**
+It should not happen — editing a description updates the vector immediately, and startup tops up anything stale by text fingerprint. If you do hit it (misaligned vectors left over from an older version), run `/mp rebuild_vectors` once.
+
+**What is the sticker limit? Will it delete my images?**
+`2000` by default, `0` means unlimited. By default going over the cap **only warns and deletes nothing** — you have to run `/mp capacity` yourself, or turn on "auto-clean over capacity".
+
+**Dozens of stickers disappeared without a word?**
+Grep the log for `容量控制` first. In 1.3.0 and earlier the cap defaulted to 100 and the hourly background job pruned the oldest entries above it, logging a single INFO line that is easy to miss — people who migrated several hundred images from the old plugin hit this most often. 1.4.0 raises the default to 2000 and no longer prunes by default; see [Library capacity cap](#library-capacity-cap).
 
 **Will it collect someone's private screenshot?**
 Yes — it has no idea what privacy is. That is why human review is on by default, why there is a `local` scope (sendable only in the chat it came from), and why there is a blocklist. Keep review enabled and use the collect blocklist to exclude sensitive chats.
@@ -524,10 +545,18 @@ Relative to upstream `astrbot_plugin_stealer`:
 - **Half-filled dialogs vanished on a stray click** — the sticker-management and tag-editing dialogs used to close on any click on the backdrop or an Esc press, dropping you back to the main page and losing everything you had typed. Once a dialog has content, both the backdrop and Esc now just shake it and point you at the Cancel button. Three related bugs went with it: releasing a text drag outside the dialog closed it, Esc inside a confirm box fell through to the dialog underneath, and the preview layer could not be dismissed after cancelling an edit.
 - **The batch re-analysis dialog overflowed its panel** — enough options pushed the buttons out of view. The body scrolls now and the actions stick to the bottom; the dialog also opens on the first scope that actually has items, and zero-item scopes are greyed out.
 
+1.4.0 fixed these too (the first one matters most, and it is inherited from upstream):
+
+- **Stickers silently disappeared** — upstream's storage cap defaults to 100, and the hourly background job deleted everything above it, files included, logging a single INFO line. Anyone who migrated several hundred images from the old plugin lost some without touching anything and with no way to tell why. Worse, upstream's own docs tell you to run `rebuild_index` after migrating, and that command ran the same pruning pass on completion. Now: the default cap is 2000, `0` means unlimited, the background job only warns unless you explicitly enable "auto-clean over capacity", `rebuild_index` never deletes images, and real deletions log at WARNING with the file names. See [Library capacity cap](#library-capacity-cap).
+- **Orphan cleanup could wipe the whole library** — "file on disk with no database row" depends entirely on reading the database completely. If the data directory is not mounted or has been moved, the old logic treated every image as garbage. A single pass that would remove more than 20% (and at least 20 files) now only warns. Path comparison is also case- and separator-normalised: on Windows `D:\a\b.png` and `d:/a/b.png` are the same file, and the old code called it an orphan.
+- **Edited descriptions still returned the old text** — updating a description deleted only the first matching vector, so duplicates left over from earlier versions stayed in the store and kept matching; a failed delete still wrote the new vector, leaving one image with two competing descriptions. It now deletes every duplicate in one go and skips the write with a warning if it cannot. A text-fingerprint table (schema v8) was added as well, so startup only re-embeds entries whose description actually changed and upgrading from an older version does not burn a full pass of embedding quota.
+- **The WebUI showed fewer images than exist** — the library list used the image hash as its list key, so the same image filed under two categories collided and Vue rendered only one of them. It uses the file name now.
+
 ## Notes
 
 - **A vision model is mandatory**; without one, nothing that involves recognition works.
 - Deleting a category in the WebUI deletes the image files inside it.
+- "Max stickers" is a hard cap that really deletes files. Read [Library capacity cap](#library-capacity-cap) before lowering it.
 - With "send as GIF" enabled, every send re-encodes the animation. Peak memory is budget-capped now (see [Sending](#sending)) but still higher than sending the original file — leave it off if memory is tight.
 - Sticker content and copyright belong to their creators. Follow your platform's rules and do not use this to spread prohibited content.
 

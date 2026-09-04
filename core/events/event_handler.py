@@ -193,10 +193,11 @@ class EventHandler:
         try:
             max_reg = int(self.plugin.plugin_config.max_reg_num)
         except (TypeError, ValueError):
-            max_reg = 500  # 默认值
+            max_reg = 2000  # 读不到配置时按默认上限走
 
         if max_reg <= 0:
-            logger.warning(f"容量控制上限无效: max_reg_num={max_reg}，跳过")
+            # 0（或负数）表示不限制容量，直接什么都不清理
+            logger.debug("容量控制已关闭（max_reg_num <= 0），跳过清理")
             return []
 
         if len(image_index) <= max_reg:
@@ -302,7 +303,16 @@ class EventHandler:
             if not items_to_remove:
                 return files_actually_deleted
 
-            logger.info(f"[容量控制-索引] 将删除 {len(items_to_remove)} 个最旧条目")
+            # 这是永久删除（图片文件 + 索引一起删），务必把清单写进日志：
+            # 用户回头发现表情包少了，至少能查出是谁删的、删了哪些。
+            max_reg = getattr(self.plugin.plugin_config, "max_reg_num", 0)
+            preview = ", ".join(Path(p).name for p, _ in items_to_remove[:20])
+            if len(items_to_remove) > 20:
+                preview += " …"
+            logger.warning(
+                f"[容量控制] 当前 {len(image_index)} 张超出上限 {max_reg}，"
+                f"即将永久删除 {len(items_to_remove)} 个最旧条目（收藏不参与）: {preview}"
+            )
 
             for remove_path, _ in items_to_remove:
                 if remove_path not in image_index:

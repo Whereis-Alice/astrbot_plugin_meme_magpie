@@ -222,10 +222,12 @@ class Main(Star):
         errors = []
         fixed = []
         fixed_values = {}
-        if not isinstance(cfg.max_reg_num, int) or cfg.max_reg_num <= 0:
-            errors.append("最大表情数量必须大于0的整数")
-            fixed.append("最大表情数量已重置为100")
-            fixed_values["max_reg_num"] = 100
+        # 0 = 不限制容量，是合法取值。旧版本会把 0 悄悄改成 100，
+        # 用户以为关掉了上限，实际上超过 100 张就开始被永久删除。
+        if not isinstance(cfg.max_reg_num, int) or cfg.max_reg_num < 0:
+            errors.append("最大表情数量必须是 0（不限制）或正整数")
+            fixed.append("最大表情数量已重置为 2000")
+            fixed_values["max_reg_num"] = 2000
         if not isinstance(cfg.meme_chance, (int, float)) or not (0 <= cfg.meme_chance <= 1):
             errors.append("表情发送概率必须在0-1之间")
             fixed.append("表情发送概率已重置为0.4")
@@ -654,6 +656,13 @@ class Main(Star):
     async def rebuild_index(self, event: AstrMessageEvent):
         """重建表情包索引，用于修复索引异常或版本迁移。"""
         async for result in self.command_handler.rebuild_index(event):
+            yield result
+
+    @filter.permission_type(PermissionType.ADMIN)
+    @mp.command("rebuild_vectors")
+    async def rebuild_vectors(self, event: AstrMessageEvent):
+        """重建语义检索向量，用于修复"改了描述但搜出来还是旧的"。"""
+        async for result in self.command_handler.rebuild_vectors(event):
             yield result
 
     @mp.command("help", alias={"帮助"})

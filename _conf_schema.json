@@ -367,13 +367,19 @@
   "max_reg_num": {
     "description": "最大表情包数量",
     "type": "int",
-    "default": 100,
+    "default": 2000,
     "slider": {
-      "min": 10,
-      "max": 2000,
-      "step": 10
+      "min": 0,
+      "max": 20000,
+      "step": 50
     },
-    "hint": "表情包存储上限。达到上限后自动按清理策略淘汰旧表情包。"
+    "hint": "表情库上限，填 0 = 不限制。超出上限时会永久删除最旧的表情包（收藏的不删），图片文件一并删除且无法恢复，所以默认值给得比较宽松。"
+  },
+  "capacity_auto_cleanup": {
+    "description": "容量超限自动清理",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭（默认）：超出上限时只在日志里告警，一张都不删，需要清理时手动执行 mp capacity。开启：后台每小时检查一次，自动永久删除最旧的表情包。"
   },
   "storage_cleanup_strategy": {
     "description": "存储清理策略",

@@ -10,6 +10,18 @@ from pathlib import Path
 # 确保项目路径可用
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# pytest 会以包内名字（astrbot_plugin_meme_magpie.tests.conftest）导入本文件，
+# 而部分测试模块写的是 `from tests.conftest import ...`。若不做处理，Python 会把本
+# 文件加载成两份互不相干的模块，于是下面的 stub 类会出现两个不同的对象：先导入的
+# 业务模块（如 core.events.event_handler）绑定第一份 Image，后一份 conftest 又把
+# astrbot.api.message_components.Image 覆盖成第二份，isinstance 判断随即失效，
+# 测试会以“消息里没有图片”的形式莫名失败。这里让所有别名指向同一个模块对象。
+_self_module = sys.modules.get(__name__)
+if _self_module is not None:
+    _package_name = Path(__file__).parent.parent.name
+    for _alias in ("conftest", "tests.conftest", f"{_package_name}.tests.conftest"):
+        sys.modules.setdefault(_alias, _self_module)
+
 
 # 定义共享的 stubs 类（所有测试必须使用这些类）
 class _SharedImage:

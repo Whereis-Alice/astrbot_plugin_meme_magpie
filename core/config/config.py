@@ -69,7 +69,11 @@ class PluginConfig(BaseModel):
     batch_analyze_retry_backoff: float = 2.0  # 重试退避基数（秒），指数增长
 
     # === 内部常量/高级配置 ===
-    max_reg_num: int = 100
+    # 表情库上限；0 = 不限制。超出上限时会「永久删除」最旧的表情包（收藏除外），
+    # 所以默认值给得宽松：宁可多占点磁盘，也不要静悄悄把用户攒的图删掉。
+    max_reg_num: int = 2000
+    # 后台每小时的容量巡检是否直接删文件。默认只在日志里告警，删不删由用户决定。
+    capacity_auto_cleanup: bool = False
     content_filtration: bool = False  # 内容审核开关
     content_filtration_fail_open: bool = False
     storage_cleanup_strategy: str = "balanced"

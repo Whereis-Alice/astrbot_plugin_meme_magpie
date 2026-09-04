@@ -203,14 +203,26 @@ class IndexRebuildCommand:
             final_index = rebuilt_index
             # --- 智能合并逻辑结束 ---
 
-            # 重建后若超过容量限制，先执行容量控制清理
-            max_reg = getattr(self.plugin, "max_reg_num", 0)
+            # 重建索引只负责「重建」，绝不顺手删图。
+            # 旧行为会在这里执行容量控制：刚从旧插件迁移进来几百张，
+            # 照文档跑一次 rebuild_index 就被砍到上限，用户完全看不出发生了什么。
+            capacity_hint = ""
+            try:
+                max_reg = int(getattr(self.plugin, "max_reg_num", 0) or 0)
+            except (TypeError, ValueError):
+                max_reg = 0
             if max_reg > 0 and len(final_index) > max_reg:
-                logger.info(
-                    f"[rebuild_index] 重建后数量 {len(final_index)} 超过限制 {max_reg}，"
-                    f"执行容量控制清理"
+                overflow = len(final_index) - max_reg
+                logger.warning(
+                    f"[rebuild_index] 重建后数量 {len(final_index)} 超过上限 {max_reg}，"
+                    f"本次没有删除任何文件"
                 )
-                await self.plugin.event_handler._enforce_capacity(final_index)
+                capacity_hint = (
+                    f"\n⚠️ 当前 {len(final_index)} 张已超出上限 {max_reg}（多 {overflow} 张）。"
+                    f"重建索引不会删图；确实要清理请手动执行 "
+                    f"{self.plugin.cmd('capacity', event)}，"
+                    f"或把上限调大 / 设为 0（不限制）。\n"
+                )
 
             # 保存合并后的索引
             await self.plugin.index_manager.save_index(final_index)
@@ -237,6 +249,9 @@ class IndexRebuildCommand:
                 result_msg += f"  旧版备份数据: {legacy_metadata_count} 条\n"
             result_msg += f"  重建后索引/文件: {new_count} 个\n"
             result_msg += f"  已恢复元数据: {recovered_count} 条\n"
+
+            if capacity_hint:
+                result_msg += capacity_hint
 
             if category_stats:
                 result_msg += "\n📂 分类统计:\n"
