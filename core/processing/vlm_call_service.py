@@ -1,6 +1,7 @@
 """VLM 调用服务：负责调用视觉模型分析图片。"""
 
 import asyncio
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -11,9 +12,11 @@ from astrbot.api.event import AstrMessageEvent
 try:
     from PIL import Image as PILImage
     from PIL import ImageDraw as PILImageDraw
+    from PIL import ImageFont as PILImageFont
 except Exception:
     PILImage = None
     PILImageDraw = None
+    PILImageFont = None
 
 try:
     import numpy as np
@@ -36,6 +39,41 @@ _FORMAT_SUFFIXES: dict[str, tuple[str, ...]] = {
 
 # VLM 输入的最大边长，超过就等比缩小。
 MAX_VLM_DIMENSION = 2048
+
+# 动图最终最多拼进去多少帧。再多只能压缩每帧尺寸，画面里的字反而看不清了。
+MAX_MONTAGE_FRAMES = 12
+# 挑帧阶段最多扫多少个采样点。长动图按步长跳着扫，不逐帧解码。
+MAX_SCAN_FRAMES = 60
+# 挑帧只比对这么大的缩略指纹：一帧 32x32 的 float32 才 12KB，扫 60 帧也不到 1MB。
+FRAME_SIGNATURE_SIZE = 32
+# 相邻采样点的指纹 MSE 超过这个值，才算「画面确实变了」，值得单独占一格。
+FRAME_DIFF_THRESHOLD = 1000.0
+# 拼接图的总像素预算（约 1414x1414）。主流视觉模型内部都会先把图缩到这个量级再
+# 切块，继续堆分辨率只会白白拉长编码和上传时间、多烧 token，对识别没有帮助。
+MAX_MONTAGE_PIXELS = 2_000_000
+
+# PNG 压缩档位。optimize=True 会把好几种滤波器都试一遍，实测一张两百万像素的图
+# 要多花 600~800ms，换来的体积只小一成左右；小机器上这点体积不值得。
+PNG_COMPRESS_LEVEL = 6
+# 拼接图的体积预算。照片、动漫类素材拼出来的无损 PNG 动辄 3~4MB，base64 之后还要
+# 再涨三分之一：上传慢，也容易撞上中转服务的请求体上限。超预算就改存 JPEG。
+MONTAGE_MAX_BYTES = 1_500_000
+# 超预算时的 JPEG 质量。网格版每帧的像素数是旧版一字排开的好几倍，q90 的压缩痕迹
+# 已经不影响读画面里的字了。
+MONTAGE_JPEG_QUALITY = 90
+
+# 一张图（或动图的一帧）解码后的像素数超过这个值，就改成按横条带缩放：一次只
+# 摊开一条真彩色像素，峰值内存跟图片尺寸脱钩。壁纸级的 4000x4000 一次性摊开就是
+# 48MB 起步，再叠上重采样缓冲和并发，小内存机器很容易被打爆。
+STRIP_PIXEL_THRESHOLD = 2 * MAX_VLM_DIMENSION * MAX_VLM_DIMENSION
+# 每个条带允许摊开多少源像素，约 200 万（真彩色 6MB 上下）。
+STRIP_SOURCE_PIXELS = 2_000_000
+
+# 调色板类模式存的是「颜色索引」而不是颜色本身，直接缩放会被 Pillow 降级成
+# NEAREST、甚至按索引插值算出完全错误的颜色，必须先展开成真彩色再缩放。
+_INDEXED_MODES = frozenset({"P", "PA", "1"})
+# 自带 alpha 通道的模式，送出前要合到白底上。
+_ALPHA_MODES = frozenset({"RGBA", "LA", "La", "RGBa", "PA"})
 
 # 「这张图我永远不收」的上游特征串：重试多少次都是同样结果，只能换格式重来。
 _MIME_REJECT_MARKERS: tuple[str, ...] = (
@@ -106,7 +144,7 @@ class VLMCallService:
         """调用视觉模型分析图片。
 
         使用 context.llm_generate 调用指定的视觉模型 provider，
-        支持指数退避重试。对于 GIF 动图，会提取关键帧拼接后分析。
+        支持指数退避重试。对于 GIF 动图，会抽关键帧拼成网格图后分析。
 
         Args:
             event: 消息事件（用于 provider 解析）
@@ -156,7 +194,8 @@ class VLMCallService:
             if is_animated:
                 animated_prefix = (
                     "[动图帧序列] 这不是多人并排的静态场景，而是一个动态表情包的多帧连续截图。"
-                    "图片从左到右按时间顺序展示同一角色/同一画面的不同时刻；帧之间有分隔线，左上角数字是帧序号。"
+                    "这些帧按网格排列：从左到右、从上到下就是时间顺序，展示同一角色/同一画面的不同时刻。"
+                    "格子之间有白色分隔线，每格左上角的数字是帧序号。"
                     "黑色背景代表透明区域。"
                     "请以动图/动画的角度理解：这个表情包在表达什么连续动作、表情或情绪变化？"
                     "不要描述成“并排站立”“多人同时出现”或“几个人站在一起”。"
@@ -179,7 +218,7 @@ class VLMCallService:
                     logger.warning(f"清理临时文件失败: {e}")
 
     async def _prepare_image_for_vlm(self, img_path: str) -> tuple[str, bool]:
-        """为 VLM 分析准备图片：动图抽帧拼接，上游不收的格式转 PNG。
+        """为 VLM 分析准备图片：动图抽帧拼网格，上游不收的格式转 PNG。
 
         这里不看文件扩展名，一律用 Pillow 嗅探真实格式。WebUI 上传、批量导入和
         从旧插件迁移过来的文件经常名实不符（``.gif`` 里装着静态 PNG，``.png``
@@ -190,7 +229,7 @@ class VLMCallService:
             img_path: 原始图片路径
 
         Returns:
-            tuple[str, bool]: (准备好的图片路径, 是否为动图拼接)
+            tuple[str, bool]: (准备好的图片路径, 是否为动图拼接图)
         """
         if PILImage is None:
             logger.warning(
@@ -207,7 +246,7 @@ class VLMCallService:
             logger.warning(f"识别图片真实格式失败，原样送给视觉模型: {e}")
             return img_path, False
 
-        # 动图（GIF / 动态 WebP / APNG 都算）：抽关键帧横向拼接，让 VLM 看懂动作
+        # 动图（GIF / 动态 WebP / APNG 都算）：抽关键帧拼成网格，让 VLM 看懂动作
         if is_animated and n_frames > 1:
             if np is None:
                 logger.debug("未安装 numpy，跳过动图抽帧，改为只送首帧")
@@ -218,7 +257,8 @@ class VLMCallService:
                     )
                     logger.debug(
                         f"动图拼接完成({fmt or '未知格式'}): {n_frames} 帧 -> "
-                        f"{actual_frames} 帧, 输出尺寸: {final_w}x{final_h}"
+                        f"{actual_frames} 帧, 输出 {final_w}x{final_h}, "
+                        f"{os.path.getsize(temp_path) // 1024}KB"
                     )
                     return temp_path, True
                 except Exception as e:
@@ -265,128 +305,327 @@ class VLMCallService:
 
         动图拼接图用黑底（提示词里已声明「黑色背景代表透明区域」），单帧这里改用
         白底：静态表情包多是深色线稿或带白描边的文字，黑底容易把内容糊成一片。
+
+        内存占用只跟像素数有关、跟文件体积无关：一张 27KB 的 4000x4000 纯色 PNG
+        展开后同样是 48MB 起步。所以这里尽量先缩小再转模式，并且只有真的带 alpha
+        才额外开一张白底画布。
         """
         with PILImage.open(fp) as im:
             try:
                 im.seek(0)
             except Exception:
                 pass
-            frame = im.convert("RGBA")
+            # JPEG 能在解码阶段直接按 1/2、1/4、1/8 出图，省掉整张全尺寸位图
+            try:
+                im.draft("RGB", (MAX_VLM_DIMENSION, MAX_VLM_DIMENSION))
+            except Exception:
+                pass
 
-        width, height = frame.size
-        longest = max(width, height)
-        if longest > MAX_VLM_DIMENSION:
-            ratio = MAX_VLM_DIMENSION / longest
-            frame = frame.resize(
-                (max(1, int(width * ratio)), max(1, int(height * ratio))),
-                PILImage.LANCZOS,
-            )
+            has_alpha = im.mode in _ALPHA_MODES or "transparency" in im.info
+            want_mode = "RGBA" if has_alpha else "RGB"
+            width, height = im.size
+            longest = max(width, height)
+            target_size = None
+            if longest > MAX_VLM_DIMENSION:
+                ratio = MAX_VLM_DIMENSION / longest
+                target_size = (max(1, int(width * ratio)), max(1, int(height * ratio)))
 
-        canvas = PILImage.new("RGB", frame.size, (255, 255, 255))
-        canvas.paste(frame, (0, 0), frame)
+            try:
+                frame = VLMCallService._detach_frame(im, want_mode, target_size)
+            except Exception as e:
+                # 冷门模式（I;16、CMYK 变体等）可能不支持先缩放，老实走一遍常规路径
+                logger.debug(f"低内存缩放路径不可用，回退常规转换: {e}")
+                frame = im.convert(want_mode)
+
+        # 到这里源图句柄已经关掉，全尺寸解码缓冲先还给系统，再做重采样
+        if target_size is not None and frame.size != target_size:
+            resized = VLMCallService._resize_image(frame, target_size)
+            frame.close()
+            frame = resized
+
+        if has_alpha:
+            canvas = PILImage.new("RGB", frame.size, (255, 255, 255))
+            canvas.paste(frame, (0, 0), frame)
+            frame.close()
+            frame = canvas
 
         suffix = ".jpg" if target == "JPEG" else ".png"
         temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
         os.close(temp_fd)
-        if target == "JPEG":
-            canvas.save(temp_path, "JPEG", quality=92, optimize=True)
-        else:
-            canvas.save(temp_path, "PNG", optimize=True)
+        try:
+            if target == "JPEG":
+                frame.save(temp_path, "JPEG", quality=92)
+            else:
+                frame.save(temp_path, "PNG", compress_level=PNG_COMPRESS_LEVEL)
+        finally:
+            frame.close()
         return temp_path
+
+    @staticmethod
+    def _detach_frame(im, want_mode: str, target_size: tuple[int, int] | None):
+        """从打开的图片里取出一张独立位图，尽量不留全尺寸中间产物。
+
+        真彩色图先缩放再转模式：反过来先 convert 会凭空多出一整张原始尺寸的位图。
+        调色板图必须先展开成真彩色，缩放留给调用方在源图句柄关闭之后再做，免得
+        「索引缓冲 + 真彩色缓冲 + 重采样缓冲」三张大图同时挤在内存里。
+
+        返回的一定是新对象，可以安全地在 ``im`` 关闭之后继续使用。
+        """
+        if target_size is not None and im.width * im.height > STRIP_PIXEL_THRESHOLD:
+            return VLMCallService._resize_in_strips(im, want_mode, target_size)
+        if im.mode in _INDEXED_MODES:
+            return im.convert(want_mode)
+
+        stage = im
+        if target_size is not None and stage.size != target_size:
+            stage = VLMCallService._resize_image(stage, target_size)
+        if stage.mode != want_mode:
+            converted = stage.convert(want_mode)
+            if stage is not im:
+                stage.close()
+            return converted
+        return im.copy() if stage is im else stage
+
+    @staticmethod
+    def _resize_image(im, size: tuple[int, int]):
+        """等比缩放。reducing_gap 让 Pillow 先做整数级降采样，少开一张大中间图。"""
+        try:
+            return im.resize(size, PILImage.LANCZOS, reducing_gap=2.0)
+        except TypeError:  # Pillow < 7 没有 reducing_gap
+            return im.resize(size, PILImage.LANCZOS)
+
+    @staticmethod
+    def _resize_in_strips(im, want_mode: str, target_size: tuple[int, int]):
+        """按横条带把超大图缩到目标尺寸：一次只摊开一条真彩色像素。
+
+        条带之间在源图侧留出重叠行，再用 ``resize`` 的 ``box`` 精确取回中间那段，
+        这样重采样滤波器在条带边界也有足够邻域，接缝处不会出现色带。
+        """
+        src_w, src_h = im.size
+        tgt_w, tgt_h = target_size
+        scale = src_h / tgt_h
+        # 每条带摊开的源像素数控制在 STRIP_SOURCE_PIXELS 上下
+        budget_rows = int(STRIP_SOURCE_PIXELS * tgt_h / max(1, src_w * src_h))
+        rows_per_strip = max(1, min(tgt_h, budget_rows))
+        pad = min(src_h, int(math.ceil(3 * scale)) + 1)  # LANCZOS 的支撑半径是 3
+
+        out = PILImage.new(want_mode, target_size)
+        for top in range(0, tgt_h, rows_per_strip):
+            bottom = min(tgt_h, top + rows_per_strip)
+            src_top = min(float(src_h), top * scale)
+            src_bottom = min(float(src_h), bottom * scale)
+            crop_top = max(0, int(src_top) - pad)
+            crop_bottom = min(src_h, int(math.ceil(src_bottom)) + pad)
+            piece = im.crop((0, crop_top, src_w, crop_bottom))
+            if piece.mode != want_mode:
+                converted = piece.convert(want_mode)
+                piece.close()
+                piece = converted
+            resized = piece.resize(
+                (tgt_w, bottom - top),
+                PILImage.LANCZOS,
+                box=(0, src_top - crop_top, src_w, src_bottom - crop_top),
+            )
+            piece.close()
+            out.paste(resized, (0, top))
+            resized.close()
+        return out
+
+    @staticmethod
+    def _label_font(frame_height: int):
+        """给帧序号挑一个跟帧尺寸相称的字号，取不到就退回 Pillow 默认位图字体。"""
+        if PILImageFont is None:
+            return None
+        size = max(14, min(48, frame_height // 12))
+        try:
+            return PILImageFont.load_default(size=size)
+        except TypeError:
+            pass  # Pillow < 10.1 的 load_default() 不接受 size
+        except Exception:
+            return None
+        try:
+            return PILImageFont.load_default()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _draw_montage_guides(
+        canvas, cols: int, rows: int, count: int, frame_width: int, frame_height: int
+    ) -> None:
+        """画格线和帧序号，帮 VLM 认出这是时间序列而不是多人并排。"""
+        if PILImageDraw is None:
+            return
+        draw = PILImageDraw.Draw(canvas)
+        width, height = canvas.size
+        grid_color = (255, 255, 255, 160)
+        for col in range(1, cols):
+            x = col * frame_width
+            draw.line([(x, 0), (x, height)], fill=grid_color, width=2)
+        for row in range(1, rows):
+            y = row * frame_height
+            draw.line([(0, y), (width, y)], fill=grid_color, width=2)
+
+        font = VLMCallService._label_font(frame_height)
+        stroke = 1 if frame_height < 160 else 2
+        for slot in range(count):
+            xy = ((slot % cols) * frame_width + 4, (slot // cols) * frame_height + 2)
+            label = str(slot + 1)
+            try:
+                draw.text(
+                    xy,
+                    label,
+                    fill=(255, 255, 255, 255),
+                    font=font,
+                    stroke_width=stroke,
+                    stroke_fill=(0, 0, 0, 255),
+                )
+            except TypeError:  # 老版本 Pillow 的 text() 不认识 stroke_*
+                draw.text(xy, label, fill=(255, 255, 255, 255), font=font)
 
     @staticmethod
     def _extract_and_combine_frames(
         fp: str, n_frames: int, width: int, height: int
     ) -> tuple[str, int, int, int]:
-        """抽取动图关键帧并横向拼成时间序列长图（阻塞，需放线程池）。
+        """抽取动图关键帧，拼成一张接近正方形的网格图（阻塞，需放线程池）。
+
+        分两趟解码，是为了让内存峰值跟源动图的体量脱钩：第一趟每个采样点只留一张
+        32x32 的指纹用来挑帧，第二趟才按需解码挑中的那十几帧，贴完立刻释放。整张
+        1920x480、120 帧的动图跑下来，占用和一张普通表情包动图是同一个量级。
+
+        排版也从「一字排开」改成网格。12 帧横排时总宽必然远超 2048，压回限制内每
+        帧只剩几十像素高，画面里的字全糊了；换成网格后同样的帧数能保住几十倍的像
+        素，对识别准确率是净收益。整张图另有 MAX_MONTAGE_PIXELS 的面积预算兜着，
+        免得编码和上传的开销跟着分辨率一起失控。
 
         Returns:
             tuple[str, int, int, int]: (临时图路径, 实际帧数, 输出宽, 输出高)
         """
-        MAX_FRAMES = 12  # 最终最多保留 12 帧
-        MAX_DECODE_FRAMES = 60  # 最多解码 60 帧，避免长动图吃掉几百 MB 内存
-        TARGET_HEIGHT = 480  # 输出高度（提高以保留小字可读性）
-        SIMILARITY_THRESHOLD = 1000.0  # 相似帧过滤阈值 (MSE)
-
-        # 只缩不放：原图比目标矮时保持原尺寸，避免画布底部留出大片黑边
-        if height > TARGET_HEIGHT:
-            scale = TARGET_HEIGHT / height
-            frame_width = max(1, int(width * scale))
-            frame_height = TARGET_HEIGHT
-        else:
-            scale = 1.0
-            frame_width = max(1, width)
-            frame_height = max(1, height)
-
+        # ── 第一趟：只解缩略指纹，挑出画面确实变了的采样点 ──
+        scan_step = max(1, n_frames // MAX_SCAN_FRAMES)
+        thumb_size = (FRAME_SIGNATURE_SIZE, FRAME_SIGNATURE_SIZE)
+        scanned: list[int] = []
+        signatures: list = []
         with PILImage.open(fp) as im:
-            # 先按步长粗采样解码，长动图不必逐帧都留在内存里
-            decode_step = max(1, n_frames // MAX_DECODE_FRAMES)
-            all_frames = []
-            for idx in range(0, n_frames, decode_step):
-                im.seek(idx)
-                frame = im.convert("RGBA")
-                if scale < 1.0:
-                    frame = frame.resize((frame_width, frame_height), PILImage.LANCZOS)
-                all_frames.append(frame)
+            for idx in range(0, n_frames, scan_step):
+                try:
+                    im.seek(idx)
+                except EOFError:
+                    break  # 有些动图头里写的帧数比实际能解出来的多
+                thumb = im.convert("RGB").resize(thumb_size, PILImage.BILINEAR)
+                signatures.append(np.asarray(thumb, dtype=np.float32))
+                thumb.close()
+                scanned.append(idx)
 
-        # 相似帧过滤：只留下画面确实变了的帧
-        frames = []
-        last_selected_np = None
-        for frame in all_frames:
-            frame_np = np.array(frame, dtype=np.float32)
-            if last_selected_np is None:
-                frames.append(frame)
-                last_selected_np = frame_np
-                continue
-            if np.mean((frame_np - last_selected_np) ** 2) > SIMILARITY_THRESHOLD:
-                frames.append(frame)
-                last_selected_np = frame_np
+        picked: list[int] = []
+        last_sig = None
+        for idx, sig in zip(scanned, signatures):
+            if last_sig is not None:
+                if float(np.mean((sig - last_sig) ** 2)) <= FRAME_DIFF_THRESHOLD:
+                    continue
+            picked.append(idx)
+            last_sig = sig
+        signatures.clear()
 
-        # 过滤后帧数太少：均匀采样补回来
-        if len(frames) < 3 and len(all_frames) >= 3:
-            step = max(1, len(all_frames) // 6)
-            frames = [all_frames[i] for i in range(0, len(all_frames), step)][:6]
+        # 差异帧太少（几乎静止的动图）：均匀采样补回来，至少让 VLM 看到画面全貌
+        if len(picked) < 3 and len(scanned) >= 3:
+            picked = scanned[:: max(1, len(scanned) // 6)][:6]
+        # 帧数上限（均匀抽取）
+        if len(picked) > MAX_MONTAGE_FRAMES:
+            step = len(picked) / MAX_MONTAGE_FRAMES
+            picked = [picked[int(i * step)] for i in range(MAX_MONTAGE_FRAMES)]
+        if not picked:
+            raise ValueError("这张动图没有解出任何可用的帧")
 
-        # 限制最大帧数（均匀抽取）
-        if len(frames) > MAX_FRAMES:
-            step = len(frames) / MAX_FRAMES
-            frames = [frames[int(i * step)] for i in range(MAX_FRAMES)]
+        # ── 排版：列数取到让整张图接近正方形，每帧才能分到最多的像素 ──
+        count = len(picked)
+        cols = max(1, min(count, round(math.sqrt(count * height / width)) or 1))
+        rows = math.ceil(count / cols)
+        # 只缩不放：小图放大只会更糊，还白白多占内存
+        scale = min(
+            (MAX_VLM_DIMENSION // cols) / width,
+            (MAX_VLM_DIMENSION // rows) / height,
+            # 长宽各自不超限，乘起来仍可能是四百万像素，再套一层总面积预算
+            math.sqrt(MAX_MONTAGE_PIXELS / (cols * rows * width * height)),
+            1.0,
+        )
+        frame_width = max(1, int(width * scale))
+        frame_height = max(1, int(height * scale))
+        montage_w = frame_width * cols
+        montage_h = frame_height * rows
+        need_resize = (frame_width, frame_height) != (width, height)
+        # 巨幅动图的单帧同样可能有几十 MB，缩放走条带
+        strip_frames = need_resize and width * height > STRIP_PIXEL_THRESHOLD
 
-        # 横向拼接所有帧，黑色背景代表透明
-        total_width = frame_width * len(frames)
-        combined = PILImage.new("RGBA", (total_width, frame_height), (0, 0, 0, 255))
-        for i, frame in enumerate(frames):
-            combined.paste(frame, (i * frame_width, 0), frame)  # 使用帧的 alpha 通道
+        # ── 第二趟：只解码挑中的帧，贴完就释放。黑底代表透明区域 ──
+        combined = PILImage.new("RGBA", (montage_w, montage_h), (0, 0, 0, 255))
+        try:
+            with PILImage.open(fp) as im:
+                for slot, idx in enumerate(picked):
+                    im.seek(idx)
+                    if strip_frames:
+                        frame = VLMCallService._resize_in_strips(
+                            im, "RGBA", (frame_width, frame_height)
+                        )
+                    else:
+                        frame = im.convert("RGBA")
+                        if need_resize:
+                            resized = VLMCallService._resize_image(
+                                frame, (frame_width, frame_height)
+                            )
+                            frame.close()
+                            frame = resized
+                    combined.paste(
+                        frame,
+                        ((slot % cols) * frame_width, (slot // cols) * frame_height),
+                        frame,  # 用帧自己的 alpha 通道做蒙版
+                    )
+                    frame.close()
 
-        # 画帧分隔线和帧序号，帮助 VLM 理解这是时间序列而不是多人并排。
-        if PILImageDraw is not None:
-            draw = PILImageDraw.Draw(combined)
-            for i in range(len(frames)):
-                x = i * frame_width
-                if i > 0:
-                    draw.line([(x, 0), (x, frame_height)], fill=(255, 255, 255, 160), width=2)
-                draw.text((x + 4, 4), str(i + 1), fill=(255, 255, 255, 255))
-
-        # 拼接图超出 VLM 输入限制时等比缩放到限制内
-        if total_width > MAX_VLM_DIMENSION or frame_height > MAX_VLM_DIMENSION:
-            scale_factor = min(
-                MAX_VLM_DIMENSION / total_width,
-                MAX_VLM_DIMENSION / frame_height,
+            VLMCallService._draw_montage_guides(
+                combined, cols, rows, count, frame_width, frame_height
             )
-            new_w = max(1, int(total_width * scale_factor))
-            new_h = max(1, int(frame_height * scale_factor))
-            combined = combined.resize((new_w, new_h), PILImage.LANCZOS)
-            logger.debug(
-                f"动图拼接图超出 VLM 限制({total_width}x{frame_height})，已缩放至 {new_w}x{new_h}"
-            )
 
-        # 用无损 PNG：JPEG 压缩会把小字压糊，而且 RGBA 也无法直接存 JPEG
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
-        os.close(temp_fd)
-        combined.save(temp_path, "PNG", optimize=True)
+            # 优先无损 PNG：JPEG 会把小字压糊，而且 RGBA 也没法直接存 JPEG
+            temp_fd, temp_path = tempfile.mkstemp(suffix=".png")
+            os.close(temp_fd)
+            combined.save(temp_path, "PNG", compress_level=PNG_COMPRESS_LEVEL)
+            if os.path.getsize(temp_path) > MONTAGE_MAX_BYTES:
+                temp_path = VLMCallService._reencode_as_jpeg(temp_path, combined)
+        finally:
+            combined.close()
 
-        final_w, final_h = combined.size
-        return temp_path, len(frames), final_w, final_h
+        return temp_path, count, montage_w, montage_h
+
+    @staticmethod
+    def _reencode_as_jpeg(png_path: str, combined) -> str:
+        """把超出体积预算的拼接图改存 JPEG，失败就照旧用 PNG。"""
+        jpeg_fd, jpeg_path = tempfile.mkstemp(suffix=".jpg")
+        os.close(jpeg_fd)
+        try:
+            # 半透明的格线丢掉 alpha 之后会变成纯白，正好是想要的效果
+            flat = combined.convert("RGB")
+            try:
+                flat.save(jpeg_path, "JPEG", quality=MONTAGE_JPEG_QUALITY)
+            finally:
+                flat.close()
+        except Exception as e:
+            logger.debug(f"拼接图转 JPEG 失败，继续用 PNG: {e}")
+            VLMCallService._silent_remove(jpeg_path)
+            return png_path
+        logger.debug(
+            f"拼接图 {os.path.getsize(png_path) // 1024}KB 超出体积预算，"
+            f"改存 JPEG {os.path.getsize(jpeg_path) // 1024}KB"
+        )
+        VLMCallService._silent_remove(png_path)
+        return jpeg_path
+
+    @staticmethod
+    def _silent_remove(path: str) -> None:
+        """删掉用不上的中间文件，删不掉也不影响主流程。"""
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     async def _do_vlm_call(
         self,

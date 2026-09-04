@@ -82,8 +82,54 @@ def _write_animated_gif(frames: int = 4, size=(64, 64)) -> str:
     return path
 
 
+class _CountingImage:
+    """包一层真 Pillow 图片，只为了数 convert 被调了几次、每次转成什么模式。"""
+
+    def __init__(self, im, modes):
+        self._im = im
+        self._modes = modes
+
+    def __getattr__(self, name):
+        return getattr(self._im, name)
+
+    def __enter__(self):
+        self._im.__enter__()
+        return self
+
+    def __exit__(self, *exc_info):
+        return self._im.__exit__(*exc_info)
+
+    def convert(self, *args, **kwargs):
+        self._modes.append(args[0] if args else kwargs.get("mode"))
+        return self._im.convert(*args, **kwargs)
+
+
+class _CountingImageModule:
+    """顶替 vlm_call_service.PILImage：open() 出来的图片会记账，其余原样转发。"""
+
+    def __init__(self, modes):
+        self._modes = modes
+
+    def __getattr__(self, name):
+        return getattr(PILImage, name)
+
+    def open(self, *args, **kwargs):
+        return _CountingImage(PILImage.open(*args, **kwargs), self._modes)
+
+
 def _prepare(service, path):
     return asyncio.run(service._prepare_image_for_vlm(path))
+
+
+def _montage_size(src) -> tuple[int, int]:
+    out = None
+    try:
+        out, is_animated = _prepare(_make_service(), src)
+        assert is_animated is True
+        with PILImage.open(out) as im:
+            return im.size
+    finally:
+        _cleanup(out)
 
 
 # ── 预处理：格式白名单 ────────────────────────────────────
@@ -121,9 +167,90 @@ def test_animated_gif_never_leaves_raw_gif():
             assert is_animated is False
             assert size == (64, 64)
         else:
-            # 4 帧颜色互不相同，不会被相似帧过滤；矮图保持原高，不再补大片黑边
+            # 4 帧颜色互不相同，不会被相似帧过滤；排成 2x2 网格，小图不放大
             assert is_animated is True
-            assert size == (256, 64)
+            assert size == (128, 128)
+    finally:
+        _cleanup(src, out)
+
+
+def test_wide_animation_is_packed_into_a_grid():
+    """宽动图要排成网格：一字排开的话总宽必然超限，压回去每帧只剩几十像素高。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    src = _write_animated_gif(frames=12, size=(600, 200))
+    try:
+        # 12 帧排成 2 列 x 6 行，每帧还是原始的 600x200，一个像素都没被压
+        assert _montage_size(src) == (1200, 1200)
+    finally:
+        _cleanup(src)
+
+
+def test_montage_never_exceeds_vlm_limit():
+    """单帧本身就很大时按网格整体等比缩：长宽不许越过输入上限，总面积也有预算。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    src = _write_animated_gif(frames=8, size=(1600, 400))
+    try:
+        width, height = _montage_size(src)
+    finally:
+        _cleanup(src)
+    assert width <= vlm_module.MAX_VLM_DIMENSION
+    assert height <= vlm_module.MAX_VLM_DIMENSION
+    # 长宽各自压回 2048 以内，乘起来仍可能是四百万像素，总面积预算才是真正的封顶
+    assert width * height <= vlm_module.MAX_MONTAGE_PIXELS
+    assert height > 400  # 确实换行了，不是拼成一条长带子
+
+
+def test_oversized_montage_falls_back_to_jpeg(monkeypatch):
+    """拼接图超出体积预算时改存 JPEG：几 MB 的无损 PNG 上传慢，还容易被中转拒收。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    # 预算压到 1 字节，任何拼接图都算超预算
+    monkeypatch.setattr(vlm_module, "MONTAGE_MAX_BYTES", 1)
+    src = _write_animated_gif(frames=6, size=(200, 200))
+    out = None
+    try:
+        out, is_animated = _prepare(_make_service(), src)
+        assert is_animated is True
+        assert out.endswith(".jpg")  # 扩展名要跟真实格式对上，否则上游按后缀猜 mime 会猜错
+        with PILImage.open(out) as im:
+            assert im.format == "JPEG"
+    finally:
+        _cleanup(src, out)
+
+
+def test_long_animation_caps_frame_count():
+    """长动图最多拼 MAX_MONTAGE_FRAMES 帧，输出尺寸不随源动图帧数膨胀。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    short = _write_animated_gif(frames=12, size=(120, 120))
+    long_gif = _write_animated_gif(frames=90, size=(120, 120))
+    try:
+        # 12 帧 -> 3 列 x 4 行；90 帧均匀抽 12 帧，出图尺寸完全一样
+        assert _montage_size(short) == (360, 480)
+        assert _montage_size(long_gif) == (360, 480)
+    finally:
+        _cleanup(short, long_gif)
+
+
+def test_frame_scan_avoids_full_size_decodes(monkeypatch):
+    """挑帧只解 32x32 指纹，全尺寸 RGBA 解码次数不超过最终拼进去的帧数。
+
+    这是内存峰值的关键：早期版本一次性把最多 60 帧全解成 RGBA 攥在手里，一张
+    1920x480 的长动图光这一步就是几百 MB，小内存机器很容易被打爆。
+    """
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    src = _write_animated_gif(frames=40, size=(200, 200))
+    modes: list = []
+    monkeypatch.setattr(vlm_module, "PILImage", _CountingImageModule(modes))
+    out = None
+    try:
+        out, is_animated = _prepare(_make_service(), src)
+        assert is_animated is True
+        assert modes.count("RGBA") <= vlm_module.MAX_MONTAGE_FRAMES
+        assert modes.count("RGB") >= 12  # 第一趟按步长扫了一遍指纹
     finally:
         _cleanup(src, out)
 
@@ -193,6 +320,41 @@ def test_flat_copy_downscales_oversized_image():
             assert im.size == (2048, 102)
     finally:
         _cleanup(src, out)
+
+
+def test_flat_copy_keeps_palette_colors_when_downscaling():
+    """调色板图得先展开成真彩色再缩放，否则缩出来的是按颜色索引插值的乱码。"""
+    src = _tmp(".gif")
+    PILImage.new("RGB", (3000, 3000), (12, 200, 90)).save(src, "GIF")
+    out = None
+    try:
+        out = VLMCallService._render_flat_copy(src, "PNG")
+        with PILImage.open(out) as im:
+            assert max(im.size) == vlm_module.MAX_VLM_DIMENSION
+            pixel = im.convert("RGB").getpixel((im.width // 2, im.height // 2))
+        assert max(abs(a - b) for a, b in zip(pixel, (12, 200, 90))) <= 8
+    finally:
+        _cleanup(src, out)
+
+
+def test_strip_resize_matches_whole_image_resize(monkeypatch):
+    """条带缩放的结果要跟整图缩放对得上，接缝处不能出现色带。"""
+    base = PILImage.radial_gradient("L")
+    src = PILImage.merge(
+        "RGB",
+        (
+            base.resize((900, 600), PILImage.LANCZOS),
+            PILImage.linear_gradient("L").resize((900, 600), PILImage.LANCZOS),
+            base.resize((900, 600), PILImage.NEAREST),
+        ),
+    )
+    # 把条带预算压到十几行，逃不开多条带、多接缝的路径
+    monkeypatch.setattr(vlm_module, "STRIP_SOURCE_PIXELS", 60_000)
+    whole = VLMCallService._resize_image(src, (300, 200))
+    strips = VLMCallService._resize_in_strips(src, "RGB", (300, 200))
+    assert strips.size == whole.size == (300, 200)
+    worst = max(abs(a - b) for a, b in zip(whole.tobytes(), strips.tobytes()))
+    assert worst <= 2, f"条带接缝处偏差过大：{worst}"
 
 
 # ── 上游拒收格式后的自救 ──────────────────────────────────
