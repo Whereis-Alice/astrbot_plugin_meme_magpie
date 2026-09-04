@@ -258,6 +258,11 @@ createApp({
             total: 0, missing: 0, pending_total: 0, pending_missing: 0, max_items: 5000,
         });
         const reanalyzeScanning = ref(false);
+        // 用户手动点过档位后就不再自动兜底，免得抢走他的选择
+        const reanalyzeTargetTouched = ref(false);
+        const reanalyzeSwitchFrom = ref('');
+        const reanalyzeSwitchTo = ref('');
+        const reanalyzeScanFailed = ref(false);
         const batchTaskId = ref(null);
         const batchTaskStatus = ref(null);
         const batchTaskTotal = ref(0);
@@ -1817,6 +1822,7 @@ createApp({
 
         const fetchReanalyzeScan = async () => {
             reanalyzeScanning.value = true;
+            reanalyzeScanFailed.value = false;
             try {
                 const res = await apiFetch('api/images/reanalyze-scan');
                 const data = await res.json();
@@ -1828,8 +1834,12 @@ createApp({
                         pending_missing: Number(data.pending_missing || 0),
                         max_items: Number(data.max_items || 5000),
                     };
+                    autoPickReanalyzeTarget();
+                } else {
+                    reanalyzeScanFailed.value = true;
                 }
             } catch (e) {
+                reanalyzeScanFailed.value = true;
                 console.error('Reanalyze scan error:', e);
             } finally {
                 reanalyzeScanning.value = false;
@@ -1850,6 +1860,52 @@ createApp({
         const reanalyzeAllCount = computed(() => (
             reanalyzeIsPending.value ? reanalyzeScan.value.pending_total : reanalyzeScan.value.total
         ));
+
+        const reanalyzeTargetLabel = (key) => {
+            if (key === 'selected') {
+                return reanalyzeIsPending.value
+                    ? t('pages.dashboard.reanalyze.target_selected_pending', '当前勾选的待审核图片')
+                    : t('pages.dashboard.reanalyze.target_selected', '当前勾选的表情');
+            }
+            if (key === 'missing') return t('pages.dashboard.reanalyze.target_missing', '只补缺失标注的');
+            return reanalyzeIsPending.value
+                ? t('pages.dashboard.reanalyze.target_all_pending', '全部待审核图片')
+                : t('pages.dashboard.reanalyze.target_all', '全部表情包');
+        };
+
+        // 打开弹窗时的默认档位可能正好是 0 张，扫描结果回来后挪到第一个有货的档位，并把原因写在提示里
+        const autoPickReanalyzeTarget = () => {
+            if (reanalyzeTargetTouched.value) return;
+            const counts = {
+                selected: reanalyzeSelectedCount.value,
+                missing: reanalyzeMissingCount.value,
+                all: reanalyzeAllCount.value,
+            };
+            const current = reanalyzeForm.target;
+            const next = ['selected', 'missing', 'all'].find((key) => (counts[key] || 0) > 0);
+            if ((counts[current] || 0) > 0 || !next || next === current) {
+                reanalyzeSwitchFrom.value = '';
+                reanalyzeSwitchTo.value = '';
+                return;
+            }
+            reanalyzeForm.target = next;
+            reanalyzeSwitchFrom.value = current;
+            reanalyzeSwitchTo.value = next;
+        };
+
+        // 用户自己点了档位：停掉自动兜底，顺手撤掉已经过期的「已自动切到」提示
+        const onReanalyzeTargetPick = () => {
+            reanalyzeTargetTouched.value = true;
+            reanalyzeSwitchFrom.value = '';
+            reanalyzeSwitchTo.value = '';
+        };
+
+        const reanalyzeSwitchNote = computed(() => {
+            if (!reanalyzeSwitchFrom.value || !reanalyzeSwitchTo.value) return '';
+            return t('pages.dashboard.reanalyze.auto_switched', '「{from}」当前是 0 张，已自动切到「{to}」。')
+                .replace('{from}', reanalyzeTargetLabel(reanalyzeSwitchFrom.value))
+                .replace('{to}', reanalyzeTargetLabel(reanalyzeSwitchTo.value));
+        });
 
         const reanalyzeTargetCount = computed(() => {
             if (reanalyzeForm.target === 'selected') return reanalyzeSelectedCount.value;
@@ -2043,6 +2099,14 @@ createApp({
             const hasSelection = isPending
                 ? pendingSelectedImages.value.size > 0
                 : selectedImages.value.size > 0;
+            // 张数先归零并进入「统计中」，避免上一次的旧数字先闪一下
+            reanalyzeScan.value = {
+                total: 0, missing: 0, pending_total: 0, pending_missing: 0, max_items: 5000,
+            };
+            reanalyzeScanning.value = true;
+            reanalyzeTargetTouched.value = false;
+            reanalyzeSwitchFrom.value = '';
+            reanalyzeSwitchTo.value = '';
             Object.assign(reanalyzeForm, {
                 scope: isPending ? 'pending' : 'library',
                 target: target || (hasSelection ? 'selected' : 'missing'),
@@ -2193,6 +2257,9 @@ createApp({
             batchDragActive.value = false;
             batchUploadError.value = null;
             if (batchMode.value === 'reanalyze') {
+                reanalyzeTargetTouched.value = false;
+                reanalyzeSwitchFrom.value = '';
+                reanalyzeSwitchTo.value = '';
                 fetchReanalyzeScan();
             } else {
                 clearBatchFiles();
@@ -2899,6 +2966,9 @@ createApp({
             reanalyzeForm,
             reanalyzeScan,
             reanalyzeScanning,
+            reanalyzeSwitchNote,
+            reanalyzeScanFailed,
+            onReanalyzeTargetPick,
             reanalyzeIsPending,
             reanalyzeSelectedCount,
             reanalyzeMissingCount,

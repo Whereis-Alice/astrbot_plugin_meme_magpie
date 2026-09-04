@@ -900,6 +900,9 @@ h2 {
 }
 
 .modal-panel {
+    /* 弹窗内边距与吸底条底色统一从这里取，移动端只覆盖变量即可 */
+    --modal-pad-space: 24px;
+    --modal-bar-bg: rgba(12, 18, 28, 0.985);
     background: var(--panel-gradient);
     border: 1px solid var(--gold-primary);
     max-width: 1100px;
@@ -1346,9 +1349,40 @@ select.codex-input {
     border-top: 1px solid var(--glass-border);
 }
 
+/* 弹窗主体自己滚动：内容再长也留在面板内部，不会顶破面板描边 */
+.modal-panel > .modal-pad {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* v-if 分支容器不生成盒子，让吸底条的定位基准落到滚动容器上 */
+.modal-branch {
+    display: contents;
+}
+
+/* 底部按钮吸底：表单再长也不用滚到最底才能点主按钮 */
+.modal-panel > .modal-pad > .modal-footer-actions,
+.modal-panel > .modal-pad > .modal-branch > .modal-footer-actions,
+.modal-panel > .modal-pad > .modal-branch > .batch-progress-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 3;
+    margin-bottom: calc(-1 * var(--modal-pad-space, 24px));
+    padding-bottom: var(--modal-pad-space, 24px);
+    background: var(--modal-bar-bg, rgba(12, 18, 28, 0.985));
+}
+
+.modal-panel > .modal-pad > .modal-branch > .batch-progress-actions {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--glass-border);
+}
+
 
 /* ── 表单/布局工具类（替代模板内联样式） ─────────────────── */
-.modal-pad { padding: 24px; }
+.modal-pad { padding: var(--modal-pad-space, 24px); }
 .mt-16 { margin-top: 16px; }
 .mt-20 { margin-top: 20px; }
 
@@ -1974,8 +2008,10 @@ select.codex-input {
 }
 
 [data-theme="light"] .modal-panel {
-    background: var(--glass-bg);
+    /* 亮色面板改成不透明：吸底条才能和面板底色严丝合缝 */
+    background: var(--bg-elevated);
     border-color: var(--gold-primary);
+    --modal-bar-bg: var(--bg-elevated);
 }
 
 [data-theme="light"] .modal-header {
@@ -2375,6 +2411,12 @@ input, select, textarea {
     white-space: nowrap;
 }
 
+/* 自动切档 / 空库提示：定义必须晚于 .hint-text 才能覆盖字色 */
+.reanalyze-note {
+    margin: 8px 0 0;
+    color: var(--gold-primary);
+}
+
 .reanalyze-outcome {
     margin-top: 14px;
     display: grid;
@@ -2513,9 +2555,8 @@ input, select, textarea {
     }
 
     
-    .modal-panel form,
-    .modal-panel .modal-pad {
-        padding: 16px;
+    .modal-panel {
+        --modal-pad-space: 16px;
     }
 
     
@@ -2603,9 +2644,8 @@ input, select, textarea {
 }
 
 @media (max-width: 380px) {
-    .modal-panel form,
-    .modal-panel .modal-pad {
-        padding: 12px;
+    .modal-panel {
+        --modal-pad-space: 12px;
     }
 
     .upload-area {
@@ -4349,6 +4389,7 @@ html[data-theme="pixel"],
     backdrop-filter: none;
 }
 [data-theme="pixel"] .modal-panel {
+    --modal-bar-bg: #c6c6c6;
     background: #c6c6c6;
     border: 0;
     border-radius: 0;
@@ -5070,6 +5111,7 @@ html[data-theme="pixel"],
 
 [data-theme="terminal"] .modal-overlay { background: rgba(0, 8, 4, 0.82); backdrop-filter: none; }
 [data-theme="terminal"] .modal-panel {
+    --modal-bar-bg: #02140c;
     background: #02140c;
     border: 2px solid #39ff88;
     border-radius: 0;

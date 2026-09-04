@@ -626,7 +626,12 @@
         "single_tip": "Run vision analysis again; results only go into the edit form and are saved when you click Save",
         "single_filled": "Analysis results were filled into the form: {fields}. Nothing is written until you click Save - closing the dialog changes nothing.",
         "single_same": "The analysis matches what is already in the form, so there is nothing to change.",
-        "single_known": "(passed 「{hints}」 to the model as known facts this time)"
+        "single_known": "(passed 「{hints}」 to the model as known facts this time)",
+        "counting": "Counting…",
+        "auto_switched": "\"{from}\" has 0 images right now, so it switched to \"{to}\" automatically.",
+        "empty_library": "The library is empty right now, so there is nothing to re-analyze.",
+        "empty_pending": "The review queue is empty right now, so there is nothing to re-analyze.",
+        "scan_failed": "Could not read the image counts - the backend or network may be down. Close and reopen this dialog to try again."
       }
     }
   }

@@ -278,7 +278,7 @@ export const TEMPLATE = `
                             </svg>
                             {{ t('pages.dashboard.actions.batch_import', 'Batch Import') }}
                         </button>
-                        <button @click="openBatchReanalyzeModal('missing')" class="codex-btn">
+                        <button @click="openBatchReanalyzeModal()" class="codex-btn">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                                     d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -438,7 +438,7 @@ export const TEMPLATE = `
 
                 <div class="toolbar-actions">
                     <div class="toolbar-group">
-                        <button @click="openBatchReanalyzeModal('missing', 'pending')" class="codex-btn"
+                        <button @click="openBatchReanalyzeModal(null, 'pending')" class="codex-btn"
                             :title="t('pages.dashboard.reanalyze.pending_tip', '对待审核的图片批量重跑视觉识别，通过前先把标注补齐')">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1031,7 +1031,7 @@ export const TEMPLATE = `
         </div>
 
         <form @submit.prevent="submitBatchModal" class="modal-pad">
-            <div v-if="!batchTaskId && batchMode !== 'reanalyze'">
+            <div v-if="!batchTaskId && batchMode !== 'reanalyze'" class="modal-branch">
                 <div class="upload-area batch-upload-area" :class="{ 'is-drag-active': batchDragActive }"
                     @click="triggerBatchFileInput"
                     @dragenter="onBatchDragEnter"
@@ -1149,7 +1149,7 @@ export const TEMPLATE = `
                     <p class="hint-text" style="margin:8px 0 0">
                         {{ t('pages.dashboard.batch.throttle_hint', '每张图都要调一次视觉模型。并发数和每分钟上限决定发得多快，调低可以避开上游 429 限流；每分钟上限填 0 表示不限速。遇到限流会自动退避重试，不会丢图。') }}
                     </p>
-                    <p class="hint-text" style="margin:6px 0 0">
+                    <p v-if="batchFiles.length" class="hint-text" style="margin:6px 0 0">
                         {{ t('pages.dashboard.batch.throttle_estimate', '预计约 {minutes} 分钟').replace('{minutes}', batchEstimateMinutes) }}
                     </p>
                 </div>
@@ -1168,7 +1168,7 @@ export const TEMPLATE = `
                 </div>
             </div>
 
-            <div v-else-if="!batchTaskId">
+            <div v-else-if="!batchTaskId" class="modal-branch">
                 <p class="hint-text" style="margin:0 0 16px">
                     <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.intro_pending', '对待审核池里的图片重新跑一遍视觉识别，补齐或刷新分类、标签、描述、场景、图上文字和情绪。只改待审核记录，不会自动通过审核。') }}</span>
                     <span v-else>{{ t('pages.dashboard.reanalyze.intro', '对已经入库的表情包重新跑一遍视觉识别，补齐或刷新标签、描述、场景、图上文字和情绪。') }}</span>
@@ -1179,6 +1179,7 @@ export const TEMPLATE = `
                     <div class="reanalyze-target-list">
                         <label class="reanalyze-target" :class="{ 'is-disabled': reanalyzeSelectedCount === 0 }">
                             <input type="radio" value="selected" v-model="reanalyzeForm.target"
+                                @change="onReanalyzeTargetPick"
                                 :disabled="reanalyzeSelectedCount === 0">
                             <span>
                                 <b v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_selected_pending', '当前勾选的待审核图片') }}</b>
@@ -1186,22 +1187,38 @@ export const TEMPLATE = `
                                 <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeSelectedCount) }}</em>
                             </span>
                         </label>
-                        <label class="reanalyze-target">
-                            <input type="radio" value="missing" v-model="reanalyzeForm.target">
+                        <label class="reanalyze-target"
+                            :class="{ 'is-disabled': !reanalyzeScanning && reanalyzeMissingCount === 0 }">
+                            <input type="radio" value="missing" v-model="reanalyzeForm.target"
+                                @change="onReanalyzeTargetPick"
+                                :disabled="!reanalyzeScanning && reanalyzeMissingCount === 0">
                             <span>
                                 <b>{{ t('pages.dashboard.reanalyze.target_missing', '只补缺失标注的') }}</b>
-                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeMissingCount) }}</em>
+                                <em v-if="reanalyzeScanning">{{ t('pages.dashboard.reanalyze.counting', '统计中…') }}</em>
+                                <em v-else>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeMissingCount) }}</em>
                             </span>
                         </label>
-                        <label class="reanalyze-target">
-                            <input type="radio" value="all" v-model="reanalyzeForm.target">
+                        <label class="reanalyze-target"
+                            :class="{ 'is-disabled': !reanalyzeScanning && reanalyzeAllCount === 0 }">
+                            <input type="radio" value="all" v-model="reanalyzeForm.target"
+                                @change="onReanalyzeTargetPick"
+                                :disabled="!reanalyzeScanning && reanalyzeAllCount === 0">
                             <span>
                                 <b v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_all_pending', '全部待审核图片') }}</b>
                                 <b v-else>{{ t('pages.dashboard.reanalyze.target_all', '全部表情包') }}</b>
-                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeAllCount) }}</em>
+                                <em v-if="reanalyzeScanning">{{ t('pages.dashboard.reanalyze.counting', '统计中…') }}</em>
+                                <em v-else>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeAllCount) }}</em>
                             </span>
                         </label>
                     </div>
+                    <p v-if="reanalyzeSwitchNote" class="hint-text reanalyze-note">{{ reanalyzeSwitchNote }}</p>
+                    <p v-else-if="reanalyzeScanFailed" class="hint-text reanalyze-note">
+                        {{ t('pages.dashboard.reanalyze.scan_failed', '张数没统计出来，可能是后端或网络出了问题。关掉弹窗重新打开可以再试一次。') }}
+                    </p>
+                    <p v-else-if="!reanalyzeScanning && reanalyzeAllCount === 0" class="hint-text reanalyze-note">
+                        <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.empty_pending', '待审核池现在是空的，没有可以重新识别的图片。') }}</span>
+                        <span v-else>{{ t('pages.dashboard.reanalyze.empty_library', '表情库现在是空的，没有可以重新识别的图片。') }}</span>
+                    </p>
                     <p class="hint-text" style="margin:8px 0 0">
                         <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_hint_pending', '「缺失标注」指没有标签或没有描述的待审核图片，常见于识别失败或超时留下的记录。') }}</span>
                         <span v-else>{{ t('pages.dashboard.reanalyze.target_hint', '「缺失标注」指没有标签或没有描述的表情包，通常是手动上传或早期入库的。') }}</span>
@@ -1248,7 +1265,7 @@ export const TEMPLATE = `
                     <p class="hint-text" style="margin:8px 0 0">
                         {{ t('pages.dashboard.batch.throttle_hint', '每张图都要调一次视觉模型。并发数和每分钟上限决定发得多快，调低可以避开上游 429 限流；每分钟上限填 0 表示不限速。遇到限流会自动退避重试，不会丢图。') }}
                     </p>
-                    <p class="hint-text" style="margin:6px 0 0">
+                    <p v-if="reanalyzePlannedCount > 0" class="hint-text" style="margin:6px 0 0">
                         {{ t('pages.dashboard.batch.throttle_estimate', '预计约 {minutes} 分钟').replace('{minutes}', reanalyzeEstimateMinutes) }}
                     </p>
                 </div>
@@ -1272,7 +1289,7 @@ export const TEMPLATE = `
                 </div>
             </div>
 
-            <div v-else class="modal-pad">
+            <div v-else class="modal-branch">
                 <div style="text-align:center;margin-bottom:20px">
                     <div v-if="batchTaskStatus === 'queued' || batchTaskStatus === 'processing'" class="batch-spinner">
                         <svg style="width:48px;height:48px;animation:spin 1s linear infinite;color:var(--gold-primary)"
