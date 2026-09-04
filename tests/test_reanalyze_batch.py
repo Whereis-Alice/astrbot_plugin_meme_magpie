@@ -308,3 +308,207 @@ class TestBatchEta:
 
     def test_none_without_started_at(self):
         assert PluginAPI._batch_eta_seconds({"processed": 1, "total": 5}) is None
+
+
+# ── _collect_pending_reanalyze_targets ───────────────────
+
+
+def _pending_rows():
+    return [
+        {"id": 1, "path": "/p/a.png", "tags": [], "desc": "", "created_at": 300},
+        {
+            "id": 2,
+            "path": "/p/b.png",
+            "tags": ["笑"],
+            "desc": "有描述",
+            "created_at": 100,
+            "original_name": "b-original.png",
+        },
+        {"id": 3, "path": "/p/c.png", "tags": ["哭"], "desc": "", "created_at": 200},
+    ]
+
+
+def _pending_api(rows=None):
+    """造一个带待审核池的 PluginAPI，并记录 get_pending_paginated 的调用参数。"""
+    calls: list[dict] = []
+
+    def get_pending_paginated(page=1, page_size=20, **kwargs):
+        calls.append({"page": page, "page_size": page_size})
+        data = _pending_rows() if rows is None else rows
+        return list(data), len(data), {}
+
+    db = types.SimpleNamespace(
+        get_index_cache_readonly=lambda: {},
+        get_pending_paginated=get_pending_paginated,
+    )
+    plugin = types.SimpleNamespace(
+        db_service=db,
+        plugin_config=types.SimpleNamespace(),
+        base_dir=Path("."),
+        cache_service=None,
+    )
+    return PluginAPI(plugin), calls
+
+
+class TestCollectPendingReanalyzeTargets:
+    def test_db_without_pending_support_reports_error(self):
+        items, error = _api({})._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=None
+        )
+        assert items == []
+        assert error == "db 不可用"
+
+    def test_missing_db_reports_error(self):
+        plugin = types.SimpleNamespace(db_service=None, plugin_config=types.SimpleNamespace())
+        items, error = PluginAPI(plugin)._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=None
+        )
+        assert items == []
+        assert error == "db 不可用"
+
+    def test_all_sorted_by_created_at(self):
+        api, _ = _pending_api()
+        items, error = api._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=None
+        )
+        assert error == ""
+        assert [i["pending_id"] for i in items] == [2, 3, 1]
+
+    def test_missing_only_picks_incomplete(self):
+        api, _ = _pending_api()
+        items, error = api._collect_pending_reanalyze_targets(
+            target="missing", ids=[], limit=None
+        )
+        assert error == ""
+        assert {i["pending_id"] for i in items} == {1, 3}
+
+    def test_selected_uses_ids(self):
+        api, _ = _pending_api()
+        items, error = api._collect_pending_reanalyze_targets(
+            target="selected", ids=["2", 0, None, "  "], limit=None
+        )
+        assert error == ""
+        assert [i["pending_id"] for i in items] == [2]
+
+    def test_selected_without_ids_errors(self):
+        api, _ = _pending_api()
+        items, error = api._collect_pending_reanalyze_targets(
+            target="selected", ids=[], limit=None
+        )
+        assert items == []
+        assert error == "没有选择任何待审核图片"
+
+    def test_no_match_returns_error(self):
+        api, _ = _pending_api()
+        items, error = api._collect_pending_reanalyze_targets(
+            target="selected", ids=[999], limit=None
+        )
+        assert items == []
+        assert error == "没有符合条件的待审核图片"
+
+    def test_empty_pool_returns_error(self):
+        api, _ = _pending_api(rows=[])
+        items, error = api._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=None
+        )
+        assert items == []
+        assert error == "没有符合条件的待审核图片"
+
+    def test_limit_is_applied(self):
+        api, _ = _pending_api()
+        items, _error = api._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=2
+        )
+        assert [i["pending_id"] for i in items] == [2, 3]
+
+    def test_rows_missing_id_or_path_are_skipped(self):
+        api, _ = _pending_api(
+            rows=[
+                "broken",
+                {"id": 0, "path": "/p/x.png"},
+                {"id": 5, "path": ""},
+                {"id": 6, "path": "/p/ok.png"},
+            ]
+        )
+        items, error = api._collect_pending_reanalyze_targets(
+            target="all", ids=[], limit=None
+        )
+        assert error == ""
+        assert [i["pending_id"] for i in items] == [6]
+
+    def test_item_shape(self):
+        api, _ = _pending_api()
+        items, _error = api._collect_pending_reanalyze_targets(
+            target="selected", ids=[1], limit=None
+        )
+        item = items[0]
+        assert item["kind"] == "pending"
+        assert item["pending_id"] == 1
+        assert item["path"] == "/p/a.png"
+        assert item["filename"] == "a.png"
+        assert item["meta"]["created_at"] == 300
+
+    def test_filename_prefers_original_name(self):
+        api, _ = _pending_api()
+        items, _error = api._collect_pending_reanalyze_targets(
+            target="selected", ids=[2], limit=None
+        )
+        assert items[0]["filename"] == "b-original.png"
+
+    def test_reads_first_page_with_hard_cap(self):
+        api, calls = _pending_api()
+        api._collect_pending_reanalyze_targets(target="all", ids=[], limit=None)
+        assert calls == [{"page": 1, "page_size": PluginAPI.REANALYZE_MAX_ITEMS}]
+
+
+class TestReanalyzeScopeRouting:
+    def test_pending_scope_is_forwarded(self):
+        api, _ = _pending_api()
+        items, error = api._collect_reanalyze_targets(
+            target="all", hashes=[], limit=None, scope="pending", ids=[]
+        )
+        assert error == ""
+        assert [i["kind"] for i in items] == ["pending"] * 3
+
+    def test_pending_scope_selected_uses_ids_not_hashes(self):
+        api, _ = _pending_api()
+        items, error = api._collect_reanalyze_targets(
+            target="selected", hashes=["h1"], limit=None, scope="pending", ids=[3]
+        )
+        assert error == ""
+        assert [i["pending_id"] for i in items] == [3]
+
+    def test_library_scope_is_the_default(self):
+        items, error = _api(_index())._collect_reanalyze_targets(
+            target="all", hashes=[], limit=None
+        )
+        assert error == ""
+        assert {i["kind"] for i in items} == {"library"}
+        assert all("pending_id" not in i for i in items)
+
+
+class TestMergeReanalysisFields:
+    ANALYSIS = {"category": "开心", "tags": ["笑"], "desc": "一只笑猫"}
+
+    def test_fields_narrows_scope_to_category(self):
+        updates = PluginAPI._merge_reanalysis(
+            {}, self.ANALYSIS, overwrite=True, fields=("category",)
+        )
+        assert updates == {"category": "开心"}
+
+    def test_fields_still_respects_overwrite_false(self):
+        updates = PluginAPI._merge_reanalysis(
+            {"category": "难过"}, self.ANALYSIS, overwrite=False, fields=("category",)
+        )
+        assert updates == {}
+
+    def test_identical_category_is_skipped(self):
+        updates = PluginAPI._merge_reanalysis(
+            {"category": "开心"}, self.ANALYSIS, overwrite=True, fields=("category",)
+        )
+        assert updates == {}
+
+    def test_default_fields_still_exclude_category(self):
+        updates = PluginAPI._merge_reanalysis({}, self.ANALYSIS, overwrite=True)
+        assert "category" not in updates
+        assert updates["tags"] == ["笑"]

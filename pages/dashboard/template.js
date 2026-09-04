@@ -438,6 +438,14 @@ export const TEMPLATE = `
 
                 <div class="toolbar-actions">
                     <div class="toolbar-group">
+                        <button @click="openBatchReanalyzeModal('missing', 'pending')" class="codex-btn"
+                            :title="t('pages.dashboard.reanalyze.pending_tip', '对待审核的图片批量重跑视觉识别，通过前先把标注补齐')">
+                            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                            {{ t('pages.dashboard.actions.reanalyze', '重新识别') }}
+                        </button>
                         <button @click="togglePendingBatchMode" class="codex-btn"
                             :class="{ primary: pendingBatchMode }">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -452,6 +460,7 @@ export const TEMPLATE = `
                         <button @click="toggleSelectAllPending" class="codex-btn select-all-btn">
                             {{ allPendingSelected ? '☐ ' + t('pages.dashboard.actions.deselect_all', 'Deselect All') : '☑ ' + t('pages.dashboard.actions.select_all', 'Select All') }}
                         </button>
+                        <button @click="openBatchReanalyzeModal('selected', 'pending')" class="codex-btn">&#8635; {{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</button>
                         <button @click="approvePendingBatch" class="codex-btn approve-batch-btn">✅ {{ t('pages.dashboard.actions.approve_all', 'Approve All') }}</button>
                         <button @click="rejectPendingBatch(false)" class="codex-btn reject-batch-btn">🗑 {{ t('pages.dashboard.actions.delete_all', 'Delete All') }}</button>
                         <button @click="rejectPendingBatch(true)" class="codex-btn reject-bl-batch-btn">🚫 {{ t('pages.dashboard.actions.delete_blacklist', 'Delete + Blacklist') }}</button>
@@ -742,6 +751,9 @@ export const TEMPLATE = `
 
             <div v-else class="modal-pad" style="width:100%">
                 <div style="max-width:500px;margin:0 auto">
+                    <div v-if="singleReanalyze.text" class="reanalyze-note" :class="singleReanalyze.tone">
+                        {{ singleReanalyze.text }}
+                    </div>
                     <div style="margin-bottom:20px">
                         <label
                             class="form-label">{{ t('pages.dashboard.fields.category', 'Category') }}</label>
@@ -819,6 +831,15 @@ export const TEMPLATE = `
                     </svg>
                     {{ t('pages.dashboard.actions.edit', 'Edit') }}
                 </button>
+<button @click="reanalyzePreviewItem" class="codex-btn" style="flex:1" :disabled="analyzing"
+                    :title="t('pages.dashboard.reanalyze.single_tip', '重新跑一次视觉识别；结果只填进编辑表单，点保存才会写入')">
+                    <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    <span v-if="analyzing">{{ t('pages.dashboard.actions.analyzing', 'Analyzing...') }}</span>
+                    <span v-else>{{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</span>
+                </button>
                 <button @click="toggleScope(previewItem, previewItem?.scope_mode === 'local' ? 'public' : 'local')"
                     class="codex-btn" style="flex:1">
                     {{ previewItem?.scope_mode === 'local' ? t('pages.dashboard.actions.unset_local', 'Unset Local') : t('pages.dashboard.actions.set_local', 'Set Local') }}
@@ -841,6 +862,15 @@ export const TEMPLATE = `
             </template>
             <template v-else>
                 <button @click="cancelEdit" class="codex-btn" style="flex:1">{{ t('pages.dashboard.actions.cancel', 'Cancel') }}</button>
+                <button @click="reanalyzePreviewItem" class="codex-btn" style="flex:1" :disabled="analyzing"
+                    :title="t('pages.dashboard.reanalyze.single_tip', '重新跑一次视觉识别；结果只填进编辑表单，点保存才会写入')">
+                    <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                    <span v-if="analyzing">{{ t('pages.dashboard.actions.analyzing', 'Analyzing...') }}</span>
+                    <span v-else>{{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</span>
+                </button>
                 <button @click="saveEdit" class="codex-btn primary" style="flex:1">{{ t('pages.dashboard.actions.save', 'Save') }}</button>
             </template>
         </div>
@@ -988,7 +1018,10 @@ export const TEMPLATE = `
         <div class="modal-panel-corner-br"></div>
 
         <div class="modal-header">
-            <h2 v-if="batchMode === 'reanalyze'">{{ t('pages.dashboard.modal.batch_reanalyze', '批量重新识别') }}</h2>
+            <h2 v-if="batchMode === 'reanalyze'">
+                {{ t('pages.dashboard.modal.batch_reanalyze', '批量重新识别') }}
+                <span class="reanalyze-scope-tag">{{ reanalyzeIsPending ? t('pages.dashboard.reanalyze.scope_pending', '待审核') : t('pages.dashboard.reanalyze.scope_library', '表情库') }}</span>
+            </h2>
             <h2 v-else>{{ t('pages.dashboard.modal.batch_import', 'Batch Import Stickers') }}</h2>
             <button @click="closeBatchUploadModal" class="modal-close">
                 <svg style="width:20px;height:20px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1137,37 +1170,41 @@ export const TEMPLATE = `
 
             <div v-else-if="!batchTaskId">
                 <p class="hint-text" style="margin:0 0 16px">
-                    {{ t('pages.dashboard.reanalyze.intro', '对已经入库的表情包重新跑一遍视觉识别，补齐或刷新标签、描述、场景、图上文字和情绪。') }}
+                    <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.intro_pending', '对待审核池里的图片重新跑一遍视觉识别，补齐或刷新分类、标签、描述、场景、图上文字和情绪。只改待审核记录，不会自动通过审核。') }}</span>
+                    <span v-else>{{ t('pages.dashboard.reanalyze.intro', '对已经入库的表情包重新跑一遍视觉识别，补齐或刷新标签、描述、场景、图上文字和情绪。') }}</span>
                 </p>
 
                 <div>
                     <label class="form-label">{{ t('pages.dashboard.reanalyze.target', '处理范围') }}</label>
                     <div class="reanalyze-target-list">
-                        <label class="reanalyze-target" :class="{ 'is-disabled': selectedImages.size === 0 }">
+                        <label class="reanalyze-target" :class="{ 'is-disabled': reanalyzeSelectedCount === 0 }">
                             <input type="radio" value="selected" v-model="reanalyzeForm.target"
-                                :disabled="selectedImages.size === 0">
+                                :disabled="reanalyzeSelectedCount === 0">
                             <span>
-                                <b>{{ t('pages.dashboard.reanalyze.target_selected', '当前勾选的表情') }}</b>
-                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', selectedImages.size) }}</em>
+                                <b v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_selected_pending', '当前勾选的待审核图片') }}</b>
+                                <b v-else>{{ t('pages.dashboard.reanalyze.target_selected', '当前勾选的表情') }}</b>
+                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeSelectedCount) }}</em>
                             </span>
                         </label>
                         <label class="reanalyze-target">
                             <input type="radio" value="missing" v-model="reanalyzeForm.target">
                             <span>
                                 <b>{{ t('pages.dashboard.reanalyze.target_missing', '只补缺失标注的') }}</b>
-                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeScan.missing) }}</em>
+                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeMissingCount) }}</em>
                             </span>
                         </label>
                         <label class="reanalyze-target">
                             <input type="radio" value="all" v-model="reanalyzeForm.target">
                             <span>
-                                <b>{{ t('pages.dashboard.reanalyze.target_all', '全部表情包') }}</b>
-                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeScan.total) }}</em>
+                                <b v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_all_pending', '全部待审核图片') }}</b>
+                                <b v-else>{{ t('pages.dashboard.reanalyze.target_all', '全部表情包') }}</b>
+                                <em>{{ t('pages.dashboard.reanalyze.count', '{n} 张').replace('{n}', reanalyzeAllCount) }}</em>
                             </span>
                         </label>
                     </div>
                     <p class="hint-text" style="margin:8px 0 0">
-                        {{ t('pages.dashboard.reanalyze.target_hint', '「缺失标注」指没有标签或没有描述的表情包，通常是手动上传或早期入库的。') }}
+                        <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.target_hint_pending', '「缺失标注」指没有标签或没有描述的待审核图片，常见于识别失败或超时留下的记录。') }}</span>
+                        <span v-else>{{ t('pages.dashboard.reanalyze.target_hint', '「缺失标注」指没有标签或没有描述的表情包，通常是手动上传或早期入库的。') }}</span>
                     </p>
                 </div>
 
@@ -1217,7 +1254,8 @@ export const TEMPLATE = `
                 </div>
 
                 <p class="hint-text" style="margin:12px 0 0">
-                    {{ t('pages.dashboard.reanalyze.category_note', '为避免大批量移动文件出意外，重新识别不会自动改分类。如果识别出的分类和现有分类不一致，会在结果里作为建议列出，你再决定要不要手动移动。') }}
+                    <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.category_note_pending', '待审核记录的分类只是一个待定字段，不对应真实目录，所以这里会连分类一起修正；等你点通过时才按最终分类归档。') }}</span>
+                    <span v-else>{{ t('pages.dashboard.reanalyze.category_note', '为避免大批量移动文件出意外，重新识别不会自动改分类。如果识别出的分类和现有分类不一致，会在结果里作为建议列出，你再决定要不要手动移动。') }}</span>
                 </p>
 
                 <div v-if="batchUploadError" class="error-banner">
@@ -1669,6 +1707,10 @@ export const TEMPLATE = `
                         </div>
                     </div>
 
+                    <div v-if="singleReanalyze.text" class="reanalyze-note" :class="singleReanalyze.tone">
+                        {{ singleReanalyze.text }}
+                    </div>
+
                     <div style="margin-bottom:16px">
                         <label
                             class="form-label sm">
@@ -1742,6 +1784,11 @@ export const TEMPLATE = `
         <div class="modal-actions">
             <button @click="closePendingEdit" class="codex-btn" style="flex:1">
                 {{ t('pages.dashboard.actions.cancel', 'Cancel') }}
+            </button>
+            <button @click="reanalyzePendingItem" class="codex-btn" style="flex:1" :disabled="analyzing"
+                :title="t('pages.dashboard.reanalyze.single_tip', '重新跑一次视觉识别；结果只填进编辑表单，点保存才会写入')">
+                <span v-if="analyzing">{{ t('pages.dashboard.actions.analyzing', 'Analyzing...') }}</span>
+                <span v-else>{{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</span>
             </button>
             <button @click="savePendingEdit(false)" class="codex-btn" style="flex:1">
                 {{ t('pages.dashboard.actions.save_only', 'Save') }}

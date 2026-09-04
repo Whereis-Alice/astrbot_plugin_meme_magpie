@@ -58,6 +58,10 @@ What this fork adds on top:
 | **Rate-limited batch analysis** | Batch import and batch re-analysis take a concurrency cap and a requests-per-minute cap, so hundreds of images will not trip upstream 429s |
 | **Source work field** | A new `work` field flows through ingestion, retrieval and WebUI filtering |
 | **Batch re-analysis** | Re-run vision analysis over images already in the library that are missing tags or descriptions, optionally fill-blanks-only |
+| **Known facts feed the prompt** | Work and character values you already filled in are written into the analysis prompt, so the model adopts them instead of guessing — biggest win on anime art |
+| **Re-analysis for the review queue** | Images waiting for review can be re-analysed in bulk as well, and there the category does get corrected |
+| **Multi-adapter support** | LLBot / NapCat / SnowLuma differences around marketplace stickers and sticker flags are all absorbed |
+| **Message-splitting plugin support** | A new `attach` delivery mode lets stickers ride along in the reply's own message chain |
 | **Upstream bug fixes** | See [What got fixed](#what-got-fixed) |
 
 ## Features
@@ -75,6 +79,8 @@ What this fork adds on top:
 | **Chat filtering** | Separate allow/block lists for collecting and sending, with `group:<id>` and `user:<id>` entries |
 | **Duplicate cleanup** | Perceptual hashing (pHash) finds visually identical images |
 | **Localized UI** | 中文 / English / Русский |
+| **QQ marketplace stickers** | Paid QQ marketplace stickers (`mface`) get collected too, with adapters for LLBot, NapCat and SnowLuma |
+| **Message-splitting friendly** | Stickers can ride along in the bot's own reply chain so plugins like outputpro_split can lay them out |
 
 ## Getting started
 
@@ -185,6 +191,30 @@ Which side wins is controlled by **`llm_steal_param_mode`**:
 
 Content moderation always runs first regardless of mode — **the LLM cannot bypass it**.
 
+### Known facts go into the analysis prompt
+
+Metadata you supply is not just stored — it is also written into the vision model's prompt. Analysis requests gain a block like this:
+
+```
+<known_facts>
+The following was provided by the user or by the upstream chat model and is
+confirmed correct. Use it as-is; do not contradict or rewrite it:
+- Work: Bocchi the Rock!
+- Character: Hitori Gotoh
+- Action: clutching her head, screaming
+description and scenes must build on the facts above rather than inventing a
+different account. tags should only add visual keywords not already listed.
+</known_facts>
+```
+
+The model then spends its effort describing the image instead of guessing who is in it. All three entry points are wired up:
+
+- **LLM collection** — whatever the model passed as `work` / `character` / `action` / `overlay_text`
+- **Single-image analysis in the dashboard** — the work and character in the dialog are sent along automatically
+- **Batch re-analysis** — each image reuses the work and character already on record, so the model never re-guesses what is already known
+
+To drop a hint, submit that field empty. The analysis cache is keyed by the known facts, so results with and without hints never contaminate each other, and overriding the built-in template with a custom prompt does not disable the feature (when the template has no `{known_facts}` placeholder, the block is inserted at a sensible spot automatically).
+
 ## Batch import and batch re-analysis
 
 Both live in the WebUI library page and share the same rate limiter.
@@ -206,6 +236,8 @@ Re-runs vision analysis over images already in the library. Useful when early im
 - **Overwrite existing values**: off by default, so it only fills blanks and never touches descriptions you wrote by hand
 - **Item limit**: cap the batch size and test the waters first
 - Re-analysis deliberately **does not change categories** — that would mean moving files, which is risky under concurrency. It reports a *suggested* category and leaves the decision to you.
+
+**The review queue can be re-analysed too**: pending images support the same bulk or single re-run, with the same three scopes. The one difference is that **a pending item's category does get corrected** — there it is only a database field, and changing it moves no files. Library categories map to real directories, which is why those stay advisory.
 
 ### Picking concurrency and rate so you do not get 429ed
 
@@ -305,6 +337,9 @@ Everything is editable in the AstrBot plugin config page. The notable ones:
 | Randomize delay | `false` | Pick a random delay between the fixed and maximum values |
 | Per-character delay (s) | `0.3` | Extra wait scaled by reply length, simulating "read the text, then react" |
 | Smart selection | `true` | Composite scoring; off means purely random |
+| Auto sticker delivery mode | `separate` | `separate` sends its own message / `attach` rides along in the reply's message chain, see [Working with message-splitting plugins](#working-with-message-splitting-plugins) |
+| `attach` selection timeout (s) | `10.0` | `attach` mode only; on timeout it falls back to a separate message delivered asynchronously, so the reply is never held up |
+| Emit compat path for splitters | `false` | `attach` mode only, see [What is that "compat path" switch for](#what-is-that-compat-path-switch-for) |
 
 ### Emotion analysis
 
@@ -344,6 +379,44 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 | List priority | `whitelist_first` | Who wins when both match |
 | VLM prompts (plain / with moderation) | built-in | Empty uses the bundled `prompts.json` templates |
 
+## Platform and protocol adapters
+
+The plugin itself is platform-agnostic — collecting and sending images works anywhere. The one thing that needs special care is **QQ marketplace stickers** (the paid packs you have to download): every OneBot adapter ships them differently, so they get dedicated handling.
+
+| Adapter | How marketplace stickers arrive | Sticker flag field | `summary` label |
+|:---|:---|:---|:---|
+| **LLBot** | A separate `mface` segment, which AstrBot does not turn into an image component | `subType` only (camelCase) | Not sent |
+| **NapCat** | Folded into a normal `image` segment, without even a `sub_type` key | `sub_type` only (snake_case) | Usually empty |
+| **SnowLuma** | Folded into a normal `image` segment, with `sub_type` set to `0` | `sub_type` only | Always present |
+
+What that means in practice:
+
+- **Collecting** — marketplace stickers are read straight from the raw OneBot segments rather than from AstrBot's image components (otherwise LLBot's `mface` segment is lost entirely). Deciding "this is a sticker, not a photo" looks at `sub_type` / `subType` / `summary` and also at marketplace-only fields such as `emoji_id`, `emoji_package_id` and `key` — that last layer is what catches SnowLuma's `sub_type: 0`. The `emoji_id`, the pack id and the label are stored with the entry so the source can be traced later.
+- **Sending** — when an image goes out *as a sticker*, `summary`, `sub_type` and `subType` are all written at once, so every adapter renders it correctly and quietly ignores the keys it does not know.
+
+This assumes OneBot's `messageFormat` is `array` (the default). Set it to `string` and the raw message becomes one CQ-code string, at which point marketplace stickers cannot be read at all.
+
+Other platforms (Telegram, the official QQ bot API) are handled as ordinary images with no loss of function. The official QQ bot API has no OneBot sticker flag, so the separate "sticker collection mode (QQ_Official)" setting decides which images qualify.
+
+## Working with message-splitting plugins
+
+With a plugin like [astrbot_plugin_outputpro_split](https://github.com/Whereis-Alice/astrbot_plugin_outputpro_split) installed — the kind that chops one long reply into several messages — this plugin's sticker is by default **a separate message**, invisible to the splitter and therefore outside its image and sticker layout rules. Switching "auto sticker delivery mode" to `attach` fixes that:
+
+| Value | Behaviour | Use when |
+|:---|:---|:---|
+| `separate` (default) | The sticker is its own message, exactly as before | No splitter installed, or you want the safest compatibility |
+| `attach` | The sticker is appended to the end of the reply's message chain | You want the splitter to lay out text and sticker together |
+
+The cost of `attach` is that selection has to finish before the reply goes out, so replies get slightly slower. A timeout guards this (10 s by default): on timeout, on no match, on any failure at all, it falls back to `separate` asynchronous delivery — **the reply itself is never blocked, and the worst case is a sticker that arrives a moment late**. `attach` also stands down when the reply is about to be rendered as one long image (AstrBot's text-to-image), since a sticker sitting at the end of the chain would be drawn into the picture.
+
+### What is that "compat path" switch for
+
+The way `outputpro_split` recognises "this image is a sticker" is by looking for `plugin_stealer` in the image path — that is the original plugin's directory name, and this plugin naturally uses a different one.
+
+Turn on "emit compat path for splitters" and the sticker about to be attached is first hard-linked (copied if the link fails, e.g. across volumes) into a compat directory whose name contains that string, and attached from there, which the splitter recognises correctly. The original file and the path recorded in the library are untouched, and the compat directory keeps only the 64 most recent files, so disk use is negligible.
+
+It is a stopgap: the cleaner fix is for upstream to add `astrbot_plugin_meme_magpie` to its own list of keywords, and then this switch can go back off.
+
 ## The dashboard
 
 Plugin details page → "Meme Thief Dashboard". Two areas:
@@ -367,6 +440,7 @@ data/plugin_data/astrbot_plugin_meme_magpie/
 ├── cache/emoji.db            # SQLite (entries, tags, vectors, blocklist)
 ├── cache/                    # thumbnail cache
 ├── temp/                     # temp files
+├── plugin_stealer_split_compat/  # only appears once "compat path" is on, see the splitter section
 ├── categories.json           # category list
 ├── category_info.json        # category descriptions
 ├── characters.json           # character list
@@ -401,6 +475,12 @@ It is a conservative default — raise it. Note that exceeding the cap prunes th
 **Will it collect someone's private screenshot?**
 Yes — it has no idea what privacy is. That is why human review is on by default, why there is a `local` scope (sendable only in the chat it came from), and why there is a blocklist. Keep review enabled and use the collect blocklist to exclude sensitive chats.
 
+**Marketplace stickers are not being collected on LLBot / NapCat / SnowLuma?**
+First check that OneBot's `messageFormat` is `array` and not `string` — the plugin needs raw message segments to see marketplace stickers at all. The differences between the three adapters themselves are already handled; details in [Platform and protocol adapters](#platform-and-protocol-adapters).
+
+**Stickers look out of place now that I run a message-splitting plugin?**
+Set "auto sticker delivery mode" to `attach`, and if needed also turn on "emit compat path for splitters". See [Working with message-splitting plugins](#working-with-message-splitting-plugins).
+
 ## What got fixed
 
 Relative to upstream `astrbot_plugin_stealer`:
@@ -412,6 +492,13 @@ Relative to upstream `astrbot_plugin_stealer`:
 - **Unbounded batch concurrency** — upstream's own README carried a "high concurrency warning, analyse in batches". Replaced with configurable concurrency, an RPM token bucket and backoff retries, so no manual batching is needed.
 - **Silent pass-through when moderation failed** — behaviour when the moderation model timed out or ran out of quota was not controllable. It now rejects by default, with an explicit opt-in to fail open.
 - **Dead code removed** — the unused `steal_image_direct` path is gone.
+
+1.2.0 fixed these as well — the first two are upstream's, the last two were our own oversights:
+
+- **The single-image analysis endpoint masked clear errors as a 500** — the temp-file variable was initialised inside the `try` block while `finally` reads it. Any early return (vision service not configured, request body failing to parse) made `finally` raise `UnboundLocalError`, so the frontend saw a bare 500 instead of the genuinely useful "vision service unavailable" message.
+- **Sending *as a sticker* only wrote `summary`** — LLBot reads camelCase `subType` only, NapCat and SnowLuma read snake_case `sub_type` only, so some adapters rendered a sticker as a plain image. All three keys are now written together.
+- **"Work" typed in the review queue was not saved** — the pending-update endpoint's writable-field allowlist was missing `work` and `overlay_text`, so filling them in and hitting save silently dropped them. This dates back to 1.0.0, when the work dimension was introduced.
+- **Re-analysis suggested a category change redundantly** — the suggestion still appeared when it matched the current category, or when that change was already part of the same update.
 
 ## Notes
 

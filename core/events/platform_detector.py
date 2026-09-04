@@ -13,6 +13,23 @@ _QQ_EMOJI_URL_MARKERS = (
     "gxh.vip.qq.com",
 )
 
+# OneBot 里承载「QQ 商城表情」的独立消息段类型。
+# LLBot 会把商城表情单独发成 mface 段（没有 file 字段），
+# NapCat / SnowLuma 则倾向折进普通 image 段，两条路径都要覆盖。
+_STORE_EMOJI_SEG_TYPES = frozenset({"marketface", "mface"})
+
+# 商城表情段里可能出现的图片 URL 字段，按“越靠前越可能是原图”排序。
+_STORE_EMOJI_URL_KEYS = (
+    "url",
+    "cdnurl",
+    "cdn_url",
+    "raw_url",
+    "origin_url",
+    "original_url",
+    "thumb",
+    "thumb_url",
+)
+
 
 class PlatformDetector:
     """负责检测消息来源平台并提取表情包相关的元信息。"""
@@ -24,6 +41,32 @@ class PlatformDetector:
     def _normalize_str(value: object) -> str:
         """规范化字符串值。"""
         return normalize_event_value(value)
+
+    @staticmethod
+    def iter_onebot_segments(event: AstrMessageEvent | None) -> list[dict]:
+        """取出 OneBot 原始消息段列表，取不到时返回空列表。
+
+        raw_message 在不同适配器下形态不一：aiocqhttp 给的是 dict 子类（既能下标
+        也能属性访问），别的实现可能给纯 dict 或普通对象；OneBot 侧若配置
+        messageFormat="string"，message 还会是一段 CQ 码字符串。这里统一兜住，
+        避免调用方各写一遍。
+        """
+        raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        raw_message: object = None
+        if isinstance(raw_event, dict):
+            # dict 分支要放在前面：aiocqhttp 的 Event 同时是 dict 且带 __getattr__，
+            # 而纯 dict 用 getattr 取不到 message。
+            raw_message = raw_event.get("message")
+        elif raw_event is not None:
+            raw_message = getattr(raw_event, "message", None)
+        if not isinstance(raw_message, list):
+            return []
+        return [seg for seg in raw_message if isinstance(seg, dict)]
+
+    @staticmethod
+    def _seg_type(seg: dict) -> str:
+        """取消息段类型（小写）。"""
+        return str(seg.get("type", "") or "").strip().lower()
 
     def get_platform_name(self, event: AstrMessageEvent | None = None) -> str:
         """获取事件平台名（小写），失败时返回空字符串。"""
@@ -144,27 +187,14 @@ class PlatformDetector:
                     return True
 
             # 方式0: 从原始事件中查找 sub_type (最可靠的方法)
-            if (
-                image_segments is None
-                and event
-                and hasattr(event, "message_obj")
-                and hasattr(event.message_obj, "raw_message")
-            ):
-                raw_event = event.message_obj.raw_message
-                logger.debug(f"[EmojiCheck] 方式0: raw_event type={type(raw_event).__name__}, is_dict={isinstance(raw_event, dict)}")
-                # raw_event 可能是 dict（aiocqhttp）或对象，需要兼容两种类型
-                if isinstance(raw_event, dict):
-                    raw_message = raw_event.get("message")
-                elif raw_event is not None:
-                    raw_message = getattr(raw_event, "message", None)
-                logger.debug(f"[EmojiCheck] 方式0: raw_message type={type(raw_message).__name__ if raw_message else 'None'}")
-                if isinstance(raw_message, list):
-                    image_segments = [
-                        seg
-                        for seg in raw_message
-                        if isinstance(seg, dict) and seg.get("type") == "image"
-                    ]
-                    logger.debug(f"[EmojiCheck] 方式0: 提取到 {len(image_segments)} 个图片段")
+            if image_segments is None and event is not None:
+                all_segments = self.iter_onebot_segments(event)
+                image_segments = [
+                    seg for seg in all_segments if self._seg_type(seg) == "image"
+                ]
+                logger.debug(
+                    f"[EmojiCheck] 方式0: 原始段 {len(all_segments)} 个，其中图片段 {len(image_segments)} 个"
+                )
 
             if image_segments:
                 logger.debug(f"[EmojiCheck] 有 {len(image_segments)} 个 image_segments 可匹配, img_index={img_index}")
@@ -224,9 +254,16 @@ class PlatformDetector:
                         logger.debug(f"检测到表情包标记: summary='{summary}' (从原始事件)")
                         return True
 
-                    # QQ 官方商城表情包（raw data 常见字段：emoji_id / emoji_package_id / key）
-                    if matched_data.get("emoji_id") or matched_data.get("emoji_package_id"):
-                        logger.debug("检测到表情包标记: emoji_id/emoji_package_id (从原始事件)")
+                    # QQ 商城表情（把 mface 折进 image 段的实现会带这几个字段）。
+                    # SnowLuma 这类实现给的 sub_type 是 0、summary 也未必带“表情”，
+                    # 只能靠这些商城专属字段兜住，否则会被当成普通图片跳过。
+                    if (
+                        matched_data.get("emoji_id")
+                        or matched_data.get("emoji_package_id")
+                        or matched_data.get("emoji_pkg_id")
+                        or matched_data.get("key")
+                    ):
+                        logger.debug("检测到表情包标记: QQ 商城表情字段 (从原始事件)")
                         return True
 
                     url = self._normalize_str(matched_data.get("url", ""))
@@ -281,53 +318,66 @@ class PlatformDetector:
             logger.debug(f"检查平台表情包元信息失败: {e}")
             return False
 
-    def extract_store_emoji_urls(self, event: AstrMessageEvent) -> list[str]:
-        """从 OneBot raw_message 里提取 QQ 商城表情（marketface/mface）的可下载 URL。"""
-        urls: list[str] = []
+    def extract_store_emoji_segments(self, event: AstrMessageEvent) -> list[dict]:
+        """从 OneBot 原始消息里提取 QQ 商城表情段（marketface / mface）。
+
+        LLBot 会把商城表情发成独立的 mface 段，这类段没有 file 字段，AstrBot 也不会
+        把它转成 Image 组件，所以只能直接读原始段。返回的每一项形如
+        ``{"url": "https://...", "meta": {...}}``，meta 里带上商城表情自身的
+        emoji_id / 表情包 id / 外显名，方便入库后回溯来源。
+        """
+        results: list[dict] = []
         seen: set[str] = set()
         try:
-            raw_event = getattr(getattr(event, "message_obj", None), "raw_message", None)
-            raw_message = getattr(raw_event, "message", None)
-            if not isinstance(raw_message, list):
-                return []
-
-            for seg in raw_message:
-                if not isinstance(seg, dict):
-                    continue
-                seg_type = self._normalize_str(seg.get("type", "")).lower()
-                if seg_type not in {"marketface", "mface"}:
+            for seg in self.iter_onebot_segments(event):
+                if self._seg_type(seg) not in _STORE_EMOJI_SEG_TYPES:
                     continue
                 data = seg.get("data", {}) or {}
                 if not isinstance(data, dict):
                     continue
 
-                # 常见字段优先
-                for key in (
-                    "url",
-                    "cdnurl",
-                    "cdn_url",
-                    "raw_url",
-                    "origin_url",
-                    "original_url",
-                    "thumb",
-                    "thumb_url",
-                ):
-                    v = data.get(key)
-                    s = self._normalize_str(v)
+                urls: list[str] = []
+
+                def push(value: object) -> None:
+                    s = self._normalize_str(value)
                     if s.startswith("http://") or s.startswith("https://"):
-                        if s not in seen:
-                            seen.add(s)
+                        if s not in urls:
                             urls.append(s)
 
-                # 再兜底扫描一遍所有字符串值
+                for key in _STORE_EMOJI_URL_KEYS:
+                    push(data.get(key))
+                # 字段名各家不统一，兜底再扫一遍所有字符串值
                 if not urls:
-                    for v in data.values():
-                        s = self._normalize_str(v)
-                        if s.startswith("http://") or s.startswith("https://"):
-                            if s not in seen:
-                                seen.add(s)
-                                urls.append(s)
-        except Exception:
-            return urls
+                    for value in data.values():
+                        push(value)
+                if not urls:
+                    continue
 
-        return urls
+                meta = {
+                    "source": "qq_store",
+                    "qq_emoji_id": self._normalize_str(
+                        data.get("emoji_id") or data.get("id")
+                    ),
+                    "qq_emoji_package_id": self._normalize_str(
+                        data.get("emoji_package_id")
+                        or data.get("emoji_pkg_id")
+                        or data.get("package_id")
+                        or data.get("tabId")
+                    ),
+                    "qq_key": self._normalize_str(data.get("key")),
+                    "store_summary": self._normalize_str(
+                        data.get("summary") or data.get("text")
+                    ),
+                }
+                for url in urls:
+                    if url in seen:
+                        continue
+                    seen.add(url)
+                    results.append({"url": url, "meta": dict(meta, origin_url=url)})
+        except Exception as e:
+            logger.debug(f"提取商城表情段失败: {e}")
+        return results
+
+    def extract_store_emoji_urls(self, event: AstrMessageEvent) -> list[str]:
+        """从 OneBot raw_message 里提取 QQ 商城表情（marketface/mface）的可下载 URL。"""
+        return [item["url"] for item in self.extract_store_emoji_segments(event)]

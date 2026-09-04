@@ -415,3 +415,17 @@ class MemeSelector:
     async def try_send_emoji(self, event: AstrMessageEvent, emotions: list[str], text: str) -> bool:
         """尝试发送表情包（已迁移到 MemeSmartSelectService）。"""
         return await self._smart_select_service.try_send_emoji(event, emotions, text)
+
+    async def pick_emoji_only(
+        self, event: AstrMessageEvent, emotions: list[str], text: str
+    ) -> str | None:
+        """只挑表情不发送（已迁移到 MemeSmartSelectService）。"""
+        return await self._smart_select_service.pick_emoji_only(event, emotions, text)
+
+    async def attach_emoji_to_result(
+        self, event: AstrMessageEvent, result, emotions: list[str], text: str
+    ) -> str | None:
+        """把表情附加到主回复的消息链（已迁移到 MemeSmartSelectService）。"""
+        return await self._smart_select_service.attach_emoji_to_result(
+            event, result, emotions, text
+        )

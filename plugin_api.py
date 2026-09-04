@@ -45,6 +45,8 @@ class PluginAPI:
     # 单次批量重新识别的硬上限，避免误点「全部」后排出十万级任务。
     REANALYZE_MAX_ITEMS = 5000
     REANALYZE_TARGETS = frozenset({"selected", "missing", "all"})
+    # 重新识别的作用范围：已入库表情库 / 待审核池。
+    REANALYZE_SCOPES = frozenset({"library", "pending"})
     # 重新识别时允许模型回填的字段（分类不在内，改分类要移动文件）。
     REANALYZE_FIELDS = ("tags", "desc", "scenes", "overlay_text", "emotions")
     WORK_MAX_CHARS = 60
@@ -227,6 +229,32 @@ class PluginAPI:
     @staticmethod
     def _normalize_character_key(value: str) -> str:
         return normalize_character_key(value)
+
+    def _character_display(self, key: str) -> str:
+        """角色归一 key → 展示名。写进提示词要用人能读的名字，不是内部 key。"""
+        key = str(key or "").strip()
+        if not key:
+            return ""
+        try:
+            for item in self._cfg.get_character_info_list():
+                if item.get("key") == key:
+                    return str(item.get("name") or key)
+        except Exception:
+            pass
+        return key
+
+    def _known_facts(self, *, work: Any = None, character: Any = None) -> dict[str, str]:
+        """把作品 / 角色整理成识别提示词的已知信息（空值自动丢弃）。"""
+        known: dict[str, str] = {}
+        work_text = self._normalize_work(work)
+        if work_text:
+            known["work"] = work_text
+        char_text = self._character_display(
+            self._normalize_character_key(str(character or ""))
+        )
+        if char_text:
+            known["character"] = char_text
+        return known
 
     def _build_characters_list(self, counts: dict[str, int] | None = None) -> list[dict]:
         counts = counts or {}
@@ -1003,6 +1031,7 @@ class PluginAPI:
                 "original_name": row.get("original_name"),
                 "overlay_text": str(row.get("overlay_text", "") or ""),
                 "character": str(row.get("character", "") or ""),
+                "work": str(row.get("work", "") or ""),
             }
         except (ValueError, TypeError):
             return None
@@ -1295,6 +1324,10 @@ class PluginAPI:
                 if character and character not in set(self._cfg.get_characters()):
                     return jsonify({"success": False, "error": f"角色无效: {character}"})
                 fields["character"] = character
+            if "work" in data:
+                fields["work"] = self._normalize_work(data.get("work"))
+            if "overlay_text" in data:
+                fields["overlay_text"] = str(data.get("overlay_text") or "").strip()
 
             if not fields:
                 return jsonify({"success": False, "error": "没有可更新字段"})
@@ -1869,8 +1902,13 @@ class PluginAPI:
 
         await asyncio.gather(*(worker() for _ in range(max(1, int(workers)))))
 
-    async def _analyze_batch_item(self, file_data: dict, throttle) -> dict | None:
-        """对单张图跑一次视觉分类；失败或被判定为非表情包时返回 None。"""
+    async def _analyze_batch_item(
+        self, file_data: dict, throttle, known: dict[str, str] | None = None
+    ) -> dict | None:
+        """对单张图跑一次视觉分类；失败或被判定为非表情包时返回 None。
+
+        known 是调用方已确认的作品 / 角色，会写进提示词让模型直接采用。
+        """
         proc = self.plugin.image_processor_service
         if not proc:
             return None
@@ -1884,6 +1922,7 @@ class PluginAPI:
                 file_path=str(tmp),
                 categories=list(self._cfg.categories or []),
                 content_filtration=False,
+                known=known or None,
             )
         except Exception as e:
             logger.warning(f"[PluginAPI] 批量自动识别失败（{file_data['filename']}）: {e}")
@@ -1920,8 +1959,14 @@ class PluginAPI:
             "emotions": list(emotions or []),
         }
 
-    async def _analyze_existing_image(self, path: str, throttle) -> dict | None:
-        """对已入库的图片原地跑一次视觉分类，不复制文件、不写临时文件。"""
+    async def _analyze_existing_image(
+        self, path: str, throttle, known: dict[str, str] | None = None
+    ) -> dict | None:
+        """对已入库的图片原地跑一次视觉分类，不复制文件、不写临时文件。
+
+        known 只放作品 / 角色：overlay_text、tags、desc 正是本次要刷新的字段，
+        把旧值回喂给模型会形成自我强化，越刷越偏。
+        """
         proc = getattr(self.plugin, "image_processor_service", None)
         if not proc:
             return None
@@ -1932,6 +1977,7 @@ class PluginAPI:
                 file_path=str(path),
                 categories=list(self._cfg.categories or []),
                 content_filtration=False,
+                known=known or None,
             )
         except Exception as e:
             logger.warning(f"[PluginAPI] 重新识别失败（{path}）: {e}")
@@ -1964,7 +2010,9 @@ class PluginAPI:
             }
             if auto_analyze:
                 task["phase"] = "analyzing"
-                analysis = await self._analyze_batch_item(file_data, throttle)
+                analysis = await self._analyze_batch_item(
+                    file_data, throttle, self._known_facts(work=work, character=character)
+                )
                 if analysis:
                     analyzed = True
                     # 用户显式指定分类时以用户为准，其余语义字段仍采用识别结果。
@@ -2023,13 +2071,25 @@ class PluginAPI:
         return not (meta.get("tags") or []) or not str(meta.get("desc") or "").strip()
 
     def _collect_reanalyze_targets(
-        self, *, target: str, hashes: list[str], limit: int | None
+        self,
+        *,
+        target: str,
+        hashes: list[str],
+        limit: int | None,
+        scope: str = "library",
+        ids: list[Any] | None = None,
     ) -> tuple[list[dict], str]:
         """按目标范围挑出要重跑识别的条目，返回 (待办列表, 错误信息)。
 
         selected 用前端勾选的 hash（与其他批量接口一致），missing 只挑缺标注
         的，all 是全库。非 selected 模式按入库时间正序排，便于先补最老的一批。
+
+        scope="pending" 时改为在待审核池里挑，selected 用 pending id。
         """
+        if scope == "pending":
+            return self._collect_pending_reanalyze_targets(
+                target=target, ids=ids or [], limit=limit
+            )
         index = self._build_full_index_snapshot()
         if not index:
             return [], "索引为空，没有可重新识别的表情包"
@@ -2058,12 +2118,65 @@ class PluginAPI:
             return [], "没有符合条件的表情包"
         return [
             {
+                "kind": "library",
                 "path": path,
                 "filename": str(meta.get("original_name") or Path(path).name),
                 "meta": dict(meta),
             }
             for path, meta in picked
         ], ""
+
+    def _collect_pending_reanalyze_targets(
+        self, *, target: str, ids: list[Any], limit: int | None
+    ) -> tuple[list[dict], str]:
+        """待审核池的重新识别待办；selected 用前端勾选的 pending id。"""
+        db = self._db
+        if not db or not hasattr(db, "get_pending_paginated"):
+            return [], "db 不可用"
+        rows, _total, _counts = db.get_pending_paginated(
+            page=1, page_size=self.REANALYZE_MAX_ITEMS
+        )
+
+        wanted: set[int] = set()
+        for raw in ids or []:
+            value = self._optional_int(raw)
+            if value:
+                wanted.add(value)
+        if target == "selected" and not wanted:
+            return [], "没有选择任何待审核图片"
+
+        picked: list[dict] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            row_id = self._optional_int(row.get("id")) or 0
+            path = str(row.get("path", "") or "")
+            if not row_id or not path:
+                continue
+            if target == "selected":
+                if row_id not in wanted:
+                    continue
+            elif target == "missing" and not self._needs_reanalysis(row):
+                continue
+            picked.append(
+                {
+                    "kind": "pending",
+                    "pending_id": row_id,
+                    "path": path,
+                    "filename": str(row.get("original_name") or Path(path).name),
+                    "meta": dict(row),
+                }
+            )
+        if target != "selected":
+            picked.sort(
+                key=lambda item: self._optional_int(item["meta"].get("created_at")) or 0
+            )
+        if limit and limit > 0:
+            picked = picked[:limit]
+        picked = picked[: self.REANALYZE_MAX_ITEMS]
+        if not picked:
+            return [], "没有符合条件的待审核图片"
+        return picked, ""
 
     async def handle_reanalyze_scan(self):
         """统计可重新识别的条目数量，供 WebUI 在开跑前显示预估。"""
@@ -2077,7 +2190,28 @@ class PluginAPI:
                 total += 1
                 if self._needs_reanalysis(meta):
                     missing += 1
-            payload = {"success": True, "total": total, "missing": missing}
+            pending_total = 0
+            pending_missing = 0
+            db = self._db
+            if db and hasattr(db, "get_pending_paginated"):
+                try:
+                    rows, pending_total, _counts = db.get_pending_paginated(
+                        page=1, page_size=self.REANALYZE_MAX_ITEMS
+                    )
+                    pending_missing = sum(
+                        1
+                        for row in rows or []
+                        if isinstance(row, dict) and self._needs_reanalysis(row)
+                    )
+                except Exception as scan_error:
+                    logger.debug(f"[PluginAPI] 统计待审核重识别范围失败: {scan_error}")
+            payload = {
+                "success": True,
+                "total": total,
+                "missing": missing,
+                "pending_total": int(pending_total or 0),
+                "pending_missing": pending_missing,
+            }
             payload.update(self._batch_throttle_defaults())
             payload["max_items"] = self.REANALYZE_MAX_ITEMS
             return jsonify(payload)
@@ -2102,9 +2236,16 @@ class PluginAPI:
             target = str(data.get("target", "selected") or "selected").strip().lower()
             if target not in self.REANALYZE_TARGETS:
                 return jsonify({"success": False, "error": f"未知的目标范围: {target}"})
+            scope = str(data.get("scope", "library") or "library").strip().lower()
+            if scope not in self.REANALYZE_SCOPES:
+                return jsonify({"success": False, "error": f"未知的作用范围: {scope}"})
             hashes = [str(h) for h in (data.get("hashes") or []) if str(h or "").strip()]
             items, error = self._collect_reanalyze_targets(
-                target=target, hashes=hashes, limit=self._optional_int(data.get("limit"))
+                target=target,
+                hashes=hashes,
+                limit=self._optional_int(data.get("limit")),
+                scope=scope,
+                ids=list(data.get("ids") or []),
             )
             if error:
                 return jsonify({"success": False, "error": error})
@@ -2117,6 +2258,7 @@ class PluginAPI:
             now = self._task_now()
             self.batch_upload_tasks[task_id] = {
                 "kind": "reanalyze",
+                "scope": scope,
                 "status": "queued",
                 "total": len(items),
                 "processed": 0,
@@ -2148,6 +2290,7 @@ class PluginAPI:
                     "success": True,
                     "task_id": task_id,
                     "total": len(items),
+                    "scope": scope,
                     "concurrency": (
                         concurrency if concurrency is not None else defaults["concurrency"]
                     ),
@@ -2205,18 +2348,23 @@ class PluginAPI:
             logger.error(f"批量重新识别任务 {task_id} 失败: {e}", exc_info=True)
             self._finish_batch_task(task, status="failed", error=str(e))
 
-
     @classmethod
     def _merge_reanalysis(
-        cls, meta: dict, analysis: dict, *, overwrite: bool
+        cls,
+        meta: dict,
+        analysis: dict,
+        *,
+        overwrite: bool,
+        fields: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """把识别结果合并进现有元数据，返回真正需要写库的字段。
 
         overwrite=False 时只填空位，人工校对过的标注不会被模型覆盖；
         overwrite=True 时逐字段比对，值没变化的字段也不会进 updates。
+        fields 可指定要合并的字段范围，默认是 REANALYZE_FIELDS。
         """
         updates: dict[str, Any] = {}
-        for field in cls.REANALYZE_FIELDS:
+        for field in fields or cls.REANALYZE_FIELDS:
             fresh = analysis.get(field)
             if isinstance(fresh, list):
                 fresh = [str(v).strip() for v in fresh if str(v or "").strip()]
@@ -2241,10 +2389,12 @@ class PluginAPI:
     async def _reanalyze_batch_item(
         self, task: dict, item: dict, *, overwrite: bool, throttle
     ) -> None:
-        """重跑单张已入库表情的识别，并把结果写回索引与任务进度。"""
+        """重跑单张表情的识别，并把结果写回（表情库写索引，待审核池写 pending 行）。"""
         path = str(item.get("path", "") or "")
         meta = item.get("meta") or {}
         filename = str(item.get("filename") or Path(path).name)
+        kind = str(item.get("kind") or "library")
+        pending_id = int(item.get("pending_id") or 0)
         task["current_file"] = filename
         img_hash = str(meta.get("hash", "") or "")
         try:
@@ -2252,7 +2402,12 @@ class PluginAPI:
                 raise FileNotFoundError("图片文件已不存在")
 
             task["phase"] = "analyzing"
-            analysis = await self._analyze_existing_image(path, throttle)
+            # 已填的作品 / 角色是可信线索，喂给模型比让它重新猜准得多
+            analysis = await self._analyze_existing_image(
+                path,
+                throttle,
+                self._known_facts(work=meta.get("work"), character=meta.get("character")),
+            )
             if not analysis:
                 self._append_batch_result(
                     task,
@@ -2269,10 +2424,25 @@ class PluginAPI:
             task["analyzed"] = int(task.get("analyzed", 0) or 0) + 1
             task["phase"] = "storing"
             updates = self._merge_reanalysis(meta, analysis, overwrite=overwrite)
+            if kind == "pending":
+                # 待审核记录里的分类只是一个字段，改它不涉及移动文件，可以顺手修正；
+                # 正式库的分类对应真实目录，仍然只给建议、由人决定要不要挪
+                updates.update(
+                    self._merge_reanalysis(
+                        meta, analysis, overwrite=overwrite, fields=("category",)
+                    )
+                )
             if updates:
-                if not await self._update_index_path(path, updates):
-                    raise RuntimeError("写入索引失败")
-                await self._refresh_embedding_for_path(path)
+                if kind == "pending":
+                    # 待审核记录不建向量：它还没进正式库，审核通过时会统一建
+                    if not self._db or not await self._db.update_pending(
+                        pending_id, updates
+                    ):
+                        raise RuntimeError("写入待审核记录失败")
+                else:
+                    if not await self._update_index_path(path, updates):
+                        raise RuntimeError("写入索引失败")
+                    await self._refresh_embedding_for_path(path)
 
             suggested = str(analysis.get("category", "") or "")
             self._append_batch_result(
@@ -2280,9 +2450,13 @@ class PluginAPI:
                 {
                     "filename": filename,
                     "hash": img_hash,
+                    "kind": kind,
+                    "pending_id": pending_id,
                     "category": str(meta.get("category", "") or ""),
                     "suggested_category": (
-                        suggested if suggested != meta.get("category") else ""
+                        ""
+                        if "category" in updates or suggested == meta.get("category")
+                        else suggested
                     ),
                     "changed": sorted(updates.keys()),
                     "analyzed": True,
@@ -2306,7 +2480,6 @@ class PluginAPI:
             task["processed"] += 1
             task["updated_at"] = self._task_now()
             task["throttle"] = throttle.snapshot()
-
 
     def _append_batch_result(self, task: dict, result: dict) -> None:
         """记录单张结果；成功条目做上限保护，失败条目全留以便排查。"""
@@ -2515,6 +2688,15 @@ class PluginAPI:
     # ── VLM Analyze ───────────────────────────────────────────
 
     async def handle_analyze_image(self):
+        """POST /analyze —— 对单张图跑一次视觉识别，只返回结果，不写库。
+
+        三种定位方式，按优先级：hash（已入库）、pending_id（待审核）、base64（新上传）。
+        可以额外传 work / character 作为已知信息写进提示词；没传时自动沿用库里已填的
+        作品 / 角色，避免让模型重新去猜它本来就知道的事。
+        """
+        # 这行必须在 try 之前：服务不可用、请求体解析失败都会直接进 finally，
+        # 在 try 里初始化会变成 UnboundLocalError，把明确的错误信息盖成 500。
+        tmp_file_to_cleanup = None
         try:
             proc = getattr(self.plugin, "image_processor_service", None)
             if not proc:
@@ -2523,9 +2705,10 @@ class PluginAPI:
             data = await request.get_json() or {}
             img_hash = (data.get("hash", "") or "").strip()
             img_base64 = (data.get("base64", "") or "").strip()
-            tmp_file_to_cleanup = None
+            pending_id = self._optional_int(data.get("pending_id")) or 0
 
             file_path = None
+            source_meta: dict[str, Any] = {}
 
             # 优先通过 hash 从索引查找文件路径
             if img_hash:
@@ -2533,11 +2716,21 @@ class PluginAPI:
                 for p, m in index.items():
                     if isinstance(m, dict) and m.get("hash") == img_hash:
                         file_path = p
+                        source_meta = m
                         break
                 if not file_path or not os.path.isfile(file_path):
                     file_path = None
+                    source_meta = {}
 
-            # hash 查不到或未提供 hash 时，回退到 base64 方式
+            # 审核区重新识别：按 pending id 取图片路径
+            if not file_path and pending_id > 0 and self._db:
+                row = self._db.get_pending(pending_id)
+                candidate = str((row or {}).get("path", "") or "")
+                if candidate and os.path.isfile(candidate):
+                    file_path = candidate
+                    source_meta = dict(row or {})
+
+            # 前两种都查不到时，回退到 base64 方式
             if not file_path and img_base64:
                 import tempfile
 
@@ -2559,13 +2752,23 @@ class PluginAPI:
                 tmp_file_to_cleanup = file_path
 
             if not file_path:
-                return jsonify({"success": False, "error": "缺少 hash 或 base64 图片数据"})
+                return jsonify(
+                    {"success": False, "error": "缺少 hash、pending_id 或 base64 图片数据"}
+                )
 
+            # 显式传参优先；没传就用库里已有的值，两者都空则不注入
+            known = self._known_facts(
+                work=data["work"] if "work" in data else source_meta.get("work"),
+                character=(
+                    data["character"] if "character" in data else source_meta.get("character")
+                ),
+            )
             cat, tags, desc, _, scenes, overlay_text, emotions = await proc.classify_image(
                 event=None,
                 file_path=file_path,
                 categories=list(self._cfg.categories or []),
                 content_filtration=False,
+                known=known or None,
             )
             if cat == getattr(proc, "CATEGORY_FILTERED", None):
                 return jsonify({"success": False, "error": "图片内容审核不通过"})
@@ -2581,6 +2784,8 @@ class PluginAPI:
                     "scenes": scenes or [],
                     "overlay_text": overlay_text or "",
                     "emotions": emotions or [],
+                    # 回传实际注入的已知信息，前端可以直接告诉用户「这次带了什么线索」
+                    "known_facts": known,
                 }
             )
         except Exception as e:

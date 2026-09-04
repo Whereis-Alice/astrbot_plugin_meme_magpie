@@ -251,8 +251,12 @@ createApp({
         const reanalyzeForm = reactive({
             target: 'missing', overwrite: false, limit: 0,
             concurrency: 2, rpm: 20,
+            // library = 已入库表情包，pending = 待审核池，两边共用同一个弹窗
+            scope: 'library',
         });
-        const reanalyzeScan = ref({ total: 0, missing: 0, max_items: 5000 });
+        const reanalyzeScan = ref({
+            total: 0, missing: 0, pending_total: 0, pending_missing: 0, max_items: 5000,
+        });
         const reanalyzeScanning = ref(false);
         const batchTaskId = ref(null);
         const batchTaskStatus = ref(null);
@@ -961,6 +965,7 @@ createApp({
             pendingEditForm.overlay_text = item.overlay_text || '';
             pendingEditForm.character = item.character || '';
             pendingEditForm.work = item.work || '';
+            resetSingleReanalyze();
             pendingEditOpen.value = true;
             if (item.hash && !imageDataUrls[item.hash]) {
                 loadImageData(item.hash);
@@ -968,6 +973,7 @@ createApp({
         };
 
         const closePendingEdit = () => {
+            resetSingleReanalyze();
             pendingEditOpen.value = false;
             pendingEditId.value = null;
         };
@@ -1152,6 +1158,7 @@ createApp({
         const nextPage = () => currentPage.value * pageSize.value < total.value && fetchImages(currentPage.value + 1);
 
         const openPreview = (img) => {
+            resetSingleReanalyze();
             previewItem.value = img;
             previewOpen.value = true;
             resetPreviewZoom();
@@ -1248,6 +1255,7 @@ createApp({
         };
 
         const cancelEdit = () => {
+            resetSingleReanalyze();
             isEditing.value = false;
         };
 
@@ -1816,6 +1824,8 @@ createApp({
                     reanalyzeScan.value = {
                         total: Number(data.total || 0),
                         missing: Number(data.missing || 0),
+                        pending_total: Number(data.pending_total || 0),
+                        pending_missing: Number(data.pending_missing || 0),
                         max_items: Number(data.max_items || 5000),
                     };
                 }
@@ -1826,10 +1836,25 @@ createApp({
             }
         };
 
+        const reanalyzeIsPending = computed(() => reanalyzeForm.scope === 'pending');
+
+        // 三档口径随作用范围切换：勾选的 / 缺标注的 / 全部
+        const reanalyzeSelectedCount = computed(() => (
+            reanalyzeIsPending.value ? pendingSelectedImages.value.size : selectedImages.value.size
+        ));
+
+        const reanalyzeMissingCount = computed(() => (
+            reanalyzeIsPending.value ? reanalyzeScan.value.pending_missing : reanalyzeScan.value.missing
+        ));
+
+        const reanalyzeAllCount = computed(() => (
+            reanalyzeIsPending.value ? reanalyzeScan.value.pending_total : reanalyzeScan.value.total
+        ));
+
         const reanalyzeTargetCount = computed(() => {
-            if (reanalyzeForm.target === 'selected') return selectedImages.value.size;
-            if (reanalyzeForm.target === 'missing') return reanalyzeScan.value.missing;
-            return reanalyzeScan.value.total;
+            if (reanalyzeForm.target === 'selected') return reanalyzeSelectedCount.value;
+            if (reanalyzeForm.target === 'missing') return reanalyzeMissingCount.value;
+            return reanalyzeAllCount.value;
         });
 
         // 实际会跑的张数：受「最多处理」输入与后端硬上限双重约束
@@ -2005,7 +2030,7 @@ createApp({
             }
         };
         // 打开「批量重新识别」弹窗：与批量导入共用同一个弹窗骨架，靠 batchMode 区分表单
-        const openBatchReanalyzeModal = (target) => {
+        const openBatchReanalyzeModal = (target, scope = 'library') => {
             batchMode.value = 'reanalyze';
             batchUploadOpen.value = true;
             batchUploadError.value = null;
@@ -2014,8 +2039,13 @@ createApp({
             batchPreviews.value = [];
             batchTaskId.value = null;
             batchTaskStatus.value = null;
+            const isPending = scope === 'pending';
+            const hasSelection = isPending
+                ? pendingSelectedImages.value.size > 0
+                : selectedImages.value.size > 0;
             Object.assign(reanalyzeForm, {
-                target: target || (selectedImages.value.size > 0 ? 'selected' : 'missing'),
+                scope: isPending ? 'pending' : 'library',
+                target: target || (hasSelection ? 'selected' : 'missing'),
                 overwrite: false,
                 limit: 0,
                 concurrency: batchDefaults.value.concurrency,
@@ -2031,6 +2061,7 @@ createApp({
             try {
                 const maxConc = batchDefaults.value.max_concurrency || 16;
                 const payload = {
+                    scope: reanalyzeForm.scope,
                     target: reanalyzeForm.target,
                     overwrite: Boolean(reanalyzeForm.overwrite),
                     limit: clampInt(reanalyzeForm.limit, 0, 100000, 0),
@@ -2038,7 +2069,11 @@ createApp({
                     rpm: clampInt(reanalyzeForm.rpm, 0, 600, batchDefaults.value.rpm),
                 };
                 if (reanalyzeForm.target === 'selected') {
-                    payload.hashes = Array.from(selectedImages.value);
+                    if (reanalyzeForm.scope === 'pending') {
+                        payload.ids = Array.from(pendingSelectedImages.value);
+                    } else {
+                        payload.hashes = Array.from(selectedImages.value);
+                    }
                 }
                 const res = await apiFetch('api/images/batch-reanalyze', {
                     method: 'POST',
@@ -2096,8 +2131,14 @@ createApp({
                             batchUploadError.value = data.error || t('pages.dashboard.alerts.batch_import_failed', 'Batch import failed.');
                         }
                         if (data.status !== 'failed' || Number(data.success_count || 0) > 0) {
-                            fetchImages(1);
-                            fetchStats();
+                            // 待审核范围的重识别不碰库里的图，刷新审核区就够了
+                            if (batchMode.value === 'reanalyze' && reanalyzeForm.scope === 'pending') {
+                                fetchPendingImages(pendingCurrentPage.value || 1);
+                                fetchPendingStats();
+                            } else {
+                                fetchImages(1);
+                                fetchStats();
+                            }
                             fetchWorks();
                         }
                     }
@@ -2207,6 +2248,26 @@ createApp({
         const useImageAnalyzer = () => {
             const isAnalyzing = ref(false);
 
+            // 通用请求。后端支持三种定位方式：hash（已入库）、pending_id（待审核）、base64（新上传）；
+            // 额外带上 work / character 会作为已知信息写进提示词，明显提高识别准确率。
+            const analyzePayload = async (payload) => {
+                isAnalyzing.value = true;
+                try {
+                    const res = await apiFetch('api/analyze', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload || {}),
+                    });
+                    const data = await res.json();
+                    if (!data.success) {
+                        throw new Error(data.error || t('pages.dashboard.alerts.analyze_failed', 'Analyze failed.'));
+                    }
+                    return data;
+                } finally {
+                    isAnalyzing.value = false;
+                }
+            };
+
             const analyze = async (file) => {
                 if (!file) {
                     throw new Error(t('pages.dashboard.alerts.select_image_first', 'Select an image first.'));
@@ -2217,16 +2278,7 @@ createApp({
 
                 try {
                     const base64Data = await fileToBase64(file);
-                    const res = await apiFetch('api/analyze', {
-                        method: 'POST',
-                        body: JSON.stringify({ base64: base64Data }),
-                    });
-                    const data = await res.json();
-
-                    if (!data.success) {
-                        throw new Error(data.error || t('pages.dashboard.alerts.analyze_failed', 'Analyze failed.'));
-                    }
-
+                    const data = await analyzePayload({ base64: base64Data });
                     console.log('[Analyzer] Analyze success:', data);
                     return data;
                 } catch (e) {
@@ -2280,10 +2332,48 @@ createApp({
                 return result;
             };
 
+            // 重新识别用：按字段映射写进任意表单。默认 overwrite=true 覆盖旧值，
+            // 因为「重新识别」本来就是要拿新结果替换旧结果；写进表单不等于入库，
+            // 还得用户点保存。返回被改动的字段名，方便如实告诉用户动了什么。
+            const applyToMappedForm = (data, form, fields, options = {}) => {
+                const { categories: catList = [], overwrite = true } = options;
+                const filled = [];
+                const put = (key, value, label) => {
+                    if (!key) return;
+                    const next = String(value == null ? '' : value);
+                    if (!next) return;
+                    const current = String(form[key] == null ? '' : form[key]);
+                    if (!overwrite && current.trim()) return;
+                    if (current === next) return;
+                    form[key] = next;
+                    filled.push(label);
+                };
+                if (data.category && fields.category) {
+                    const known = !catList.length || catList.some((c) => c.key === data.category);
+                    if (known) {
+                        put(fields.category, data.category, t('pages.dashboard.fields.category', 'Category'));
+                    } else {
+                        console.warn('[Analyzer] Unknown category, kept as-is:', data.category);
+                    }
+                }
+                if (Array.isArray(data.tags) && data.tags.length) {
+                    put(fields.tags, data.tags.join(', '), t('pages.dashboard.fields.tags', 'Tags'));
+                }
+                if (Array.isArray(data.scenes) && data.scenes.length) {
+                    const scenes = parseSceneList(data.scenes.join(', ')).join(', ');
+                    put(fields.scenes, scenes, t('pages.dashboard.fields.scenes', 'Scenes'));
+                }
+                put(fields.desc, data.description, t('pages.dashboard.fields.description', 'Description'));
+                put(fields.overlay_text, data.overlay_text, t('pages.dashboard.fields.overlay_text', '图上文字'));
+                return filled;
+            };
+
             return {
                 isAnalyzing,
                 analyze,
+                analyzePayload,
                 applyToForm,
+                applyToMappedForm,
             };
         };
 
@@ -2304,6 +2394,78 @@ createApp({
             } catch (e) {
                 uploadError.value = e.message || t('pages.dashboard.alerts.analyze_failed', 'Analyze failed.');
             }
+        };
+
+        // ── 单张重新识别（库详情 / 审核区编辑）──────────────────────
+        // 只把结果填进表单，必须由人核对后点保存才写库，不会静默覆盖手工标注。
+        const singleReanalyze = reactive({ text: '', tone: 'info' });
+
+        const resetSingleReanalyze = () => {
+            singleReanalyze.text = '';
+            singleReanalyze.tone = 'info';
+        };
+
+        const REANALYZE_FIELDS_LIBRARY = {
+            category: 'category', tags: 'tags', scenes: 'scene',
+            desc: 'desc', overlay_text: 'overlay_text',
+        };
+        const REANALYZE_FIELDS_PENDING = {
+            category: 'category', tags: 'tagsText', scenes: 'scenesText',
+            desc: 'desc', overlay_text: 'overlay_text',
+        };
+
+        const knownFactsLabel = (known) => {
+            const parts = [];
+            if (known && known.work) parts.push(known.work);
+            if (known && known.character) parts.push(known.character);
+            return parts.join(' / ');
+        };
+
+        const runSingleReanalyze = async (payload, form, fieldMap) => {
+            resetSingleReanalyze();
+            try {
+                const data = await imageAnalyzer.analyzePayload(payload);
+                const filled = imageAnalyzer.applyToMappedForm(data, form, fieldMap, {
+                    categories: categories.value,
+                });
+                let text = filled.length
+                    ? t('pages.dashboard.reanalyze.single_filled', '识别结果已填进表单：{fields}。核对后点保存才会写入，直接关掉不会有任何改动。').replace('{fields}', filled.join('、'))
+                    : t('pages.dashboard.reanalyze.single_same', '识别结果和表单里现有内容一致，没有需要改的字段。');
+                const hints = knownFactsLabel(data.known_facts);
+                if (hints) {
+                    text += t('pages.dashboard.reanalyze.single_known', '（本次已把「{hints}」作为已知信息告诉模型）').replace('{hints}', hints);
+                }
+                singleReanalyze.text = text;
+                singleReanalyze.tone = 'info';
+            } catch (e) {
+                singleReanalyze.text = e.message || t('pages.dashboard.alerts.analyze_failed', 'Analyze failed.');
+                singleReanalyze.tone = 'error';
+            }
+        };
+
+        // 库详情：先切到编辑态再填，用户能直接看到改了哪些字段
+        const reanalyzePreviewItem = async () => {
+            const item = previewItem.value;
+            if (!item || !item.hash || analyzing.value) return;
+            if (!isEditing.value) startEdit();
+            await runSingleReanalyze(
+                { hash: item.hash, work: editForm.work || '', character: editForm.character || '' },
+                editForm,
+                REANALYZE_FIELDS_LIBRARY,
+            );
+        };
+
+        const reanalyzePendingItem = async () => {
+            if (!pendingEditId.value || analyzing.value) return;
+            await runSingleReanalyze(
+                {
+                    pending_id: pendingEditId.value,
+                    work: pendingEditForm.work || '',
+                    character: pendingEditForm.character || '',
+                },
+                pendingEditForm,
+                REANALYZE_FIELDS_PENDING,
+            );
         };
 
         const openEmotionsModal = () => {
@@ -2678,6 +2840,9 @@ createApp({
 
             analyzing,
             analyzeImage,
+            singleReanalyze,
+            reanalyzePreviewItem,
+            reanalyzePendingItem,
 
             batchUploadOpen,
             batchUploading,
@@ -2734,6 +2899,10 @@ createApp({
             reanalyzeForm,
             reanalyzeScan,
             reanalyzeScanning,
+            reanalyzeIsPending,
+            reanalyzeSelectedCount,
+            reanalyzeMissingCount,
+            reanalyzeAllCount,
             reanalyzeTargetCount,
             reanalyzePlannedCount,
             reanalyzeEstimateMinutes,

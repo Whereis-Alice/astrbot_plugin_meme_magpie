@@ -26,6 +26,14 @@ class PluginConfig(BaseModel):
     auto_meme_intent_gate: bool = True
     auto_meme_cancel_on_new_message: bool = True
 
+    # === 自动表情的投递方式 ===
+    # separate：表情作为独立的一条消息发出（默认，和以往行为一致）
+    # attach：把表情追加到机器人这条回复的消息链末尾，这样分段回复类插件
+    #         （如 outputpro_split）能看见它并一起编排
+    auto_meme_delivery_mode: str = "separate"
+    auto_meme_attach_timeout: float = 10.0  # attach 模式下等待选图的秒数，超时回退 separate
+    auto_meme_attach_compat_split: bool = False  # 见 _conf_schema.json 里的说明
+
     # === 群聊过滤 ===
     steal_target_whitelist: list[str] = []
     steal_target_blacklist: list[str] = []

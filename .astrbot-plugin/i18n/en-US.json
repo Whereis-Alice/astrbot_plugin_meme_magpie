@@ -103,6 +103,19 @@
       "description": "Extra delay per character (seconds)",
       "hint": "Adds waiting time proportional to the length of the bot reply, simulating read the text first, then send the sticker. Set to 0 to add nothing."
     },
+    "auto_meme_delivery_mode": {
+      "description": "Auto sticker delivery mode",
+      "hint": "separate (default): the sticker is sent as its own message, same as before. attach: the sticker is appended to the message chain of the bot's reply, so reply-splitting plugins (such as outputpro_split) can see it and arrange it together with the text. attach has to pick the image before the reply goes out, which makes the reply slightly slower; on timeout or failure it falls back to separate automatically.",
+      "labels": ["Separate message", "Inside this reply"]
+    },
+    "auto_meme_attach_timeout": {
+      "description": "attach mode pick timeout (seconds)",
+      "hint": "How long attach mode may spend picking a sticker. Past that it gives up attaching and sends a separate message asynchronously instead, so the reply itself is never held up. Only applies when delivery mode is attach."
+    },
+    "auto_meme_attach_compat_split": {
+      "description": "Generate a compatible path for reply-splitting plugins",
+      "hint": "Only applies when delivery mode is attach. Some reply-splitting plugins (outputpro_split) decide whether an image is a sticker by looking for the keyword plugin_stealer in its file path. When enabled, the sticker is linked into a compat folder containing that keyword before it is attached, so those plugins recognise it. Leave it off if upstream already supports this plugin directly."
+    },
     "smart_meme_selection": {
       "description": "Smart emoji selection",
       "hint": "When enabled, uses composite scoring (diversity + relevance + similarity) to pick the best emoji. When disabled, picks randomly (still avoids short-term repeats)."
@@ -601,7 +614,19 @@
         "continue": "Run another batch",
         "changed": "Labels updated",
         "suggested_category": "Category suggestions",
-        "suggestion_list": "Category suggestions (not applied automatically)"
+        "suggestion_list": "Category suggestions (not applied automatically)",
+        "intro_pending": "Run vision analysis again over images in the review queue to fill in or refresh category, tags, description, scenes, on-image text and emotions. Only the pending records change - nothing is approved automatically.",
+        "scope_library": "Library",
+        "scope_pending": "Review queue",
+        "pending_tip": "Re-run vision analysis over pending images in bulk, so labels are complete before you approve them",
+        "target_selected_pending": "Currently selected pending images",
+        "target_all_pending": "All pending images",
+        "target_hint_pending": "\"Missing labels\" means pending images with no tags or no description - usually left behind by a failed or timed-out analysis.",
+        "category_note_pending": "A pending record's category is only a draft field and does not map to a real folder, so it is corrected here as well. Filing happens when you approve the image.",
+        "single_tip": "Run vision analysis again; results only go into the edit form and are saved when you click Save",
+        "single_filled": "Analysis results were filled into the form: {fields}. Nothing is written until you click Save - closing the dialog changes nothing.",
+        "single_same": "The analysis matches what is already in the form, so there is nothing to change.",
+        "single_known": "(passed 「{hints}」 to the model as known facts this time)"
       }
     }
   }

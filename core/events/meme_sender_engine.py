@@ -320,6 +320,105 @@ class MemeSenderEngine:
                 return base + random.random() * rand_max
         return base
 
+    async def resolve_emoji_query(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        emotions: list[str],
+        *,
+        user_message: str = "",
+    ) -> tuple[list[str], str]:
+        """解析出用于检索表情的情绪先验和检索词。
+
+        开启「智能提取检索词」时交给轻量模型提炼，否则直接用回复原文。
+        返回 (情绪先验, 检索词)。是否真的发送由调用方的门控决定。
+        """
+        final_emotions = list(emotions or [])
+        search_text = text
+        if getattr(self.plugin, "enable_natural_emotion_analysis", False) and hasattr(
+            self.plugin, "smart_emotion_matcher"
+        ):
+            analyzed = await self.plugin.smart_emotion_matcher.analyze_and_match_emotion(
+                event,
+                text,
+                use_natural_analysis=True,
+                user_message=user_message,
+            )
+            if isinstance(analyzed, EmotionQuery):
+                # 是否发送仍由概率/冷却/意图门控决定，小模型只提供检索词和情绪先验。
+                if analyzed.emotion_priors:
+                    final_emotions = analyzed.emotion_priors
+                if analyzed.search_query:
+                    search_text = analyzed.search_query
+            elif analyzed:
+                final_emotions = [analyzed]
+        return final_emotions, search_text
+
+    def attach_timeout(self) -> float:
+        """attach 模式等待选图的秒数上限，非法值退回默认 10 秒。"""
+        try:
+            value = float(getattr(self.plugin, "auto_meme_attach_timeout", 10.0))
+        except (TypeError, ValueError):
+            return 10.0
+        return value if value > 0 else 10.0
+
+    async def attach_emoji_to_result(
+        self,
+        event: AstrMessageEvent,
+        result: Any,
+        text: str,
+        emotions: list[str],
+        *,
+        user_message: str = "",
+    ) -> bool:
+        """attach 投递模式：把表情追加到本条回复的消息链里。
+
+        必须在 on_decorating_result 阶段内同步等出结果——hook 一返回，AstrBot
+        就会把消息链交给发送阶段，之后再改动就来不及了。因此这里带超时，
+        超时或失败都返回 False，由调用方回退到默认的独立消息模式。
+        """
+        selector = getattr(self.plugin, "meme_selector", None)
+        if selector is None or not hasattr(selector, "attach_emoji_to_result"):
+            return False
+        try:
+            final_emotions, search_text = await asyncio.wait_for(
+                self.resolve_emoji_query(event, text, emotions, user_message=user_message),
+                timeout=self.attach_timeout(),
+            )
+            if not final_emotions and not search_text:
+                return False
+            attached = await asyncio.wait_for(
+                selector.attach_emoji_to_result(
+                    event, result, final_emotions, search_text or text
+                ),
+                timeout=self.attach_timeout(),
+            )
+        except asyncio.TimeoutError:
+            logger.debug(
+                f"[MemeSenderEngine] attach 模式选图超过 {self.attach_timeout():.1f}s，"
+                "改用独立消息补发"
+            )
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"[MemeSenderEngine] attach 模式附加表情失败: {e}")
+            return False
+
+        if not attached:
+            return False
+
+        try:
+            selector_obj = getattr(self.plugin, "meme_selector", None)
+            if selector_obj is not None:
+                await selector_obj.record_emoji_usage(attached, trigger="auto")
+        except Exception as e:
+            logger.debug(f"[MemeSenderEngine] 记录表情包使用失败: {e}")
+        await self.mark_auto_emoji_sent(event)
+        self.emoji_turn_state(event).mark_active_sent()
+        logger.debug(f"[MemeSenderEngine] 已把表情附加到回复消息链: {attached}")
+        return True
+
     async def async_analyze_and_send_emoji(
         self,
         event: AstrMessageEvent,
@@ -336,26 +435,9 @@ class MemeSenderEngine:
         """
         try:
             task_start = asyncio.get_event_loop().time()
-            final_emotions = list(emotions or [])
-
-            search_text = text
-            if getattr(self.plugin, "enable_natural_emotion_analysis", False) and hasattr(
-                self.plugin, "smart_emotion_matcher"
-            ):
-                analyzed = await self.plugin.smart_emotion_matcher.analyze_and_match_emotion(
-                    event,
-                    text,
-                    use_natural_analysis=True,
-                    user_message=user_message,
-                )
-                if isinstance(analyzed, EmotionQuery):
-                    # 是否发送仍由概率/冷却/意图门控决定，小模型只提供检索词和情绪先验。
-                    if analyzed.emotion_priors:
-                        final_emotions = analyzed.emotion_priors
-                    if analyzed.search_query:
-                        search_text = analyzed.search_query
-                elif analyzed:
-                    final_emotions = [analyzed]
+            final_emotions, search_text = await self.resolve_emoji_query(
+                event, text, emotions, user_message=user_message
+            )
 
             if not final_emotions and not search_text:
                 return

@@ -12,6 +12,7 @@ from astrbot.api.event import AstrMessageEvent
 
 from ..util.safe_io import safe_remove_file
 from .llm_meme_hints import LlmMemeHints
+from .prompt_manager import PromptManager
 from .semantic_schema import MAX_DESC_CHARS, clip_chars
 
 try:
@@ -569,7 +570,11 @@ class ImageProcessorService:
         try:
             # 3. 缓存检查（锁外；缓存带 VLM model_sig，换模型即失效）
             #    skip_vlm 时根本不靠视觉模型，无需查缓存也无需探测 provider。
+            known_sig = PromptManager.known_facts_signature(llm_hints)
             model_sig = "" if skip_vlm else str(await self._resolve_vision_provider(event) or "")
+            if model_sig and known_sig:
+                # 已知信息会写进提示词、改变模型输出，必须与「没有已知信息」的结果分开缓存
+                model_sig = f"{model_sig}#known:{known_sig}"
             cached = None if skip_vlm else self._get_valid_cache(hash_val, model_sig)
             if cached is not None:
                 async with self._process_lock:
@@ -617,6 +622,7 @@ class ImageProcessorService:
                         file_path=raw_path,
                         categories=categories,
                         content_filtration=content_filtration,
+                        known=llm_hints,
                     )
                 )
 
@@ -932,6 +938,7 @@ class ImageProcessorService:
         file_path: str,
         categories=None,
         content_filtration=None,
+        known: Any = None,
     ) -> tuple[str, list[str], str, str, list[str], str, list[str]]:
         """使用视觉模型对图片进行分类并返回详细信息。
 
@@ -940,6 +947,8 @@ class ImageProcessorService:
             file_path: 图片绝对路径
             categories: 分类列表（可选，默认使用 self.categories）
             content_filtration: 是否进行内容过滤（可选，默认使用 self.content_filtration）
+            known: 调用方已确认的信息（作品 / 角色 / 动作 / 图上文字），
+                可以是 dict 或 LlmMemeHints；会写进提示词让模型直接采用而不是自己猜。
 
         Returns:
             tuple: (category, tags, desc, emotion, scenes, overlay_text, emotions)
@@ -961,7 +970,7 @@ class ImageProcessorService:
             if not prompt_categories:
                 raise ValueError("未配置可用分类，无法进行图片分类")
             prompt = self._prompt_manager.build_classification_prompt(
-                use_filter=should_filter, categories=prompt_categories
+                use_filter=should_filter, categories=prompt_categories, known=known
             )
 
             # 调用视觉模型

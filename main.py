@@ -467,6 +467,16 @@ class Main(Star):
         emotions,
         **kw: self._emoji_sender_engine.async_analyze_and_send_emoji(event, text, emotions, **kw)
     )
+    _attach_emoji_to_result = (  # noqa: E731
+        lambda self,
+        event,
+        result,
+        text,
+        emotions,
+        **kw: self._emoji_sender_engine.attach_emoji_to_result(
+            event, result, text, emotions, **kw
+        )
+    )
 
     # ===== 命令提示：按用户实际配置的唤醒前缀渲染 =====
 
@@ -1353,9 +1363,37 @@ class Main(Star):
         self._emoji_turn_state(event).mark_active_sent()
         logger.debug("[MemeThief] LLM 已通过通用消息工具发送图片，跳过本轮被动表情")
 
+    def _auto_meme_delivery_mode(self) -> str:
+        """自动表情的投递方式：separate（独立消息）或 attach（并入本条回复）。"""
+        mode = str(getattr(self, "auto_meme_delivery_mode", "separate") or "separate")
+        mode = mode.strip().lower()
+        return mode if mode in ("separate", "attach") else "separate"
+
+    def _t2i_active(self, result: Any) -> bool:
+        """判断这条回复是否会被转成图片（文本转图片）。
+
+        文转图会把整条消息链替换成一张长图，附加在链尾的表情会被一起吞掉，
+        所以 attach 模式遇到它必须让位给独立消息模式。这里只读状态，
+        绝不去改 use_t2i_——那是用户和其它插件的决定。
+        """
+        flag = getattr(result, "use_t2i_", None)
+        if flag is False:
+            return False
+        if flag:
+            return True
+        try:
+            return bool(self.context.get_config().get("t2i", False))
+        except Exception:
+            return False
+
     @filter.on_decorating_result(priority=100)
     async def _prepare_emoji_response(self, event: AstrMessageEvent):
-        """LLM 回复完成后异步发送表情包（不阻塞回复）。"""
+        """LLM 回复完成后发送表情包。
+
+        默认（separate）异步发一条独立消息，不阻塞回复；配置成 attach 时改为
+        把表情并入本条回复的消息链，让分段回复类插件能一起编排——那条路径需要
+        在回复发出前把图选好，因此带超时并在失败时回退成 separate。
+        """
         result = event.get_result()
         if result is None:
             return False
@@ -1383,6 +1421,19 @@ class Main(Star):
             user_message = event.get_message_str() or ""
         except Exception:
             pass
+
+        if self._auto_meme_delivery_mode() == "attach":
+            if self._t2i_active(result):
+                logger.debug(
+                    "[MemeThief] 本条回复会转成图片，attach 模式让位给独立消息模式"
+                )
+            elif await self._attach_emoji_to_result(
+                event, result, text, [], user_message=user_message
+            ):
+                return True
+            else:
+                logger.debug("[MemeThief] attach 模式未能附加表情，回退独立消息模式")
+
         task = self._safe_create_task(
             self._async_analyze_and_send_emoji(event, text, [], user_message=user_message),
             name="emoji_analyze_passive",

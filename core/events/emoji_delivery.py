@@ -13,7 +13,11 @@ async def send_qq_image_as_sticker(
     summary: str = "[动画表情]",
     plugin: Any = None,
 ) -> bool:
-    """在 QQ (aiocqhttp) 平台发送表情包时修改 summary 外显。"""
+    """在 QQ (aiocqhttp) 平台把图片按「表情」发出去。
+
+    除了改 summary 外显，还会把 sub_type / subType 一起标成 1，这样 LLBot、
+    NapCat、SnowLuma 等实现都会把它当表情而不是普通图片渲染。
+    """
     try:
         from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
             AiocqhttpMessageEvent,
@@ -37,7 +41,13 @@ async def send_qq_image_as_sticker(
                     file_source = f"base64://{encoded}"
         chain = MessageChain(chain=[Image(file=file_source)])
         onebot_message = await event._parse_onebot_json(chain)
-        onebot_message[0]["data"]["summary"] = summary
+        data = onebot_message[0]["data"]
+        # 各家 OneBot 实现读的字段不一样：LLBot 只认 camelCase 的 subType，
+        # NapCat / SnowLuma 只认 snake_case 的 sub_type，summary 则是外显文案。
+        # 三个键一起写，谁都能识别成“表情”，多余的键各家都会忽略。
+        data["summary"] = summary
+        data["sub_type"] = 1
+        data["subType"] = 1
         await event.bot.send(event.message_obj.raw_message, onebot_message)
         return True
     except Exception:

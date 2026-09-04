@@ -78,6 +78,10 @@ class EventHandler:
         """检查图片元信息，判断是否为平台标记的表情包。"""
         return self._platform_detector.check_platform_emoji_metadata(*args, **kwargs)
 
+    def _extract_store_emoji_segments(self, event: AstrMessageEvent) -> list[dict]:
+        """转发到平台检测器：提取商城表情段（含 emoji_id 等来源元信息）。"""
+        return self._platform_detector.extract_store_emoji_segments(event)
+
     def _extract_store_emoji_urls(self, event: AstrMessageEvent) -> list[str]:
         """从 OneBot raw_message 里提取 QQ 商城表情的可下载 URL。"""
         return self._platform_detector.extract_store_emoji_urls(event)
@@ -502,7 +506,20 @@ class EventHandler:
         audit_required = bool(getattr(cfg, "audit_required", True)) if cfg else True
         to_pending = audit_required
         imgs: list[Image] = [comp for comp in event.get_messages() if isinstance(comp, Image)]
-        store_urls = self._extract_store_emoji_urls(event)
+        # 商城表情（LLBot 的独立 mface 段等）不会被 AstrBot 转成 Image 组件，
+        # 只能直接读原始段；顺带把 emoji_id 之类的来源信息一起带出来。
+        store_segments = self._extract_store_emoji_segments(event)
+        store_urls = [item["url"] for item in store_segments]
+        store_meta_map = {item["url"]: item["meta"] for item in store_segments}
+
+        def store_extra_meta(url: str) -> dict[str, Any]:
+            meta = dict(
+                store_meta_map.get(url)
+                or {"source": "qq_store", "origin_url": self._normalize_str(url)}
+            )
+            # 空字段不入库，免得元信息里塞一堆空字符串
+            return {k: v for k, v in meta.items() if v not in ("", None)}
+
         if not imgs and not store_urls:
             return
         if force_active:
@@ -630,7 +647,7 @@ class EventHandler:
                         }
                     )
             for url in store_urls[:3]:
-                extra_meta = {"source": "qq_store", "origin_url": self._normalize_str(url)}
+                extra_meta = store_extra_meta(url)
                 if origin_target_str:
                     extra_meta["origin_target"] = origin_target_str
                 descriptors.append(
@@ -703,7 +720,7 @@ class EventHandler:
                 temp_path, url = result
                 if not temp_path or not Path(temp_path).exists():
                     continue
-                extra_meta = {"source": "qq_store", "origin_url": self._normalize_str(url)}
+                extra_meta = store_extra_meta(url)
                 if origin_target_str:
                     extra_meta["origin_target"] = origin_target_str
                 store_process_tasks.append(

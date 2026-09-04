@@ -181,6 +181,25 @@
     },
     "hint": "按机器人这条回复的字数追加等待时间，模拟「先看完文字再发表情」。设为 0 则不追加。"
   },
+  "auto_meme_delivery_mode": {
+    "description": "自动表情的投递方式",
+    "type": "string",
+    "default": "separate",
+    "options": ["separate", "attach"],
+    "hint": "separate（默认）：表情单独发一条消息，和以往行为一致。attach：把表情追加到机器人这条回复的消息链末尾，让分段回复类插件（如 outputpro_split）能识别并统一编排。attach 需要在回复发出前把图选好，因此会让回复稍慢；超时或选图失败会自动回退成 separate。"
+  },
+  "auto_meme_attach_timeout": {
+    "description": "attach 模式选图超时（秒）",
+    "type": "float",
+    "default": 10.0,
+    "hint": "attach 模式下最多等多久把表情选出来。超过这个时间就放弃附加，改回 separate 方式异步补发，回复本身不会被卡住。仅在投递方式为 attach 时生效。"
+  },
+  "auto_meme_attach_compat_split": {
+    "description": "为分段回复插件生成兼容路径",
+    "type": "bool",
+    "default": false,
+    "hint": "仅在投递方式为 attach 时生效。部分分段回复插件（outputpro_split）靠图片路径里是否含有 plugin_stealer 关键字来判断「这是表情包」，从而套用表情策略。开启后本插件会把要附加的表情先链接到一个含该关键字的兼容目录再附加，让这些插件正确识别。若上游已直接支持本插件，可保持关闭。"
+  },
   "smart_meme_selection": {
     "description": "智能表情包选择",
     "type": "bool",

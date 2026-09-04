@@ -3,10 +3,12 @@
 import os
 import random
 import re
+import shutil
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+from astrbot.api.message_components import Image as MessageImage
 
 from ..events.emoji_delivery import send_qq_image_as_sticker
 from ..events.event_context import get_event_platform_name, unwrap_event
@@ -24,6 +26,12 @@ class MemeSmartSelectService:
     SMART_BM25_BONUS_WEIGHT = 0.2
     SMART_RECALL_K = 48
     SMART_OVERLAY_RECALL_LIMIT = 16
+
+    # 分段回复兼容：outputpro_split 之类的插件是按图片路径里有没有
+    # plugin_stealer 关键字来判断「这张图是表情包」的。我们的包名不在它
+    # 的名单里，所以提供一个可选开关，生成带该关键字的等价路径。
+    SPLIT_COMPAT_DIRNAME = "plugin_stealer_split_compat"
+    SPLIT_COMPAT_KEEP = 64
 
     def __init__(self, plugin_instance: Any = None) -> None:
         self.plugin = plugin_instance
@@ -810,6 +818,16 @@ class MemeSmartSelectService:
         if not b64:
             return False
         result.base64_image(b64)
+        # base64 组件本身不带本地路径，这里补一个：分段回复类插件会读
+        # path/file 判断「这张图是表情包」，缺了就会被当普通图片处理。
+        try:
+            chain = getattr(result, "chain", None)
+            if isinstance(chain, list) and chain:
+                last = chain[-1]
+                if isinstance(last, MessageImage) and not getattr(last, "path", ""):
+                    last.path = emoji_path
+        except Exception as e:
+            logger.debug(f"[MemeThief] 补写表情本地路径失败（不影响发送）: {e}")
         return True
 
     async def send_emoji_message(self, event: AstrMessageEvent, emoji_path: str) -> str | None:
@@ -862,6 +880,143 @@ class MemeSmartSelectService:
         except Exception as e:
             logger.error(f"发送表情包失败: {e}", exc_info=True)
             return False
+
+    def _split_compat_path(self, emoji_path: str) -> str:
+        """按需生成一个「路径里含 plugin_stealer 关键字」的等价文件路径。
+
+        未开启 auto_meme_attach_compat_split 时原样返回。开启后把表情硬链接
+        （同盘失败则复制）到插件数据目录下的兼容子目录，原文件不动，库里的
+        路径也不变；生成失败一律退回原路径，不影响正常发送。
+        """
+        if not getattr(self.plugin, "auto_meme_attach_compat_split", False):
+            return emoji_path
+        if not emoji_path or not os.path.exists(emoji_path):
+            return emoji_path
+        try:
+            base_dir = getattr(self.plugin, "base_dir", None)
+            if base_dir is None:
+                return emoji_path
+            compat_dir = os.path.join(str(base_dir), self.SPLIT_COMPAT_DIRNAME)
+            os.makedirs(compat_dir, exist_ok=True)
+            target = os.path.join(compat_dir, os.path.basename(emoji_path))
+            if not os.path.exists(target):
+                try:
+                    os.link(emoji_path, target)
+                except Exception:
+                    shutil.copy2(emoji_path, target)
+            self._prune_split_compat_dir(compat_dir)
+            return target
+        except Exception as e:
+            logger.debug(f"[MemeThief] 生成分段回复兼容路径失败，按原路径附加: {e}")
+            return emoji_path
+
+    def _prune_split_compat_dir(self, compat_dir: str) -> None:
+        """兼容目录只保留最近使用的若干个文件，避免无限堆积。"""
+        try:
+            entries = [
+                entry
+                for entry in os.scandir(compat_dir)
+                if entry.is_file(follow_symlinks=False)
+            ]
+            if len(entries) <= self.SPLIT_COMPAT_KEEP:
+                return
+            entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+            for entry in entries[self.SPLIT_COMPAT_KEEP :]:
+                try:
+                    os.remove(entry.path)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f"[MemeThief] 清理分段回复兼容目录失败: {e}")
+
+    @staticmethod
+    def _same_local_path(value: object, target_abs: str) -> bool:
+        """比较组件里的路径字段和目标文件是否指向同一个文件。"""
+        text = str(value or "")
+        if not text or not target_abs:
+            return False
+        if text.startswith("file:///"):
+            text = text[8:]
+        elif text.startswith("base64://"):
+            return False
+        try:
+            return os.path.normcase(os.path.abspath(text)) == target_abs
+        except Exception:
+            return False
+
+    @classmethod
+    def _result_has_image_path(cls, result: Any, emoji_path: str) -> bool:
+        """判断消息链里是否已经附加过这张表情（hook 会被重复触发）。"""
+        chain = getattr(result, "chain", None)
+        if not isinstance(chain, list) or not emoji_path:
+            return False
+        try:
+            target_abs = os.path.normcase(os.path.abspath(emoji_path))
+        except Exception:
+            return False
+        for comp in chain:
+            if not isinstance(comp, MessageImage):
+                continue
+            if cls._same_local_path(getattr(comp, "path", ""), target_abs):
+                return True
+            if cls._same_local_path(getattr(comp, "file", ""), target_abs):
+                return True
+        return False
+
+    async def attach_emoji_to_result(
+        self,
+        event: AstrMessageEvent,
+        result: Any,
+        emotions: list[str],
+        cleaned_text: str,
+    ) -> str | None:
+        """挑一张表情并追加到主回复的消息链末尾，成功返回附加用的路径。
+
+        用于 attach 投递模式：表情不再单独发一条，而是成为这条回复的一部分，
+        分段回复类插件因此能看见它并统一编排。实际发送由 AstrBot 的发送阶段完成。
+        """
+        emoji_path = await self.pick_emoji_only(event, emotions, cleaned_text)
+        if not emoji_path:
+            return None
+        attach_path = self._split_compat_path(emoji_path)
+        if self._result_has_image_path(result, attach_path):
+            logger.debug("[MemeThief] 消息链里已有这张表情，跳过重复附加")
+            return attach_path
+        if not await self._append_emoji_to_result(event, result, attach_path):
+            return None
+        return attach_path
+
+    async def pick_emoji_only(
+        self,
+        event: AstrMessageEvent,
+        emotions: list[str],
+        cleaned_text: str,
+    ) -> str | None:
+        """只挑表情不发送，返回本地文件路径。
+
+        供 attach 投递模式使用：那条路径要把表情追加到主回复的消息链里，
+        发送动作由 AstrBot 的发送阶段统一完成，这里不能自己发。
+        门控（群白名单、本轮是否已主动发过）与 try_send_emoji 保持一致。
+        """
+        event = unwrap_event(event)
+        if not self._check_group_allowed(event):
+            return None
+        if self.plugin._emoji_turn_state(event).is_active_sent():
+            logger.debug("[MemeThief] 本轮已主动发过表情，attach 模式跳过选图")
+            return None
+
+        priors = [item for item in (emotions or []) if item]
+        primary = priors[0] if priors else ""
+        emoji_path = await self.plugin.meme_selector.select_emoji(
+            primary,
+            cleaned_text,
+            event=event,
+            extra_categories=priors,
+        )
+        if not emoji_path:
+            logger.debug("[MemeThief] attach 模式未匹配到表情包")
+            return None
+        return emoji_path
 
     async def try_send_emoji(
         self,
