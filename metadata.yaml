@@ -58,7 +58,7 @@ help: |
 
   WebUI：在插件管理页面打开"表情神偷管理面板"，可浏览 / 编辑 / 批量导入 / 批量重新识别 / 识别失败检测；
   批量识别支持配置并发数与每分钟请求上限，并实时显示进度、预估剩余时间和失败明细。
-version: 1.4.1
+version: 1.4.2
 support_platforms:
   - aiocqhttp
   - telegram

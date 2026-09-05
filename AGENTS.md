@@ -29,7 +29,7 @@ AstrBot 以 `main.py` 为入口。`Main` 类（继承 `astrbot.api.star.Star`）
 ```
 Main (main.py)
 ├── PluginConfig (core/config/config.py)              -- Pydantic 配置，包装 AstrBotConfig，派生所有路径
-├── DatabaseService (core/db/database_service.py)     -- SQLite + WAL，表情索引，SCHEMA_VERSION = 7
+├── DatabaseService (core/db/database_service.py)     -- SQLite + WAL，表情索引，SCHEMA_VERSION = 8
 ├── IndexManager (core/db/index_manager.py)           -- 内存索引与 DB 的同步
 ├── CacheService (cache_service.py)                   -- 索引 / 图片 / 冷却期内存缓存
 ├── CommandHandler (core/commands/command_handler.py) -- mp 各子命令实现
@@ -128,7 +128,7 @@ self.plugin.wake_prefix(event)            # 只要前缀本身
 ### `_conf_schema.json`
 - `type` 合法值只有：`string, text, int, float, bool, object, list, template_list, file`。写 `str` 会导致配置面板异常。
 - 新增配置项必须同步三处：`_conf_schema.json`、`core/config/config.py` 的 Pydantic 字段、`.astrbot-plugin/i18n/*.json` 的 `config` 段。
-- 当前共 51 个配置键。
+- 当前共 56 个配置键。
 
 ### i18n
 `.astrbot-plugin/i18n/{zh-CN,en-US,ru-RU}.json` 是嵌套 JSON：顶层 `metadata`（`display_name` / `short_desc` / `desc`）+ `config`（每个键 `{description, hint, labels}`）。枚举的 `options` 不翻译，翻的是 `labels`。缺失的键会回退到 `zh-CN`。
@@ -141,7 +141,7 @@ AstrBot 用 `docstring_parser` 解析 docstring 生成函数调用 schema。因�
 - schema 没有"必填"概念，所有参数在 Python 签名里都要有默认值。
 
 ### 数据库
-- `SCHEMA_VERSION = 7`。改表结构要递增版本号并在 `_init_schema()` 后补一个 `_migrate_vN()`，且必须能从任意旧版本平滑升级。
+- `SCHEMA_VERSION = 8`。改表结构要递增版本号并在 `_init_schema()` 后补一个 `_migrate_vN()`，且必须能从任意旧版本平滑升级。
 - `emoji.path` 是主键，存的是**绝对路径**（`<data_dir>/categories/<分类>/<时间戳>_<hash8>.<扩展名>`）。
 - v7 新增 `work`（作品名）列，`emoji` 与 `emoji_pending` 都有。新增标量列时记得同步 `_EMOJI_SCALAR_COLUMNS` / `_EMOJI_INSERT_COLUMNS` / `_PENDING_INSERT_COLUMNS` / `_hydrate_entry`。
 
@@ -153,6 +153,12 @@ AstrBot 用 `docstring_parser` 解析 docstring 生成函数调用 schema。因�
 - 插件数据：`data/plugin_data/astrbot_plugin_meme_magpie/`，其中 `categories/`（按分类存图）、`raw/`、`pending/`、`cache/emoji.db`。
 - 插件配置：`data/config/astrbot_plugin_meme_magpie_config.json`（由 AstrBot 管理）。
 - 迁移逻辑靠这两个路径定位上游数据，改路径派生规则时务必同步 `core/maintenance/migration_service.py`。
+
+### 文档
+- `README.md` / `README_EN.md` 只放概览：这是什么、四步上手、常用指令、关键配置、数据目录、注意事项，外加一张导航表。**不要往 README 里加长章节，也不要写「x.y.z 版本改了什么」。**
+- 详细内容在 `docs/`（中文）与 `docs/en/`（英文），两边一一对应：`commands` / `configuration` / `webui` / `llm-tools` / `migration` / `platforms` / `faq`，各自带一份 `README.md` 索引。改了一边记得改另一边。
+- 版本叙述只写在 `CHANGELOG.md`。文档里提到旧行为时用「早期版本」这类不带版本号的说法，免得过期。
+- 文档里的命令一律按 AstrBot 默认唤醒前缀 `/` 书写，并在显眼处说明前缀可改。
 
 ## 测试说明
 

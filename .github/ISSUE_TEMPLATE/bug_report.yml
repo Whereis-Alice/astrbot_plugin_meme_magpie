@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         感谢你愿意提交 Bug 报告！填写时尽量详细，有助于更快定位问题。
-        > ⚠️ 请先确认你使用的是最新版本，并已阅读 README 的配置说明。
+        > ⚠️ 请先确认你使用的是最新版本，并已阅读 [配置说明](https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie/blob/main/docs/configuration.md) 与 [常见问题](https://github.com/Whereis-Alice/astrbot_plugin_meme_magpie/blob/main/docs/faq.md)。
 
   - type: checkboxes
     id: prerequisites
@@ -18,7 +18,7 @@ body:
           required: true
         - label: 我已更新到最新版本
           required: true
-        - label: 我已阅读过 README 的相关配置说明
+        - label: 我已阅读过 docs/ 里的配置说明与常见问题
           required: true
 
   - type: textarea
