@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -9,6 +10,48 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
 from ..util.normalization import normalize_character_key, normalize_label_list
+
+
+# 早期版本（含上游 stealer）把内置 VLM 提示词写进了 _conf_schema.json 的 default，
+# AstrBot 会把 schema 默认值原样落盘到用户配置里，于是“用户自定义提示词”永远非空，
+# 内置提示词的后续改进再也到不了这些用户手上。下面是历史内置提示词（本插件 + 上游各版本、
+# prompts.json 与 schema default 两种来源）的归一化 sha256 指纹，逐字命中就判定用户其实
+# 没有自定义，回落到当前版本的 prompts.json。想固定自己的写法，只要让文本与历史内置版本
+# 有任何一处不同（改一个字即可），指纹就不会命中。
+_LEGACY_BUILTIN_PROMPT_FINGERPRINTS = frozenset(
+    {
+        "17d8e8c765af21bfe22450e8c9a54cf2215cf1c3e0f4e2802304c4a620a5019a",
+        "195eb6e322f7fd30eaf1d7aa8597fbcde8e7681d7812c993882c82a14ad0c714",
+        "314a8d4777db7aef601577d1162c13cc00f3a3f0f4c13294449ccbbd7b40e57c",
+        "425be797a330a8f9da06bb792058288664d8c6190d5e88fdd7be625dccacc91f",
+        "47f84a59f09f43c5451dd0e436616791badfc95f13eda938e0132092bd5aa18b",
+        "490e2fdfb52110920cf82daad3b2542a09049803b7459cbd3d8775b0bc13ee26",
+        "4ef8a9087c85229377091e5c6273af2da032a8c38fd696515f8fec3390d5427d",
+        "5226741ed4541357c5f644df62597c861f7aed7ea543ea013d57fdc0baad70bf",
+        "68a0081e9f14e54ff95a1320b3884ca6025dfb1018cc944b916bcd393009601e",
+        "7c1da5f6f69203ac74ba798b12301d097e0b685a2c9a9d619e22b02a2c46d899",
+        "9bb9f189a6c76f7ab12d8a6f8dcbb5ea650e4bf53db69042a66e31d2fa2d3119",
+        "d2f32f99a11c8e8b082e1ae670ff0b363a1c419ab78dd2ff71d3cc758e60f12b",
+        "d96b1986e796c8da2f16148d971fa947ec1fd719be9853898d3c6dd73fab14d0",
+        "ed0cf59b39baf77087ac3f273611a892a404ed1f441acf2d7d33b5fd57e81c71",
+    }
+)
+
+# 每个配置项每进程只提示一次，避免每次热重载配置都刷日志
+_healed_prompt_keys: set[str] = set()
+
+
+def _prompt_fingerprint(text: str) -> str:
+    """归一化后取 sha256：统一换行、去掉行尾空白与首尾空行，避免编辑器差异造成误判。"""
+    normalized = "\n".join(
+        line.rstrip() for line in str(text).replace("\r\n", "\n").strip().split("\n")
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _is_legacy_builtin_prompt(text: str) -> bool:
+    """判断这段自定义提示词是否只是历史内置提示词的逐字副本。"""
+    return _prompt_fingerprint(text) in _LEGACY_BUILTIN_PROMPT_FINGERPRINTS
 
 
 class PluginConfig(BaseModel):
@@ -308,6 +351,7 @@ class PluginConfig(BaseModel):
 
         self._load_category_state()
         self._migrate_category_config()
+        self._migrate_legacy_prompt_config()
         self._refresh_target_policy_cache()
 
     def _read_json_file(self, path: Path):
@@ -421,6 +465,41 @@ class PluginConfig(BaseModel):
             if raw_l and raw_l in desc:
                 return key
         return "confused" if "confused" in known else known[0]
+
+    def _migrate_legacy_prompt_config(self) -> None:
+        """把落盘的旧版内置提示词清空，恢复“留空 = 跟随内置提示词”的语义。
+
+        旧版 _conf_schema.json 把内置提示词写成了配置项默认值，AstrBot 会把 schema
+        默认值原样存进用户配置。留着不动的话，配置页看上去像是用户自己写了一大段提示词，
+        实际只是历史默认值，而且会一直挡住内置提示词的后续改进。这里只清理与历史内置
+        文本逐字一致的副本，用户改过任何一处都不会被动。
+        """
+        if not isinstance(self._data, dict):
+            return
+        cleared: list[str] = []
+        for _out_key, config_key, _bundled_key in self._PROMPT_SOURCES:
+            saved = self._data.get(config_key)
+            if not isinstance(saved, str) or not saved.strip():
+                continue
+            if not _is_legacy_builtin_prompt(saved):
+                continue
+            self._data[config_key] = ""
+            setattr(self, config_key, "")
+            cleared.append(config_key)
+        if not cleared:
+            return
+        if hasattr(self._data, "save_config"):
+            try:
+                self._data.save_config()
+            except Exception as e:
+                logger.warning(f"[Config] 清理旧版内置提示词副本失败（不影响本次运行）: {e}")
+                return
+        logger.info(
+            "[Config] 已清空配置项 "
+            + "、".join(cleared)
+            + "：内容只是旧版内置提示词的副本，现在改为跟随插件内置提示词（会随版本更新改进）。"
+            "想用自己的提示词，直接在配置页填写即可。"
+        )
 
     def _migrate_category_config(self) -> None:
         if not isinstance(self._data, dict):
@@ -623,30 +702,47 @@ class PluginConfig(BaseModel):
         """获取关键词映射表。"""
         return self.DEFAULT_CATEGORY_ALIASES
 
-    def get_prompts(self, default_prompts: dict[str, str] | None = None) -> dict[str, str]:
-        """获取 VLM 分类提示词；用户自定义非空时优先，为空回退到插件自带 prompts.json。"""
-        custom_prompt = getattr(self, "custom_meme_classification_prompt", "")
-        custom_filter_prompt = getattr(self, "custom_meme_classification_with_filter_prompt", "")
-        default_prompts = default_prompts or {}
+    _PROMPT_SOURCES: ClassVar[tuple[tuple[str, str, str], ...]] = (
+        (
+            "emoji_classification_prompt",
+            "custom_meme_classification_prompt",
+            "EMOJI_CLASSIFICATION_PROMPT",
+        ),
+        (
+            "emoji_classification_with_filter_prompt",
+            "custom_meme_classification_with_filter_prompt",
+            "EMOJI_CLASSIFICATION_WITH_FILTER_PROMPT",
+        ),
+    )
 
+    def get_prompts(self, default_prompts: dict[str, str] | None = None) -> dict[str, str]:
+        """获取 VLM 分类提示词；用户自定义非空时优先，为空回退到插件自带 prompts.json。
+
+        自定义内容如果只是历史内置提示词的逐字副本（多半是旧版把内置文本写成了配置
+        默认值、被 AstrBot 落盘留下来的），按“未自定义”处理并打一条日志，
+        否则内置提示词的改进永远到不了这些用户。
+        """
+        default_prompts = default_prompts or {}
         result = {
             "emoji_classification_prompt": "",
             "emoji_classification_with_filter_prompt": "",
         }
 
-        if custom_prompt and str(custom_prompt).strip():
-            result["emoji_classification_prompt"] = str(custom_prompt).strip()
-        elif default_prompts:
-            result["emoji_classification_prompt"] = str(
-                default_prompts.get("EMOJI_CLASSIFICATION_PROMPT", "") or ""
-            )
-
-        if custom_filter_prompt and str(custom_filter_prompt).strip():
-            result["emoji_classification_with_filter_prompt"] = str(custom_filter_prompt).strip()
-        elif default_prompts:
-            result["emoji_classification_with_filter_prompt"] = str(
-                default_prompts.get("EMOJI_CLASSIFICATION_WITH_FILTER_PROMPT", "") or ""
-            )
+        for out_key, config_key, bundled_key in PluginConfig._PROMPT_SOURCES:
+            custom = str(getattr(self, config_key, "") or "").strip()
+            if custom and _is_legacy_builtin_prompt(custom):
+                if config_key not in _healed_prompt_keys:
+                    _healed_prompt_keys.add(config_key)
+                    logger.info(
+                        f"[Config] 配置项 {config_key} 的内容与旧版内置提示词逐字一致，"
+                        "已按“未自定义”处理并改用当前版本的内置提示词；"
+                        "若确实想固定自己的写法，把这段文本改动一处即可。"
+                    )
+                custom = ""
+            if custom:
+                result[out_key] = custom
+            elif default_prompts:
+                result[out_key] = str(default_prompts.get(bundled_key, "") or "")
 
         return result
 

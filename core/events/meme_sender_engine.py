@@ -419,6 +419,13 @@ class MemeSenderEngine:
         logger.debug(f"[MemeSenderEngine] 已把表情附加到回复消息链: {attached}")
         return True
 
+    @staticmethod
+    def _is_streaming_result(result: Any) -> bool:
+        """这条结果是否属于流式输出（推流中或流式收尾）。"""
+        content_type = getattr(result, "result_content_type", None)
+        name = str(getattr(content_type, "name", "") or content_type or "")
+        return "STREAMING" in name.upper()
+
     async def async_analyze_and_send_emoji(
         self,
         event: AstrMessageEvent,
@@ -443,7 +450,12 @@ class MemeSenderEngine:
                 return
 
             result = event.get_result()
-            if result and not result.get_plain_text().strip():
+            if (
+                result
+                and not result.get_plain_text().strip()
+                and not self._is_streaming_result(result)
+            ):
+                # 流式结果的 chain 在推流阶段本来就是空的，不能当成「回复被撤了」
                 logger.debug("[MemeSenderEngine] 主回复已被置空，跳过自动表情")
                 return
 

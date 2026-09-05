@@ -1378,6 +1378,19 @@ class Main(Star):
         mode = mode.strip().lower()
         return mode if mode in ("separate", "attach") else "separate"
 
+    @staticmethod
+    def _streaming_final_result(result: Any) -> bool:
+        """判断这条结果是不是「流式输出结束后补发的全文」。
+
+        开了流式输出时，AstrBot 会先把增量文本直接推给平台，等流发完再补一条
+        ``STREAMING_FINISH`` 结果、重跑一遍装饰阶段。这条结果的 chain 里装的正是
+        本轮回复的全文，但 ``is_llm_result()`` 为假（它只认 ``LLM_RESULT``）。
+        不放它进来，被动表情在所有开启流式输出的会话里都会整体失效。
+        """
+        content_type = getattr(result, "result_content_type", None)
+        name = str(getattr(content_type, "name", "") or content_type or "")
+        return "STREAMING_FINISH" in name.upper()
+
     def _t2i_active(self, result: Any) -> bool:
         """判断这条回复是否会被转成图片（文本转图片）。
 
@@ -1406,7 +1419,8 @@ class Main(Star):
         result = event.get_result()
         if result is None:
             return False
-        if not result.is_llm_result():
+        streaming_final = self._streaming_final_result(result)
+        if not streaming_final and not result.is_llm_result():
             return False
         if any(isinstance(comp, MessageImage) for comp in getattr(result, "chain", [])):
             return False
@@ -1432,7 +1446,12 @@ class Main(Star):
             pass
 
         if self._auto_meme_delivery_mode() == "attach":
-            if self._t2i_active(result):
+            if streaming_final:
+                # 流式回复的正文早就发出去了，这时候往 chain 里塞图片没人会读
+                logger.debug(
+                    "[MemeThief] 流式输出已把回复发完，attach 模式让位给独立消息模式"
+                )
+            elif self._t2i_active(result):
                 logger.debug(
                     "[MemeThief] 本条回复会转成图片，attach 模式让位给独立消息模式"
                 )

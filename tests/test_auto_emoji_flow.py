@@ -176,6 +176,21 @@ class DummyResult:
         return "".join(str(getattr(comp, "text", "")) for comp in self.chain)
 
 
+class DummyStreamingResult(DummyResult):
+    """流式输出结束后 AstrBot 补发的「全文」结果。
+
+    这类结果的 is_llm_result() 为假（它只认 LLM_RESULT），
+    result_content_type 是 STREAMING_FINISH。
+    """
+
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.result_content_type = types.SimpleNamespace(name="STREAMING_FINISH")
+
+    def is_llm_result(self):
+        return False
+
+
 class DummyEvent:
     def __init__(self, text: str = "hello"):
         self._result = DummyResult(text)
@@ -241,6 +256,27 @@ def _build_main(chance: float) -> Main:
     main.is_send_enabled_for_event = lambda event: True
     main._emoji_sender_engine = MemeSenderEngine(main)
     return main
+
+
+def _stub_sender_engine(engine) -> list:
+    """把 MemeSenderEngine 的协作方法换成桩，返回记录实际发送的列表。"""
+    sent_calls: list = []
+
+    async def _resolve(_event, _text, emotions, *, user_message=""):
+        return (list(emotions), "查询词")
+
+    async def _try_send(_event, emotions, query):
+        sent_calls.append((list(emotions), query))
+        return True
+
+    async def _mark(_event):
+        return None
+
+    engine.resolve_emoji_query = _resolve
+    engine.try_send_emoji = _try_send
+    engine.mark_auto_emoji_sent = _mark
+    engine.get_meme_send_delay = lambda _text, _start: 0
+    return sent_calls
 
 
 class AutoEmojiFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -362,6 +398,143 @@ class AutoEmojiFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main._emoji_turn_state(event).is_active_sent())
         self.assertFalse(handled)
         self.assertEqual(scheduled, [])
+
+    def test_streaming_final_result_detection(self):
+        """只认流式收尾（STREAMING_FINISH），推流中的增量结果不算。"""
+        main = _build_main(1.0)
+
+        self.assertTrue(main._streaming_final_result(DummyStreamingResult("hi")))
+        self.assertFalse(main._streaming_final_result(DummyResult("hi")))
+        # 有些版本把 content_type 直接存成字符串
+        self.assertTrue(
+            main._streaming_final_result(
+                types.SimpleNamespace(
+                    result_content_type="ResultContentType.STREAMING_FINISH"
+                )
+            )
+        )
+        self.assertFalse(
+            main._streaming_final_result(
+                types.SimpleNamespace(
+                    result_content_type=types.SimpleNamespace(name="STREAMING_RESULT")
+                )
+            )
+        )
+        self.assertFalse(main._streaming_final_result(None))
+
+    async def test_streaming_final_result_still_sends_passive_meme(self):
+        """开了流式输出时，被动表情不能整体失效。"""
+        main = _build_main(1.0)
+        scheduled = []
+
+        def _safe_create_task(coro, name):
+            scheduled.append(name)
+            coro.close()
+
+        main._safe_create_task = _safe_create_task
+        event = DummyEvent()
+        event.set_result(DummyStreamingResult("流式回复的全文"))
+
+        handled = await main._prepare_emoji_response(event)
+
+        self.assertTrue(handled)
+        self.assertEqual(scheduled, ["emoji_analyze_passive"])
+
+    async def test_plain_non_llm_result_is_still_skipped(self):
+        """非 LLM、也非流式收尾的结果（例如指令回复）依旧不触发被动表情。"""
+        main = _build_main(1.0)
+        scheduled = []
+
+        def _safe_create_task(coro, name):
+            scheduled.append(name)
+            coro.close()
+
+        main._safe_create_task = _safe_create_task
+        event = DummyEvent()
+        result = DummyResult("指令回复")
+        result.is_llm_result = lambda: False
+        event.set_result(result)
+
+        handled = await main._prepare_emoji_response(event)
+
+        self.assertFalse(handled)
+        self.assertEqual(scheduled, [])
+
+    async def test_attach_mode_yields_to_separate_when_streaming(self):
+        """流式回复的正文早发出去了，attach 模式必须让位给独立消息模式。"""
+        main = _build_main(1.0)
+        main.auto_meme_delivery_mode = "attach"
+        attach_calls = []
+
+        async def _attach(_event, _result, _text, _emotions, *, user_message=""):
+            attach_calls.append(user_message)
+            return True
+
+        main._attach_emoji_to_result = _attach
+        scheduled = []
+
+        def _safe_create_task(coro, name):
+            scheduled.append(name)
+            coro.close()
+
+        main._safe_create_task = _safe_create_task
+        event = DummyEvent()
+        event.set_result(DummyStreamingResult("流式回复的全文"))
+
+        handled = await main._prepare_emoji_response(event)
+
+        self.assertTrue(handled)
+        self.assertEqual(attach_calls, [])
+        self.assertEqual(scheduled, ["emoji_analyze_passive"])
+
+    async def test_attach_mode_still_attaches_for_normal_result(self):
+        """非流式回复走 attach 模式时不应再另发独立消息。"""
+        main = _build_main(1.0)
+        main.auto_meme_delivery_mode = "attach"
+        attach_calls = []
+
+        async def _attach(_event, _result, _text, _emotions, *, user_message=""):
+            attach_calls.append(user_message)
+            return True
+
+        main._attach_emoji_to_result = _attach
+        scheduled = []
+
+        def _safe_create_task(coro, name):
+            scheduled.append(name)
+            coro.close()
+
+        main._safe_create_task = _safe_create_task
+        event = DummyEvent("普通回复")
+
+        handled = await main._prepare_emoji_response(event)
+
+        self.assertTrue(handled)
+        self.assertEqual(attach_calls, ["user message"])
+        self.assertEqual(scheduled, [])
+
+    async def test_streaming_result_not_mistaken_for_cancelled_reply(self):
+        """流式结果的 chain 可能是空的，不能当成「回复被撤了」而跳过表情。"""
+        main = _build_main(1.0)
+        engine = main._emoji_sender_engine
+        event = DummyEvent()
+        event.set_result(DummyStreamingResult(""))
+
+        sent_calls = _stub_sender_engine(engine)
+        await engine.async_analyze_and_send_emoji(event, "", ["开心"])
+
+        self.assertEqual(sent_calls, [(["开心"], "查询词")])
+
+    async def test_emptied_reply_still_skips_emoji(self):
+        """普通回复被别的插件置空时，仍要跳过自动表情。"""
+        main = _build_main(1.0)
+        engine = main._emoji_sender_engine
+        event = DummyEvent("")
+
+        sent_calls = _stub_sender_engine(engine)
+        await engine.async_analyze_and_send_emoji(event, "", ["开心"])
+
+        self.assertEqual(sent_calls, [])
 
     def test_tool_documentation_uses_exposed_names(self):
         search_doc = Main.search_meme.__doc__ or ""

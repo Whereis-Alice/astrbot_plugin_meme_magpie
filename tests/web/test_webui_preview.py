@@ -42,7 +42,9 @@ async def test_index_injects_bridge_and_i18n():
         assert '"zh-CN"' in html and '"en-US"' in html
         assert "./app.js" in html
         # 快速项：prod 构建 + favicon
-        assert "vue.global.prod.min.js" in html
+        assert "./vendor/vue.global.prod.js" in html
+        assert "cdn.jsdelivr.net/npm/vue" not in html
+        assert (DASHBOARD_DIR / "vendor" / "vue.global.prod.js").is_file()
         assert 'rel="icon"' in html
 
 
@@ -59,6 +61,7 @@ async def test_bridge_js_and_static_assets_served():
             ("/app.js", "createApp"),
             ("/template.js", "TEMPLATE"),
             ("/app.css", "{"),
+            ("/vendor/vue.global.prod.js", "Vue"),
         ):
             resp = await client.get(path)
             assert resp.status == 200, path
@@ -73,6 +76,25 @@ async def test_bridge_js_and_static_assets_served():
         assert mascot.status == 200
         assert mascot.content_type == "image/png"
         assert await mascot.read()
+
+
+def test_dashboard_third_party_assets_are_pinned():
+    """CDN 资源必须钉死版本：@latest 会在上游改版时静默改掉界面。"""
+    css = (DASHBOARD_DIR / "app.css").read_text(encoding="utf-8")
+    assert "@latest" not in css
+
+    index = (DASHBOARD_DIR / "index.html").read_text(encoding="utf-8")
+    assert "cdn.jsdelivr.net" not in index
+
+
+def test_light_theme_character_filter_bar_is_readable():
+    """亮色主题的角色筛选栏不得沿用暗色工具栏渐变（深底 + 深字 = 看不见）。"""
+    css = (DASHBOARD_DIR / "app.css").read_text(encoding="utf-8")
+    selector = '[data-theme="light"] .character-filter-bar'
+    start = css.index(selector)
+    rule = css[start:css.index("}", start)]
+    assert "background: var(--bg-elevated)" in rule
+    assert "border-bottom-color: var(--glass-border)" in rule
 
 
 def test_grid_does_not_prefetch_originals_on_hover():

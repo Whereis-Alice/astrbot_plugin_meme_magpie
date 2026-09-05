@@ -333,7 +333,7 @@ class PreviewServer:
         r.add_get("/mock/bridge.js", self.handle_bridge_js)
         r.add_get("/logo.png", self.handle_logo)
         r.add_get("/mascot.png", self.handle_mascot)
-        for filename in ("app.js", "app.css", "template.js"):
+        for filename in ("app.js", "app.css", "template.js", "vendor/vue.global.prod.js"):
             r.add_get("/" + filename, self._make_static_handler(filename))
         r.add_route("*", PLUGIN_BASE + "/{endpoint:.+}", self.handle_api)
         r.add_get("/{tail:.+}", self.handle_fallback_404)

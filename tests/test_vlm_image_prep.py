@@ -121,15 +121,20 @@ def _prepare(service, path):
     return asyncio.run(service._prepare_image_for_vlm(path))
 
 
-def _montage_size(src) -> tuple[int, int]:
+def _montage_of(src) -> tuple[tuple[int, int], vlm_module.MontageLayout]:
+    """跑一遍动图预处理，返回 (成图尺寸, 版式)。"""
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), src)
-        assert is_animated is True
+        out, montage = _prepare(_make_service(), src)
+        assert montage is not None
         with PILImage.open(out) as im:
-            return im.size
+            return im.size, montage
     finally:
         _cleanup(out)
+
+
+def _montage_size(src) -> tuple[int, int]:
+    return _montage_of(src)[0]
 
 
 # ── 预处理：格式白名单 ────────────────────────────────────
@@ -140,8 +145,8 @@ def test_static_gif_is_converted_to_png():
     src = _write_static_gif()
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), src)
-        assert is_animated is False
+        out, montage = _prepare(_make_service(), src)
+        assert montage is None
         assert out != src
         assert out.endswith(".png")
         with PILImage.open(out) as im:
@@ -156,7 +161,7 @@ def test_animated_gif_never_leaves_raw_gif():
     src = _write_animated_gif()
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), src)
+        out, montage = _prepare(_make_service(), src)
         assert out != src
         assert out.endswith(".png")
         with PILImage.open(out) as im:
@@ -164,12 +169,13 @@ def test_animated_gif_never_leaves_raw_gif():
             size = im.size
         if vlm_module.np is None:
             # 没有 numpy 时退化成单帧 PNG，而不是把原始动图直接丢给上游
-            assert is_animated is False
+            assert montage is None
             assert size == (64, 64)
         else:
-            # 4 帧颜色互不相同，不会被相似帧过滤；排成 2x2 网格，小图不放大
-            assert is_animated is True
-            assert size == (128, 128)
+            # 4 帧颜色互不相同，不会被相似帧过滤；排成 2x2 网格，小图不放大。
+            # 成图 = 帧区 + 3 道 4px 缝隙 + 每行一条编号栏（小帧时栏高按 h//6 收窄）
+            assert montage is not None
+            assert size == (2 * 64 + 3 * 4, 2 * (64 + 10) + 3 * 4)
     finally:
         _cleanup(src, out)
 
@@ -181,7 +187,7 @@ def test_wide_animation_is_packed_into_a_grid():
     src = _write_animated_gif(frames=12, size=(600, 200))
     try:
         # 12 帧排成 2 列 x 6 行，每帧还是原始的 600x200，一个像素都没被压
-        assert _montage_size(src) == (1200, 1200)
+        assert _montage_size(src) == (2 * 600 + 3 * 4, 6 * (200 + 22) + 7 * 4)
     finally:
         _cleanup(src)
 
@@ -211,8 +217,8 @@ def test_oversized_montage_falls_back_to_jpeg(monkeypatch):
     src = _write_animated_gif(frames=6, size=(200, 200))
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), src)
-        assert is_animated is True
+        out, montage = _prepare(_make_service(), src)
+        assert montage is not None
         assert out.endswith(".jpg")  # 扩展名要跟真实格式对上，否则上游按后缀猜 mime 会猜错
         with PILImage.open(out) as im:
             assert im.format == "JPEG"
@@ -228,10 +234,73 @@ def test_long_animation_caps_frame_count():
     long_gif = _write_animated_gif(frames=90, size=(120, 120))
     try:
         # 12 帧 -> 3 列 x 4 行；90 帧均匀抽 12 帧，出图尺寸完全一样
-        assert _montage_size(short) == (360, 480)
-        assert _montage_size(long_gif) == (360, 480)
+        expected = (3 * 120 + 4 * 4, 4 * (120 + 20) + 5 * 4)
+        assert _montage_size(short) == expected
+        assert _montage_size(long_gif) == expected
     finally:
         _cleanup(short, long_gif)
+
+
+def test_montage_layout_matches_actual_canvas():
+    """版式里的帧数、行列和尺寸必须跟真画出来的图一致——提示词全靠它写。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    src = _write_animated_gif(frames=12, size=(120, 120))
+    try:
+        size, montage = _montage_of(src)
+    finally:
+        _cleanup(src)
+    assert (montage.frames, montage.cols, montage.rows) == (12, 3, 4)
+    assert (montage.width, montage.height) == size
+
+
+def test_montage_prompt_describes_real_grid():
+    """说明按实际版式生成：写死「3x3 九宫格」会让模型去找不存在的第 5~9 格。"""
+    grid = VLMCallService._montage_prompt(
+        vlm_module.MontageLayout(frames=4, cols=2, rows=2, width=140, height=160)
+    )
+    assert "4 帧" in grid
+    assert "2 行 × 2 列" in grid
+    row = VLMCallService._montage_prompt(
+        vlm_module.MontageLayout(frames=3, cols=3, rows=1, width=376, height=160)
+    )
+    assert "1 行 × 3 列" in row
+    assert "从左到右依次是第 1 帧到第 3 帧" in row  # 单行时直接说顺序，不绕「先右后下」
+
+
+def test_montage_labels_sit_outside_the_frames():
+    """帧号画在画面上方的独立栏里：压在帧左上角会糊掉表情包最关键的那行字。"""
+    if vlm_module.np is None:
+        pytest.skip("没有 numpy 就不走抽帧分支")
+    src = _write_animated_gif(frames=4, size=(64, 64))  # 红、绿、蓝、黄四帧纯色
+    expected = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+    out = None
+    try:
+        out, montage = _prepare(_make_service(), src)
+        assert (montage.cols, montage.rows) == (2, 2)
+        gap = vlm_module.MONTAGE_GAP
+        frame_side = (montage.width - (montage.cols + 1) * gap) // montage.cols
+        label_h = (montage.height - (montage.rows + 1) * gap) // montage.rows - frame_side
+        assert label_h > 0
+        with PILImage.open(out) as im:
+            canvas = im.convert("RGB")
+        for slot, color in enumerate(expected):
+            col, row = slot % montage.cols, slot // montage.cols
+            x0 = gap + col * (frame_side + gap)
+            bar_y = gap + row * (frame_side + label_h + gap)
+            # 编号栏在画面之上，且用的是深色底（数字居中，取左边缘避开笔画）
+            assert canvas.getpixel((x0 + 1, bar_y + 1)) == vlm_module.MONTAGE_LABEL_BACKGROUND[:3]
+            # 画面本身一个像素都没被盖住，四角和中心都还是原色
+            for px, py in (
+                (x0 + 1, bar_y + label_h + 1),
+                (x0 + frame_side - 2, bar_y + label_h + 1),
+                (x0 + frame_side // 2, bar_y + label_h + frame_side // 2),
+                (x0 + 1, bar_y + label_h + frame_side - 2),
+            ):
+                pixel = canvas.getpixel((px, py))
+                assert max(abs(a - b) for a, b in zip(pixel, color)) <= 8, (slot, px, py, pixel)
+    finally:
+        _cleanup(src, out)
 
 
 def test_frame_scan_avoids_full_size_decodes(monkeypatch):
@@ -247,8 +316,8 @@ def test_frame_scan_avoids_full_size_decodes(monkeypatch):
     monkeypatch.setattr(vlm_module, "PILImage", _CountingImageModule(modes))
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), src)
-        assert is_animated is True
+        out, montage = _prepare(_make_service(), src)
+        assert montage is not None
         assert modes.count("RGBA") <= vlm_module.MAX_MONTAGE_FRAMES
         assert modes.count("RGB") >= 12  # 第一趟按步长扫了一遍指纹
     finally:
@@ -259,9 +328,9 @@ def test_whitelisted_static_png_passes_through():
     png = _tmp(".png")
     PILImage.new("RGB", (20, 20), (10, 120, 220)).save(png, "PNG")
     try:
-        out, is_animated = _prepare(_make_service(), png)
+        out, montage = _prepare(_make_service(), png)
         assert out == png  # 原样放行，不产生临时文件
-        assert is_animated is False
+        assert montage is None
     finally:
         _cleanup(png)
 
@@ -274,9 +343,9 @@ def test_static_webp_passes_through():
         _cleanup(webp)
         pytest.skip("当前 Pillow 不支持 WebP 编码")
     try:
-        out, is_animated = _prepare(_make_service(), webp)
+        out, montage = _prepare(_make_service(), webp)
         assert out == webp
-        assert is_animated is False
+        assert montage is None
     finally:
         _cleanup(webp)
 
@@ -287,10 +356,10 @@ def test_extension_mismatch_is_rewritten():
     PILImage.new("RGB", (24, 24), (0, 0, 0)).save(fake_gif, "PNG")
     out = None
     try:
-        out, is_animated = _prepare(_make_service(), fake_gif)
+        out, montage = _prepare(_make_service(), fake_gif)
         assert out != fake_gif
         assert out.endswith(".png")
-        assert is_animated is False
+        assert montage is None
     finally:
         _cleanup(fake_gif, out)
 

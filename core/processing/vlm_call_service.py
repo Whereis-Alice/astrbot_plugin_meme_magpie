@@ -5,6 +5,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -62,6 +63,19 @@ MONTAGE_MAX_BYTES = 1_500_000
 # 已经不影响读画面里的字了。
 MONTAGE_JPEG_QUALITY = 90
 
+# 格与格之间留一道缝，模型才不容易把相邻两格连读成同一张图。
+MONTAGE_GAP = 4
+# 帧号单独占一条编号栏，而不是压在画面左上角——表情包的字经常就在那个位置，
+# 盖上去等于把最该认出来的信息糊掉。
+MONTAGE_LABEL_HEIGHT = 22
+# 画布底色，露出来的部分就是格间分隔线
+MONTAGE_SEPARATOR_COLOR = (232, 232, 232, 255)
+MONTAGE_LABEL_BACKGROUND = (34, 34, 34, 255)
+MONTAGE_LABEL_COLOR = (255, 255, 255, 255)
+# 帧的打底色。透明区域用中性灰而不是纯黑：纯黑会被模型当成画面内容（夜景、
+# 黑衣服、黑边框），中性灰更容易被读成「这块本来是透空的」。
+MONTAGE_FRAME_BACKGROUND = (128, 128, 128, 255)
+
 # 一张图（或动图的一帧）解码后的像素数超过这个值，就改成按横条带缩放：一次只
 # 摊开一条真彩色像素，峰值内存跟图片尺寸脱钩。壁纸级的 4000x4000 一次性摊开就是
 # 48MB 起步，再叠上重采样缓冲和并发，小内存机器很容易被打爆。
@@ -86,6 +100,16 @@ _MIME_REJECT_MARKERS: tuple[str, ...] = (
     "不支持的图片格式",
     "不支持的图片类型",
 )
+
+
+class MontageLayout(NamedTuple):
+    """动图分镜图的实际版式，用来按真实排布写提示词。"""
+
+    frames: int
+    cols: int
+    rows: int
+    width: int
+    height: int
 
 
 class VLMCallService:
@@ -182,26 +206,17 @@ class VLMCallService:
         # 预处理：动图抽帧拼接、上游不收的格式转 PNG（可能产生多个临时文件）
         temp_files: list[str] = []
         try:
-            actual_img_path, is_animated = await self._prepare_image_for_vlm(img_path)
+            actual_img_path, montage = await self._prepare_image_for_vlm(img_path)
             if actual_img_path != img_path:
                 temp_files.append(actual_img_path)  # 标记为临时文件，分析后删除
 
             # 直接传入本地绝对路径，框架内部会自动处理路径转换
             resolved_img_path = str(Path(actual_img_path).resolve())
 
-            # 如果是动图拼接，添加专用提示词前缀
+            # 动图分镜要先告诉模型这张图是怎么拼出来的，否则会被读成多人合照
             actual_prompt = prompt
-            if is_animated:
-                animated_prefix = (
-                    "[动图帧序列] 这不是多人并排的静态场景，而是一个动态表情包的多帧连续截图。"
-                    "这些帧按网格排列：从左到右、从上到下就是时间顺序，展示同一角色/同一画面的不同时刻。"
-                    "格子之间有白色分隔线，每格左上角的数字是帧序号。"
-                    "黑色背景代表透明区域。"
-                    "请以动图/动画的角度理解：这个表情包在表达什么连续动作、表情或情绪变化？"
-                    "不要描述成“并排站立”“多人同时出现”或“几个人站在一起”。"
-                    "如果画面中有文字（字幕、弹幕、对话框、贴纸文字），请逐字识别并理解语义。\n\n"
-                )
-                actual_prompt = animated_prefix + prompt
+            if montage is not None:
+                actual_prompt = self._montage_prompt(montage) + prompt
 
             return await self._do_vlm_call(
                 provider_id, actual_prompt, resolved_img_path, temp_files=temp_files
@@ -217,7 +232,38 @@ class VLMCallService:
                 except Exception as e:
                     logger.warning(f"清理临时文件失败: {e}")
 
-    async def _prepare_image_for_vlm(self, img_path: str) -> tuple[str, bool]:
+    @staticmethod
+    def _montage_prompt(layout: MontageLayout) -> str:
+        """按分镜的真实行列数生成说明前缀。
+
+        帧数和网格是自适应算出来的（3 帧的动图不会硬凑成九宫格），所以说明必须
+        照着实际版式写。写死「3×3 九宫格」在只有 4 帧时会直接把模型带偏，让它
+        去找不存在的第 5~9 格。
+        """
+        first_row = min(layout.cols, layout.frames)
+        if layout.rows <= 1:
+            order = f"从左到右依次是第 1 帧到第 {layout.frames} 帧"
+        else:
+            order = (
+                "阅读顺序是先从左到右、再从上到下："
+                f"第一行是第 1~{first_row} 帧，之后每行接着往下数，"
+                f"最后一格是第 {layout.frames} 帧"
+            )
+        return (
+            "[动图分镜说明]\n"
+            f"这张图不是多人合照，也不是几张独立的图片，而是同一个动图按时间顺序抽出的 "
+            f"{layout.frames} 帧，拼成 {layout.rows} 行 × {layout.cols} 列的分镜。{order}。\n"
+            "各格里重复出现的人物或物体，是同一个主体在不同时刻的样子；"
+            "源动图很短时，相邻格可能几乎一样。\n"
+            "请对比前后格的变化，概括完整的动作、表情变化和最终想表达的情绪或梗。"
+            "不要写成「几个人并排站着」「多个场景同时发生」，也不要去描述分镜布局本身。\n"
+            "每格上方的深色编号条和数字、格子之间的浅色分隔线、透明区域填充的中性灰底，"
+            "都是预处理加上去的，请忽略这些人工元素。\n"
+            "识别画面文字时逐字照抄原字符；同一句话跨格重复出现时只记一次，"
+            "不要把帧号写进 overlay_text。\n\n"
+        )
+
+    async def _prepare_image_for_vlm(self, img_path: str) -> tuple[str, MontageLayout | None]:
         """为 VLM 分析准备图片：动图抽帧拼网格，上游不收的格式转 PNG。
 
         这里不看文件扩展名，一律用 Pillow 嗅探真实格式。WebUI 上传、批量导入和
@@ -229,14 +275,14 @@ class VLMCallService:
             img_path: 原始图片路径
 
         Returns:
-            tuple[str, bool]: (准备好的图片路径, 是否为动图拼接图)
+            tuple[str, MontageLayout | None]: (准备好的图片路径, 分镜版式；静态图为 None)
         """
         if PILImage is None:
             logger.warning(
                 "未安装 Pillow，图片将原样送给视觉模型；"
                 "若上游报「mime type is not supported」请安装 Pillow>=10.0.0"
             )
-            return img_path, False
+            return img_path, None
 
         try:
             fmt, is_animated, n_frames, width, height = await asyncio.to_thread(
@@ -244,7 +290,7 @@ class VLMCallService:
             )
         except Exception as e:
             logger.warning(f"识别图片真实格式失败，原样送给视觉模型: {e}")
-            return img_path, False
+            return img_path, None
 
         # 动图（GIF / 动态 WebP / APNG 都算）：抽关键帧拼成网格，让 VLM 看懂动作
         if is_animated and n_frames > 1:
@@ -252,31 +298,32 @@ class VLMCallService:
                 logger.debug("未安装 numpy，跳过动图抽帧，改为只送首帧")
             else:
                 try:
-                    temp_path, actual_frames, final_w, final_h = await asyncio.to_thread(
+                    temp_path, layout = await asyncio.to_thread(
                         self._extract_and_combine_frames, img_path, n_frames, width, height
                     )
                     logger.debug(
-                        f"动图拼接完成({fmt or '未知格式'}): {n_frames} 帧 -> "
-                        f"{actual_frames} 帧, 输出 {final_w}x{final_h}, "
+                        f"动图分镜完成({fmt or '未知格式'}): {n_frames} 帧 -> "
+                        f"{layout.frames} 帧 / {layout.rows}行×{layout.cols}列, "
+                        f"输出 {layout.width}x{layout.height}, "
                         f"{os.path.getsize(temp_path) // 1024}KB"
                     )
-                    return temp_path, True
+                    return temp_path, layout
                 except Exception as e:
                     logger.warning(f"动图帧提取失败，改为只送首帧: {e}")
             # 抽帧不可用或失败时退化成单帧 PNG，而不是把原始动图直接丢给上游
-            return await self._flatten_for_vlm(img_path, "PNG", fmt), False
+            return await self._flatten_for_vlm(img_path, "PNG", fmt), None
 
         # 静态图：真实格式和扩展名都在白名单里才原样放行
         if fmt in VLM_SAFE_FORMATS:
             suffix = Path(img_path).suffix.lower()
             if suffix in _FORMAT_SUFFIXES.get(fmt, ()):
-                return img_path, False
+                return img_path, None
             logger.debug(f"扩展名 {suffix or '(无)'} 与真实格式 {fmt} 不一致，重写为 PNG 再送出")
-            return await self._flatten_for_vlm(img_path, "PNG", fmt), False
+            return await self._flatten_for_vlm(img_path, "PNG", fmt), None
 
         # GIF / BMP / TIFF / ICO 等上游不收的静态格式，统一转 PNG
         logger.debug(f"静态 {fmt or '未知'} 格式不在视觉模型白名单内，转 PNG 后再送出")
-        return await self._flatten_for_vlm(img_path, "PNG", fmt), False
+        return await self._flatten_for_vlm(img_path, "PNG", fmt), None
 
     @staticmethod
     def _probe_image(fp: str) -> tuple[str, bool, int, int, int]:
@@ -432,11 +479,11 @@ class VLMCallService:
         return out
 
     @staticmethod
-    def _label_font(frame_height: int):
-        """给帧序号挑一个跟帧尺寸相称的字号，取不到就退回 Pillow 默认位图字体。"""
+    def _label_font(label_height: int):
+        """给帧序号挑一个填满编号栏的字号，取不到就退回 Pillow 默认位图字体。"""
         if PILImageFont is None:
             return None
-        size = max(14, min(48, frame_height // 12))
+        size = max(10, min(28, int(label_height * 0.75)))
         try:
             return PILImageFont.load_default(size=size)
         except TypeError:
@@ -449,43 +496,70 @@ class VLMCallService:
             return None
 
     @staticmethod
-    def _draw_montage_guides(
-        canvas, cols: int, rows: int, count: int, frame_width: int, frame_height: int
+    def _draw_montage_chrome(
+        canvas,
+        cols: int,
+        count: int,
+        frame_width: int,
+        frame_height: int,
+        gap: int,
+        label_h: int,
     ) -> None:
-        """画格线和帧序号，帮 VLM 认出这是时间序列而不是多人并排。"""
+        """在每格画面上方画一条深色编号栏，标出这格是第几帧。
+
+        帧号放在画面之外的独立栏里，而不是像早先那样压在帧的左上角：表情包的字
+        经常正好就在那个位置，盖上去等于把最该认出来的信息糊掉。格与格之间也不再
+        画线，让画布底色从缝隙里露出来充当分隔线，既省一次绘制，也不会有半透明线
+        条盖在画面上。
+        """
         if PILImageDraw is None:
             return
         draw = PILImageDraw.Draw(canvas)
-        width, height = canvas.size
-        grid_color = (255, 255, 255, 160)
-        for col in range(1, cols):
-            x = col * frame_width
-            draw.line([(x, 0), (x, height)], fill=grid_color, width=2)
-        for row in range(1, rows):
-            y = row * frame_height
-            draw.line([(0, y), (width, y)], fill=grid_color, width=2)
-
-        font = VLMCallService._label_font(frame_height)
-        stroke = 1 if frame_height < 160 else 2
+        font = VLMCallService._label_font(label_h)
         for slot in range(count):
-            xy = ((slot % cols) * frame_width + 4, (slot // cols) * frame_height + 2)
-            label = str(slot + 1)
+            x0 = gap + (slot % cols) * (frame_width + gap)
+            y0 = gap + (slot // cols) * (frame_height + label_h + gap)
+            draw.rectangle(
+                [x0, y0, x0 + frame_width - 1, y0 + label_h - 1],
+                fill=MONTAGE_LABEL_BACKGROUND,
+            )
+            # 带 # 前缀，模型更容易看出这是标注而不是画面里的台词
+            label = f"#{slot + 1}"
             try:
                 draw.text(
-                    xy,
+                    (x0 + frame_width / 2, y0 + label_h / 2),
                     label,
-                    fill=(255, 255, 255, 255),
+                    fill=MONTAGE_LABEL_COLOR,
                     font=font,
-                    stroke_width=stroke,
-                    stroke_fill=(0, 0, 0, 255),
+                    anchor="mm",
                 )
-            except TypeError:  # 老版本 Pillow 的 text() 不认识 stroke_*
-                draw.text(xy, label, fill=(255, 255, 255, 255), font=font)
+            except Exception:
+                # 位图字体和老版本 Pillow 不支持 anchor，退回左上角对齐
+                draw.text((x0 + 2, y0), label, fill=MONTAGE_LABEL_COLOR, font=font)
+
+    @staticmethod
+    def _area_scale(base_w: int, base_h: int, chrome_w: int, chrome_h: int) -> float:
+        """算出让「帧区乘以 scale 再加上编号栏和缝隙」刚好压进像素预算的缩放比。
+
+        编号栏和缝隙的尺寸不随 scale 变化，所以总面积是 scale 的二次式
+        ``(base_w * s + chrome_w) * (base_h * s + chrome_h) <= MAX_MONTAGE_PIXELS``。
+        沿用旧的 ``sqrt(预算 / 帧区面积)`` 会漏算这部分固定开销，帧数多的时候能把
+        预算超出一成以上。
+        """
+        a = base_w * base_h
+        b = base_w * chrome_h + base_h * chrome_w
+        c = chrome_w * chrome_h - MAX_MONTAGE_PIXELS
+        if a <= 0:
+            return 1.0
+        if c >= 0:
+            # 光是编号栏和缝隙就吃满了预算，只能把帧压到最小
+            return 0.0
+        return (-b + math.sqrt(b * b - 4 * a * c)) / (2 * a)
 
     @staticmethod
     def _extract_and_combine_frames(
         fp: str, n_frames: int, width: int, height: int
-    ) -> tuple[str, int, int, int]:
+    ) -> tuple[str, MontageLayout]:
         """抽取动图关键帧，拼成一张接近正方形的网格图（阻塞，需放线程池）。
 
         分两趟解码，是为了让内存峰值跟源动图的体量脱钩：第一趟每个采样点只留一张
@@ -498,7 +572,7 @@ class VLMCallService:
         免得编码和上传的开销跟着分辨率一起失控。
 
         Returns:
-            tuple[str, int, int, int]: (临时图路径, 实际帧数, 输出宽, 输出高)
+            tuple[str, MontageLayout]: (临时图路径, 实际版式)
         """
         # ── 第一趟：只解缩略指纹，挑出画面确实变了的采样点 ──
         scan_step = max(1, n_frames // MAX_SCAN_FRAMES)
@@ -540,24 +614,32 @@ class VLMCallService:
         count = len(picked)
         cols = max(1, min(count, round(math.sqrt(count * height / width)) or 1))
         rows = math.ceil(count / cols)
+        gap = MONTAGE_GAP
+        label_h = MONTAGE_LABEL_HEIGHT
+        # 缝隙和编号栏占掉的尺寸是固定的，得先从预算里扣掉再算每帧能有多大
+        chrome_w = (cols + 1) * gap
+        chrome_h = (rows + 1) * gap + rows * label_h
         # 只缩不放：小图放大只会更糊，还白白多占内存
         scale = min(
-            (MAX_VLM_DIMENSION // cols) / width,
-            (MAX_VLM_DIMENSION // rows) / height,
+            max(MAX_VLM_DIMENSION - chrome_w, 1) / (cols * width),
+            max(MAX_VLM_DIMENSION - chrome_h, 1) / (rows * height),
             # 长宽各自不超限，乘起来仍可能是四百万像素，再套一层总面积预算
-            math.sqrt(MAX_MONTAGE_PIXELS / (cols * rows * width * height)),
+            VLMCallService._area_scale(cols * width, rows * height, chrome_w, chrome_h),
             1.0,
         )
         frame_width = max(1, int(width * scale))
         frame_height = max(1, int(height * scale))
-        montage_w = frame_width * cols
-        montage_h = frame_height * rows
+        # 帧被压得很小时编号栏跟着缩，免得一条 22 像素的黑栏比画面本身还抢眼
+        if frame_height < 6 * label_h:
+            label_h = max(8, frame_height // 6)
+        montage_w = cols * frame_width + (cols + 1) * gap
+        montage_h = rows * (frame_height + label_h) + (rows + 1) * gap
         need_resize = (frame_width, frame_height) != (width, height)
         # 巨幅动图的单帧同样可能有几十 MB，缩放走条带
         strip_frames = need_resize and width * height > STRIP_PIXEL_THRESHOLD
 
-        # ── 第二趟：只解码挑中的帧，贴完就释放。黑底代表透明区域 ──
-        combined = PILImage.new("RGBA", (montage_w, montage_h), (0, 0, 0, 255))
+        # ── 第二趟：只解码挑中的帧，贴完就释放 ──
+        combined = PILImage.new("RGBA", (montage_w, montage_h), MONTAGE_SEPARATOR_COLOR)
         try:
             with PILImage.open(fp) as im:
                 for slot, idx in enumerate(picked):
@@ -574,15 +656,19 @@ class VLMCallService:
                             )
                             frame.close()
                             frame = resized
+                    x0 = gap + (slot % cols) * (frame_width + gap)
+                    y0 = gap + (slot // cols) * (frame_height + label_h + gap) + label_h
+                    # 先给这一格铺中性灰再贴帧：透明区域落在灰底上，比落在纯黑上更
+                    # 不容易被模型读成「夜景 / 黑衣服 / 黑边框」
                     combined.paste(
-                        frame,
-                        ((slot % cols) * frame_width, (slot // cols) * frame_height),
-                        frame,  # 用帧自己的 alpha 通道做蒙版
+                        MONTAGE_FRAME_BACKGROUND,
+                        (x0, y0, x0 + frame_width, y0 + frame_height),
                     )
+                    combined.paste(frame, (x0, y0), frame)  # 用帧自己的 alpha 做蒙版
                     frame.close()
 
-            VLMCallService._draw_montage_guides(
-                combined, cols, rows, count, frame_width, frame_height
+            VLMCallService._draw_montage_chrome(
+                combined, cols, count, frame_width, frame_height, gap, label_h
             )
 
             # 优先无损 PNG：JPEG 会把小字压糊，而且 RGBA 也没法直接存 JPEG
@@ -594,7 +680,7 @@ class VLMCallService:
         finally:
             combined.close()
 
-        return temp_path, count, montage_w, montage_h
+        return temp_path, MontageLayout(count, cols, rows, montage_w, montage_h)
 
     @staticmethod
     def _reencode_as_jpeg(png_path: str, combined) -> str:
@@ -602,7 +688,7 @@ class VLMCallService:
         jpeg_fd, jpeg_path = tempfile.mkstemp(suffix=".jpg")
         os.close(jpeg_fd)
         try:
-            # 半透明的格线丢掉 alpha 之后会变成纯白，正好是想要的效果
+            # 画布、编号栏、帧的打底色现在都是全不透明的，丢掉 alpha 观感不变
             flat = combined.convert("RGB")
             try:
                 flat.save(jpeg_path, "JPEG", quality=MONTAGE_JPEG_QUALITY)

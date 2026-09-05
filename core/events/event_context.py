@@ -34,9 +34,24 @@ def get_event_platform_name(event: Any | None) -> str:
 
 
 def get_event_session_key(event: Any | None, *, default: str = "global") -> str:
-    """读取稳定会话键，供冷却、后台任务和强制捕获窗口共用。"""
+    """读取稳定会话键，供冷却、后台任务和强制捕获窗口共用。
+
+    优先用 ``unified_msg_origin``：它自带平台和会话类型（``aiocqhttp:GroupMessage:123``），
+    跨平台一定唯一。``get_session_id`` 在部分适配器上只返回裸群号 / 裸 QQ 号，
+    两个平台的同号会话会撞成同一个键——自动表情冷却、强制捕获窗口这些按会话
+    隔离的状态就会互相串台。
+    """
     if event is None:
         return default
+
+    try:
+        unified_msg_origin = normalize_event_value(
+            getattr(event, "unified_msg_origin", "")
+        )
+    except Exception:
+        unified_msg_origin = ""
+    if unified_msg_origin:
+        return unified_msg_origin
 
     getter = getattr(event, "get_session_id", None)
     if callable(getter):
@@ -47,13 +62,7 @@ def get_event_session_key(event: Any | None, *, default: str = "global") -> str:
         if session_id:
             return session_id
 
-    try:
-        unified_msg_origin = normalize_event_value(
-            getattr(event, "unified_msg_origin", "")
-        )
-    except Exception:
-        unified_msg_origin = ""
-    return unified_msg_origin or default
+    return default
 
 
 def unwrap_event(event: Any) -> Any:

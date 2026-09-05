@@ -235,11 +235,11 @@
     },
     "custom_meme_classification_prompt": {
       "description": "VLM 分类提示词",
-      "hint": "支持占位符：{emotion_list}（分类列表）。为空时使用默认提示词。"
+      "hint": "留空即使用插件内置提示词（会随插件更新一起改进），推荐留空。填写后会完全覆盖内置提示词。支持占位符：{emotion_list}（分类列表）、{known_facts}（已确认的作品/角色等信息，不写这个占位符时插件会自动插到 <output_format> 之前）。"
     },
     "custom_meme_classification_with_filter_prompt": {
       "description": "VLM 分类提示词（带审核）",
-      "hint": "开启内容审核时使用的 VLM 分类提示词。支持占位符：{emotion_list}（分类列表）。为空时使用默认提示词。"
+      "hint": "开启内容审核时使用的提示词。留空即使用插件内置提示词（会随插件更新一起改进），推荐留空。填写后会完全覆盖内置提示词。支持占位符：{emotion_list}（分类列表）、{known_facts}（已确认的作品/角色等信息）。"
     },
     "_webui_section": {
       "description": "=== WebUI ===",

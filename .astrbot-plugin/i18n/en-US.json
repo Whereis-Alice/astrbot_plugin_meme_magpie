@@ -235,11 +235,11 @@
     },
     "custom_meme_classification_prompt": {
       "description": "VLM classification prompt",
-      "hint": "Supports placeholder: {emotion_list} (category list). Leave blank to use the default prompt."
+      "hint": "Leave blank to use the built-in prompt, which keeps improving with plugin updates (recommended). Anything you type here fully replaces it. Placeholders: {emotion_list} (category list) and {known_facts} (confirmed series/character info; if you omit the placeholder the plugin inserts it before <output_format>)."
     },
     "custom_meme_classification_with_filter_prompt": {
       "description": "VLM classification prompt (with filtering)",
-      "hint": "Used when content moderation is enabled. Supports placeholder: {emotion_list} (category list). Leave blank to use the default prompt."
+      "hint": "Prompt used when content moderation is on. Leave blank to use the built-in prompt, which keeps improving with plugin updates (recommended). Anything you type here fully replaces it. Placeholders: {emotion_list} (category list) and {known_facts} (confirmed series/character info)."
     },
     "_webui_section": {
       "description": "=== WebUI ===",
