@@ -242,10 +242,13 @@ createApp({
             pendingEdit: () => Boolean(singleReanalyze.text),
             // 「识别失败检测」里逐行手写的描述同样是草稿，没保存就不该被手滑点没
             missingDesc: () => missingDescHasDraft(),
+            // 外部源窗口里挑好的压缩包、跑完的预检结果，重来一次要再等一遍下载
+            source: () => Boolean(sourceFile.value || sourceInspection.value),
         };
         // 窗口里挂着后台任务的进度：此时表单已经被进度视图替掉，关掉就再也翻不回来，同样不能手滑关
         const modalBusyExtra = {
             batchUpload: () => Boolean(batchTaskId.value),
+            source: () => Boolean(sourceJob.value),
         };
         const touchModal = (key) => { if (key) modalTouched[key] = true; };
         const releaseModal = (key) => { if (key) delete modalTouched[key]; };
@@ -379,6 +382,34 @@ createApp({
         const batchControlBusy = ref(false);
         let batchPollInterval = null;
         let imgObserver = null;
+
+        // ── 外部表情包源：本地压缩包 / GitHub 仓库 / HTTP 目录 ──────────────
+        const sourceOpen = ref(false);
+        const sourceLoading = ref(false);
+        // 当前在跑的动作，用来禁按钮：'' | 'upload' | 'inspect' | 'import' | 'control'
+        const sourceBusy = ref('');
+        const sourceList = ref([]);
+        const sourceInspection = ref(null);
+        const sourceFile = ref(null);
+        // 上传后落在暂存区的压缩包路径，导入时要原样回传
+        const sourceUploadedPath = ref('');
+        const sourceError = ref(null);
+        // 源里的分类名 → 本地分类名，留空表示交给后端自动对齐
+        const sourceCategoryMap = reactive({});
+        const sourceForm = reactive({
+            endpoint: '',
+            github: '',
+            review: false,
+            scope_mode: 'public',
+            origin_target: '',
+            assign_character: false,
+            character: '',
+        });
+        const sourceDefaults = ref({
+            enabled: true, review: false, review_forced: false, allow_http: false, max_items: 2000,
+        });
+        const sourceJob = ref(null);
+        let sourcePollInterval = null;
 
         const observeImages = () => {
             if (!imgObserver) return;
@@ -3081,6 +3112,440 @@ createApp({
                 }
             }, 300);
         };
+        // ── 外部表情包源 ────────────────────────────────────────────────
+        // 三种来源共用一套「预检 → 确认 → 后台导入」流程：预检只读清单不落库，
+        // 用户看清张数/体积/分类后再决定导不导，避免一按就往库里灌几千张。
+        const SOURCE_TERMINAL_STATUS = ['completed', 'failed', 'cancelled'];
+
+        const sourceTypeLabel = (type) => {
+            const key = String(type || '').toLowerCase();
+            if (key === 'github') return t('pages.dashboard.sources.type_github', 'GitHub 仓库');
+            if (key === 'http_json' || key === 'http') return t('pages.dashboard.sources.type_http', 'HTTP 目录');
+            return t('pages.dashboard.sources.type_pack', '本地表情包');
+        };
+
+        const sourceJobActive = computed(() => {
+            const status = sourceJob.value?.status;
+            return ['queued', 'running', 'paused'].includes(String(status || ''));
+        });
+
+        const sourceProgressPercent = computed(() => {
+            const total = Number(sourceJob.value?.total || 0);
+            if (!total) return 0;
+            return Math.min(100, Math.round((Number(sourceJob.value?.processed || 0) / total) * 100));
+        });
+
+        const sourceEtaText = computed(() => {
+            const secs = Math.round(Number(sourceJob.value?.eta_seconds || 0));
+            if (secs <= 0) return '';
+            if (secs < 60) return secs + 's';
+            const mins = Math.floor(secs / 60);
+            if (mins < 60) return mins + 'm ' + (secs % 60) + 's';
+            return Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+        });
+
+        const sourcePhaseText = computed(() => {
+            switch (String(sourceJob.value?.phase || '')) {
+                case 'inspecting': return t('pages.dashboard.sources.phase_inspecting', '读取清单中');
+                case 'importing': return t('pages.dashboard.sources.phase_importing', '入库中');
+                case 'finalizing': return t('pages.dashboard.sources.phase_finalizing', '收尾中');
+                case 'done': return t('pages.dashboard.sources.phase_done', '已结束');
+                default: return t('pages.dashboard.sources.phase_queued', '排队中');
+            }
+        });
+
+        const sourceStatusLabel = computed(() => {
+            switch (String(sourceJob.value?.status || '')) {
+                case 'running': return t('pages.dashboard.sources.running', '正在导入…');
+                case 'paused': return t('pages.dashboard.sources.paused', '已暂停');
+                case 'completed': return t('pages.dashboard.sources.completed', '导入完成');
+                case 'cancelled': return t('pages.dashboard.sources.cancelled', '已停止');
+                case 'failed': return t('pages.dashboard.sources.failed', '导入失败');
+                default: return t('pages.dashboard.sources.queued', '排队中');
+            }
+        });
+
+        const sourceJobErrors = computed(() => {
+            const errors = sourceJob.value?.errors;
+            return Array.isArray(errors) ? errors.slice(0, 30) : [];
+        });
+
+        // 后端的报错是英文技术描述（方便对照上游），这里统一包一层中文说明
+        const sourceErrorText = (raw) => {
+            const detail = String(raw || '').trim();
+            const prefix = t('pages.dashboard.sources.error_prefix', '外部源操作失败');
+            if (!detail) return prefix;
+            return prefix + t('pages.dashboard.sources.error_sep', '：') + detail;
+        };
+
+        const stopSourcePoll = () => {
+            if (sourcePollInterval) clearInterval(sourcePollInterval);
+            sourcePollInterval = null;
+        };
+
+        const pollSourceJob = async () => {
+            const jobId = sourceJob.value?.job_id;
+            if (!jobId) { stopSourcePoll(); return; }
+            try {
+                const res = await apiFetch('api/sources/jobs?job_id=' + encodeURIComponent(jobId));
+                const data = await res.json();
+                if (!data.success) return;
+                sourceJob.value = data.job || sourceJob.value;
+                if (!SOURCE_TERMINAL_STATUS.includes(String(sourceJob.value?.status || ''))) return;
+                stopSourcePoll();
+                if (sourceJob.value?.status === 'failed') {
+                    sourceError.value = sourceErrorText(
+                        sourceJobErrors.value[0]?.error || sourceJobErrors.value[0] || '',
+                    );
+                }
+                fetchSources();
+                // 有图进库/进审核区就把背后的列表刷新，别让用户以为没导进来
+                if (Number(sourceJob.value?.imported || 0) > 0) {
+                    refreshView();
+                    fetchWorks();
+                }
+                if (Number(sourceJob.value?.pending || 0) > 0) {
+                    fetchPendingImages(1);
+                    fetchPendingStats();
+                }
+            } catch (e) {
+                console.error('Source job poll error:', e);
+            }
+        };
+
+        const startSourcePoll = () => {
+            stopSourcePoll();
+            sourcePollInterval = setInterval(pollSourceJob, 1000);
+        };
+
+        const resetSourceCategoryMap = (categoryNames) => {
+            Object.keys(sourceCategoryMap).forEach((key) => { delete sourceCategoryMap[key]; });
+            (Array.isArray(categoryNames) ? categoryNames : []).forEach((name) => {
+                const key = String(name || '').trim();
+                if (!key) return;
+                // 源里的分类名正好也是本地分类时直接对上，其余留空交给后端自动对齐
+                sourceCategoryMap[key] = categories.value.some((cat) => cat.key === key) ? key : '';
+            });
+        };
+
+        const applySourceInspection = (inspection) => {
+            sourceInspection.value = inspection || null;
+            sourceError.value = null;
+            resetSourceCategoryMap(inspection?.categories);
+        };
+
+        const fetchSources = async () => {
+            sourceLoading.value = true;
+            try {
+                const res = await apiFetch('api/sources');
+                const data = await res.json();
+                if (!data.success) {
+                    sourceError.value = sourceErrorText(data.error);
+                    return;
+                }
+                sourceList.value = Array.isArray(data.sources) ? data.sources : [];
+                if (data.defaults) sourceDefaults.value = data.defaults;
+                // 刷新页面丢了 job_id 也能重新接上还在跑的导入
+                if (data.job) {
+                    sourceJob.value = data.job;
+                    if (sourceJobActive.value) startSourcePoll();
+                }
+            } catch (e) {
+                sourceError.value = sourceErrorText(
+                    t('pages.dashboard.sources.list_failed', '源列表没读出来，可能是后端或网络出了问题'),
+                );
+                console.error('Source list error:', e);
+            } finally {
+                sourceLoading.value = false;
+            }
+        };
+
+        const openSourceModal = () => {
+            sourceOpen.value = true;
+            sourceError.value = null;
+            sourceInspection.value = null;
+            sourceFile.value = null;
+            sourceUploadedPath.value = '';
+            sourceJob.value = null;
+            sourceBusy.value = '';
+            resetSourceCategoryMap([]);
+            Object.assign(sourceForm, {
+                endpoint: '', github: '', review: false,
+                scope_mode: 'public', origin_target: '',
+                assign_character: false, character: '',
+            });
+            fetchSources().then(() => {
+                // 开了内容过滤时后端会强制走审核，这里跟着勾上，别让复选框和实际行为不一致
+                sourceForm.review = Boolean(sourceDefaults.value.review);
+            });
+        };
+
+        const closeSourceModal = () => {
+            sourceOpen.value = false;
+            stopSourcePoll();
+            releaseModal('source');
+        };
+
+        const runSourceInspect = async (payload) => {
+            sourceBusy.value = 'inspect';
+            sourceError.value = null;
+            try {
+                const res = await apiFetch('api/sources/inspect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    sourceError.value = sourceErrorText(data.error);
+                    return false;
+                }
+                applySourceInspection(data.inspection);
+                return true;
+            } catch (e) {
+                sourceError.value = sourceErrorText(
+                    t('pages.dashboard.sources.inspect_failed', '预检没跑完，可能是网络或源不可达'),
+                );
+                console.error('Source inspect error:', e);
+                return false;
+            } finally {
+                sourceBusy.value = '';
+            }
+        };
+
+        const handleSourceFile = async (event) => {
+            const file = event?.target?.files?.[0];
+            if (event?.target) event.target.value = '';
+            if (!file) return;
+            if (!/\.(zip|meme-pack)$/i.test(file.name)) {
+                sourceError.value = t('pages.dashboard.sources.bad_archive', '只认 .zip 或 .meme-pack 压缩包。');
+                return;
+            }
+            touchModal('source');
+            sourceFile.value = file;
+            sourceInspection.value = null;
+            sourceUploadedPath.value = '';
+            sourceBusy.value = 'upload';
+            sourceError.value = null;
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                const res = await apiFetch('api/sources/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!data.success) {
+                    sourceError.value = sourceErrorText(data.error);
+                    sourceFile.value = null;
+                    return;
+                }
+                sourceUploadedPath.value = String(data.path || '');
+                applySourceInspection(data.inspection);
+            } catch (e) {
+                sourceError.value = sourceErrorText(
+                    t('pages.dashboard.sources.upload_failed', '压缩包没传上去'),
+                );
+                sourceFile.value = null;
+                console.error('Source upload error:', e);
+            } finally {
+                sourceBusy.value = '';
+            }
+        };
+
+        const inspectGitHubSource = async () => {
+            const repository = String(sourceForm.github || '').trim();
+            if (!repository) {
+                sourceError.value = t('pages.dashboard.sources.need_repo', '填 owner/repo，或者直接贴仓库链接。');
+                return;
+            }
+            touchModal('source');
+            sourceFile.value = null;
+            sourceUploadedPath.value = '';
+            await runSourceInspect({ source_type: 'github', repository });
+        };
+
+        const inspectExternalApi = async () => {
+            const endpoint = String(sourceForm.endpoint || '').trim();
+            if (!endpoint) {
+                sourceError.value = t('pages.dashboard.sources.need_endpoint', '填一个返回表情包清单的 HTTPS 地址。');
+                return;
+            }
+            touchModal('source');
+            sourceFile.value = null;
+            sourceUploadedPath.value = '';
+            await runSourceInspect({ source_type: 'http_json', endpoint });
+        };
+
+        // 已登记/自动发现的源：预检时只回传描述符，敏感字段不出后端
+        const sourceDescriptorPayload = (source) => {
+            if (sourceUploadedPath.value) {
+                return { source_type: 'meme_pack', path: sourceUploadedPath.value };
+            }
+            if (source) {
+                return source.discovered
+                    ? { source_type: source.source_type || 'meme_pack', path: source.endpoint }
+                    : { source_id: source.source_id };
+            }
+            const type = String(sourceInspection.value?.source_type || '').toLowerCase();
+            if (type === 'github') return { source_type: 'github', repository: String(sourceForm.github || '').trim() };
+            if (type === 'http_json' || type === 'http') {
+                return { source_type: 'http_json', endpoint: String(sourceForm.endpoint || '').trim() };
+            }
+            return {};
+        };
+
+        const inspectRegisteredSource = async (source) => {
+            touchModal('source');
+            sourceFile.value = null;
+            sourceUploadedPath.value = '';
+            await runSourceInspect(sourceDescriptorPayload(source));
+        };
+
+        const sourceImportOptions = () => {
+            const options = { review: Boolean(sourceForm.review) };
+            const map = {};
+            Object.entries(sourceCategoryMap).forEach(([key, value]) => {
+                const target = String(value || '').trim();
+                if (target) map[key] = target;
+            });
+            if (Object.keys(map).length > 0) options.category_map = map;
+            options.scope_mode = sourceForm.scope_mode === 'local' ? 'local' : 'public';
+            if (options.scope_mode !== 'public') {
+                const origin = String(sourceForm.origin_target || '').trim();
+                if (origin) options.origin_target = origin;
+            }
+            if (sourceForm.assign_character) {
+                const character = String(sourceForm.character || '').trim();
+                if (character) {
+                    options.character = character;
+                    options.create_character = true;
+                }
+            }
+            return options;
+        };
+
+        const launchSourceJob = async (url, payload) => {
+            sourceBusy.value = 'import';
+            sourceError.value = null;
+            try {
+                const res = await apiFetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (!data.success || !data.job) {
+                    sourceError.value = sourceErrorText(data.error);
+                    return;
+                }
+                sourceJob.value = data.job;
+                startSourcePoll();
+            } catch (e) {
+                sourceError.value = sourceErrorText(
+                    t('pages.dashboard.sources.import_failed', '导入没能开始'),
+                );
+                console.error('Source import error:', e);
+            } finally {
+                sourceBusy.value = '';
+            }
+        };
+
+        const startSourceImport = async () => {
+            if (!sourceInspection.value) return;
+            const descriptor = sourceDescriptorPayload(null);
+            if (Object.keys(descriptor).length === 0) {
+                sourceError.value = t('pages.dashboard.sources.need_inspect', '先跑一次预检，确认要导的是哪一份。');
+                return;
+            }
+            await launchSourceJob('api/sources/import', { ...descriptor, ...sourceImportOptions() });
+        };
+
+        const syncSource = async (source) => {
+            if (!source) return;
+            if (source.discovered) {
+                await launchSourceJob('api/sources/import', {
+                    source_type: source.source_type || 'meme_pack',
+                    path: source.endpoint,
+                    ...sourceImportOptions(),
+                });
+                return;
+            }
+            // 已登记的源沿用登记时存下的映射与开关，只要 source_id 就够
+            await launchSourceJob('api/sources/sync', { source_id: source.source_id });
+        };
+
+        const cancelSourceJob = async () => {
+            const jobId = sourceJob.value?.job_id;
+            if (!jobId || sourceBusy.value) return;
+            const ok = await showConfirm(
+                t('pages.dashboard.sources.cancel_confirm', '确定停止这次导入吗？已经入库的图片会保留。'),
+            );
+            if (!ok) return;
+            sourceBusy.value = 'control';
+            try {
+                await apiFetch('api/sources/jobs/cancel', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: jobId }),
+                });
+                await pollSourceJob();
+            } catch (e) {
+                showAlert(t('pages.dashboard.sources.control_failed', '操作失败。'), 'error');
+            } finally {
+                sourceBusy.value = '';
+            }
+        };
+
+        const controlSourceJob = async (action) => {
+            const jobId = sourceJob.value?.job_id;
+            if (!jobId || sourceBusy.value) return;
+            sourceBusy.value = 'control';
+            try {
+                const res = await apiFetch('api/sources/jobs/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ job_id: jobId, action }),
+                });
+                const data = await res.json();
+                if (data.job) sourceJob.value = data.job;
+                if (!data.success) {
+                    showAlert(
+                        sourceErrorText(data.error || t('pages.dashboard.sources.control_failed', '操作失败。')),
+                        'error',
+                    );
+                } else if (action === 'resume') {
+                    startSourcePoll();
+                }
+            } catch (e) {
+                showAlert(t('pages.dashboard.sources.control_failed', '操作失败。'), 'error');
+            } finally {
+                sourceBusy.value = '';
+            }
+        };
+
+        const forgetSource = async (source) => {
+            if (!source?.source_id) return;
+            const ok = await showConfirm(
+                t('pages.dashboard.sources.forget_confirm', '只是不再记录这个源，已经导进来的表情包不会被删。继续吗？'),
+            );
+            if (!ok) return;
+            try {
+                const res = await apiFetch('api/sources/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_id: source.source_id }),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    showAlert(sourceErrorText(data.error), 'error');
+                    return;
+                }
+                showAlert(t('pages.dashboard.sources.forgotten', '已从源列表移除，表情包保持原样。'), 'success');
+                fetchSources();
+            } catch (e) {
+                showAlert(sourceErrorText(''), 'error');
+                console.error('Source delete error:', e);
+            }
+        };
+
         // 受保护弹窗登记表：顺序＝模板里的叠放顺序，Esc 先处理最上面那个
         const guardedModals = [
             { key: 'preview', open: previewOpen, close: closePreview },
@@ -3094,6 +3559,7 @@ createApp({
             { key: 'batchScope', open: batchScopeOpen, close: closeBatchScopeModal },
             { key: 'pendingEdit', open: pendingEditOpen, close: closePendingEdit },
             { key: 'missingDesc', open: missingDescOpen, close: closeMissingDescModal },
+            { key: 'source', open: sourceOpen, close: closeSourceModal },
         ];
         // 每次重新打开都按「干净」算，别让上一次的输入痕迹一直把窗口锁着
         guardedModals.forEach((modal) => {
@@ -3143,6 +3609,7 @@ createApp({
             if (imgObserver) imgObserver.disconnect();
             clearTimeout(resizeTimer);
             clearTimeout(searchTimeout);
+            stopSourcePoll();
         });
 
         return {
@@ -3451,6 +3918,37 @@ createApp({
 
             // 审核区键盘焦点
             focusedPendingId,
+
+            // 外部表情包源
+            sourceOpen,
+            sourceLoading,
+            sourceBusy,
+            sourceList,
+            sourceInspection,
+            sourceFile,
+            sourceError,
+            sourceCategoryMap,
+            sourceForm,
+            sourceDefaults,
+            sourceJob,
+            sourceJobActive,
+            sourceJobErrors,
+            sourceProgressPercent,
+            sourceEtaText,
+            sourcePhaseText,
+            sourceStatusLabel,
+            sourceTypeLabel,
+            openSourceModal,
+            closeSourceModal,
+            handleSourceFile,
+            inspectGitHubSource,
+            inspectExternalApi,
+            inspectRegisteredSource,
+            startSourceImport,
+            syncSource,
+            cancelSourceJob,
+            controlSourceJob,
+            forgetSource,
         };
     },
     template: TEMPLATE,

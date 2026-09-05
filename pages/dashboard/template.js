@@ -16,6 +16,9 @@ export const TEMPLATE = `
 <datalist id="magpie-work-list">
     <option v-for="item in works" :key="item.key" :value="item.key"></option>
 </datalist>
+<datalist id="magpie-character-list">
+    <option v-for="item in characters" :key="item.key" :value="item.key"></option>
+</datalist>
 <header class="codex-header">
     <div class="crt-boot" aria-hidden="true">
         <span>THIEF-OS UNIFIED OPERATING SYSTEM</span>
@@ -293,6 +296,14 @@ export const TEMPLATE = `
                             </svg>
                             {{ t('pages.dashboard.actions.missing_desc', '识别失败') }}
                             <span v-if="stats.no_desc > 0" class="md-badge">{{ stats.no_desc }}</span>
+                        </button>
+                        <button @click="openSourceModal" class="codex-btn"
+                            :title="t('pages.dashboard.sources.tip', '从压缩包、GitHub 仓库或 HTTP 目录整份导入别人做好的表情包')">
+                            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M8 12h8m-4-4v8M5 19a4 4 0 010-8 7 7 0 0113.8 1.6A3.5 3.5 0 0118.5 19H5z" />
+                            </svg>
+                            {{ t('pages.dashboard.actions.sources', '外部源') }}
                         </button>
                         <button @click="runStorageCleanup" class="codex-btn">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1952,6 +1963,304 @@ export const TEMPLATE = `
                 class="codex-btn primary">
                 {{ t('pages.dashboard.missing_desc.batch', '批量重新识别这 {n} 张').replace('{n}', missingDescRemaining) }}
             </button>
+        </div>
+    </div>
+</div>
+
+<div v-if="sourceOpen" class="modal-overlay" data-modal-guard="source"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeSourceModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
+    <div class="modal-panel modal-lg">
+        <div class="modal-panel-corner-bl"></div>
+        <div class="modal-panel-corner-br"></div>
+
+        <div class="modal-header">
+            <h2>{{ t('pages.dashboard.sources.title', '外部表情包源') }}</h2>
+            <button @click="closeSourceModal" class="modal-close">
+                <svg style="width:20px;height:20px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="modal-content">
+            <div class="modal-pad" style="width:100%">
+                <p class="hint-text" style="margin:0 0 6px">
+                    {{ t('pages.dashboard.sources.intro', '整份导入别人做好的表情包：先预检，看清有多少张、占多大、分了哪些类，确认后才写库。导入不会调用视觉模型，直接沿用包里自带的描述和标签，缺描述的可以事后用「识别失败」批量补。') }}
+                </p>
+                <p class="hint-text" style="margin:0 0 14px;opacity:.85">
+                    {{ t('pages.dashboard.sources.safety', '安全说明：压缩包在解压前会检查体积、张数与解压后总大小，路径穿越和超大图会被拒；外部源导入的表情包不参与容量淘汰，不会被自动清理挤掉。') }}
+                </p>
+
+                <div v-if="sourceDefaults.enabled === false" class="md-empty is-error">
+                    {{ t('pages.dashboard.sources.disabled', '外部源功能当前在配置里是关闭状态，打开「启用外部表情包源」后再来。') }}
+                </div>
+
+                <div class="source-input-grid">
+                    <div class="source-card">
+                        <div class="source-card-title">{{ t('pages.dashboard.sources.local_title', '本地压缩包') }}</div>
+                        <p class="hint-text">{{ t('pages.dashboard.sources.local_hint', '选一个 .zip 或 .meme-pack，上传后立即预检。') }}</p>
+                        <label class="codex-btn" style="width:100%;justify-content:center">
+                            <input type="file" accept=".zip,.meme-pack" style="display:none"
+                                :disabled="Boolean(sourceBusy) || sourceJobActive" @change="handleSourceFile">
+                            {{ sourceFile ? sourceFile.name : t('pages.dashboard.sources.pick_file', '选择压缩包') }}
+                        </label>
+                    </div>
+
+                    <div class="source-card">
+                        <div class="source-card-title">{{ t('pages.dashboard.sources.github_title', 'GitHub 仓库') }}</div>
+                        <p class="hint-text">{{ t('pages.dashboard.sources.github_hint', '填 owner/repo，或直接贴带分支、子目录的仓库链接。') }}</p>
+                        <input v-model="sourceForm.github" type="text" class="codex-input"
+                            :placeholder="t('pages.dashboard.sources.github_placeholder', 'owner/repo')"
+                            :disabled="Boolean(sourceBusy) || sourceJobActive">
+                        <button type="button" class="codex-btn" style="width:100%;justify-content:center"
+                            :disabled="Boolean(sourceBusy) || sourceJobActive" @click="inspectGitHubSource">
+                            {{ t('pages.dashboard.sources.inspect', '预检') }}
+                        </button>
+                    </div>
+
+                    <div class="source-card">
+                        <div class="source-card-title">{{ t('pages.dashboard.sources.http_title', 'HTTP 目录') }}</div>
+                        <p class="hint-text">{{ t('pages.dashboard.sources.http_hint', '一个返回表情包清单 JSON 的 HTTPS 地址。默认只允许 HTTPS。') }}</p>
+                        <input v-model="sourceForm.endpoint" type="text" class="codex-input"
+                            placeholder="https://example.com/memes.json"
+                            :disabled="Boolean(sourceBusy) || sourceJobActive">
+                        <button type="button" class="codex-btn" style="width:100%;justify-content:center"
+                            :disabled="Boolean(sourceBusy) || sourceJobActive" @click="inspectExternalApi">
+                            {{ t('pages.dashboard.sources.inspect', '预检') }}
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="sourceBusy === 'upload'" class="md-empty">{{ t('pages.dashboard.sources.uploading', '正在上传并读取清单…') }}</div>
+                <div v-else-if="sourceBusy === 'inspect'" class="md-empty">{{ t('pages.dashboard.sources.inspecting', '正在读取清单…') }}</div>
+                <div v-if="sourceError" class="md-empty is-error">{{ sourceError }}</div>
+
+                <div v-if="sourceInspection && !sourceJob" class="source-inspect">
+                    <div class="batch-stat-grid">
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.pack_name', '名称') }}</span>
+                            <span class="batch-stat-v">{{ sourceInspection.name || '—' }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.item_count', '张数') }}</span>
+                            <span class="batch-stat-v">{{ sourceInspection.item_count || 0 }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.total_bytes', '体积') }}</span>
+                            <span class="batch-stat-v">{{ formatBytes(sourceInspection.total_bytes || 0) }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.category_count', '分类数') }}</span>
+                            <span class="batch-stat-v">{{ (sourceInspection.categories || []).length }}</span>
+                        </div>
+                    </div>
+
+                    <p v-if="sourceInspection.manifest && (sourceInspection.manifest.license || sourceInspection.manifest.attribution)"
+                        class="hint-text source-license">
+                        {{ t('pages.dashboard.sources.license', '作者声明') }}:
+                        <span v-if="sourceInspection.manifest.license">{{ sourceInspection.manifest.license }}</span>
+                        <span v-if="sourceInspection.manifest.attribution"> · {{ sourceInspection.manifest.attribution }}</span>
+                    </p>
+
+                    <p v-if="sourceInspection.capacity && sourceInspection.capacity.would_exceed_limit" class="hint-text source-warn">
+                        {{ t('pages.dashboard.sources.over_capacity', '导完会超过「最大表情包数量」上限（现有 {current} 张，上限 {limit} 张）。外部源的图不会被自动清理，但普通表情包可能被挤掉，建议先调高上限。').replace('{current}', sourceInspection.capacity.current).replace('{limit}', sourceInspection.capacity.configured_limit) }}
+                    </p>
+
+                    <ul v-if="(sourceInspection.warnings || []).length" class="source-warn-list">
+                        <li v-for="(warn, idx) in sourceInspection.warnings" :key="'sw' + idx">{{ warn }}</li>
+                    </ul>
+
+                    <div v-if="(sourceInspection.categories || []).length" class="source-map-block">
+                        <div class="source-card-title">{{ t('pages.dashboard.sources.category_map', '分类对应') }}</div>
+                        <p class="hint-text">{{ t('pages.dashboard.sources.category_map_hint', '左边是包里的分类名，右边选它在本地对应哪一类。留「自动」就交给插件按名字和近义词猜，猜不中会落到兜底分类。') }}</p>
+                        <div class="source-map-grid">
+                            <div v-for="name in sourceInspection.categories" :key="'sm' + name" class="source-map-row">
+                                <span class="md-chip">{{ name }}</span>
+                                <select v-model="sourceCategoryMap[name]" class="codex-input">
+                                    <option value="">{{ t('pages.dashboard.sources.map_auto', '自动') }}</option>
+                                    <option v-for="cat in categories" :key="'smc' + name + cat.key" :value="cat.key">{{ cat.name }}</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="source-options">
+                        <label class="source-check">
+                            <input type="checkbox" v-model="sourceForm.review" :disabled="sourceDefaults.review_forced">
+                            <span>{{ t('pages.dashboard.sources.review', '先进待审核，不直接入库') }}</span>
+                        </label>
+                        <p v-if="sourceDefaults.review_forced" class="hint-text">
+                            {{ t('pages.dashboard.sources.review_forced', '配置里开了内容过滤，外部源一律先进待审核，这里不能关。') }}
+                        </p>
+
+                        <label class="source-field">
+                            <span>{{ t('pages.dashboard.sources.scope', '可见范围') }}</span>
+                            <select v-model="sourceForm.scope_mode" class="codex-input">
+                                <option value="public">{{ t('pages.dashboard.scope.public', 'Public') }}</option>
+                                <option value="local">{{ t('pages.dashboard.scope.local', 'Local only') }}</option>
+                            </select>
+                        </label>
+                        <label v-if="sourceForm.scope_mode === 'local'" class="source-field">
+                            <span>{{ t('pages.dashboard.sources.origin_target', '限定会话') }}</span>
+                            <input v-model="sourceForm.origin_target" type="text" class="codex-input"
+                                :placeholder="t('pages.dashboard.sources.origin_placeholder', '例如 group:123456，留空则只在导入处可见')">
+                        </label>
+
+                        <label class="source-check">
+                            <input type="checkbox" v-model="sourceForm.assign_character">
+                            <span>{{ t('pages.dashboard.sources.assign_character', '整批标成同一个角色') }}</span>
+                        </label>
+                        <label v-if="sourceForm.assign_character" class="source-field">
+                            <span>{{ t('pages.dashboard.sources.character', '角色') }}</span>
+                            <input v-model="sourceForm.character" type="text" class="codex-input"
+                                list="magpie-character-list"
+                                :placeholder="t('pages.dashboard.sources.character_placeholder', '填已有角色，或写一个新名字自动登记')">
+                        </label>
+                        <p v-else class="hint-text">
+                            {{ t('pages.dashboard.sources.character_hint', '不勾选时，只有包里写的角色名恰好能对上你已登记的角色才会写入，对不上的原文留在来源信息里。') }}
+                        </p>
+                    </div>
+
+                    <div v-if="(sourceInspection.items || []).length" class="source-preview">
+                        <div class="source-card-title">{{ t('pages.dashboard.sources.preview', '内容抽样') }}</div>
+                        <ul>
+                            <li v-for="(item, idx) in sourceInspection.items" :key="'si' + idx">
+                                <span class="md-chip">{{ item.category || '—' }}</span>
+                                <span class="source-preview-name">{{ item.filename || item.id }}</span>
+                                <span class="source-preview-desc">{{ item.description || t('pages.dashboard.messages.no_description', 'No description') }}</span>
+                            </li>
+                        </ul>
+                        <p v-if="sourceInspection.truncated" class="hint-text">
+                            {{ t('pages.dashboard.sources.truncated', '清单很长，这里只抽了前几条看看。') }}
+                        </p>
+                    </div>
+
+                    <div class="batch-progress-actions">
+                        <button type="button" class="codex-btn primary" style="flex:1"
+                            :disabled="Boolean(sourceBusy) || !(sourceInspection.item_count > 0)" @click="startSourceImport">
+                            {{ t('pages.dashboard.sources.start_import', '开始导入（{n} 张）').replace('{n}', sourceInspection.item_count || 0) }}
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="sourceJob" class="source-progress">
+                    <div class="batch-progress-meta">
+                        <span>{{ sourceStatusLabel }}</span>
+                        <span>{{ sourceJob.processed || 0 }} / {{ sourceJob.total || 0 }}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" :class="{ paused: sourceJob.paused }"
+                            :style="{ width: sourceProgressPercent + '%' }"></div>
+                    </div>
+                    <div class="batch-current-file" v-if="sourceJob.current_file">
+                        <span class="batch-current-label">{{ t('pages.dashboard.batch.current_file', 'Current file') }}</span>
+                        <span class="batch-current-name">{{ sourceJob.current_file }}</span>
+                    </div>
+                    <div class="batch-stat-grid">
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.batch.phase', 'Phase') }}</span>
+                            <span class="batch-stat-v">{{ sourcePhaseText }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.imported', '已入库') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.imported || 0 }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.to_review', '进待审核') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.pending || 0 }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.duplicates', '重复跳过') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.duplicates || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" :class="{ warn: (sourceJob.failed || 0) > 0 }">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.batch.failed_count', 'Failed') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.failed || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="sourceEtaText">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.batch.eta', 'ETA') }}</span>
+                            <span class="batch-stat-v">{{ sourceEtaText }}</span>
+                        </div>
+                    </div>
+
+                    <div v-if="sourceJobErrors.length" class="batch-failure-list">
+                        <div class="batch-failure-head">
+                            {{ t('pages.dashboard.batch.failure_list', 'Failed items') }} ({{ sourceJobErrors.length }})
+                        </div>
+                        <ul>
+                            <li v-for="(item, idx) in sourceJobErrors" :key="'sje' + idx">
+                                <span class="batch-failure-name">{{ item.id || item.filename || '-' }}</span>
+                                <span class="batch-failure-reason">{{ item.error || item }}</span>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="batch-progress-actions">
+                        <template v-if="sourceJob.status === 'paused'">
+                            <button type="button" class="codex-btn primary" style="flex:1" :disabled="Boolean(sourceBusy)"
+                                @click="controlSourceJob('resume')">{{ t('pages.dashboard.batch.resume', 'Resume') }}</button>
+                            <button type="button" class="codex-btn danger" style="flex:1" :disabled="Boolean(sourceBusy)"
+                                @click="cancelSourceJob">{{ t('pages.dashboard.batch.cancel', 'Stop') }}</button>
+                        </template>
+                        <template v-else-if="sourceJobActive">
+                            <button type="button" class="codex-btn" style="flex:1" :disabled="Boolean(sourceBusy)"
+                                @click="controlSourceJob('pause')">{{ t('pages.dashboard.batch.pause', 'Pause') }}</button>
+                            <button type="button" class="codex-btn danger" style="flex:1" :disabled="Boolean(sourceBusy)"
+                                @click="cancelSourceJob">{{ t('pages.dashboard.batch.cancel', 'Stop') }}</button>
+                        </template>
+                        <template v-else>
+                            <button type="button" class="codex-btn" style="flex:1" @click="sourceJob = null">
+                                {{ t('pages.dashboard.sources.import_another', '再导一份') }}
+                            </button>
+                            <button type="button" class="codex-btn primary" style="flex:1" @click="closeSourceModal">
+                                {{ t('pages.dashboard.actions.done', 'Done') }}
+                            </button>
+                        </template>
+                    </div>
+                </div>
+
+                <div class="source-registry">
+                    <div class="source-card-title">{{ t('pages.dashboard.sources.registry', '已登记的源') }}</div>
+                    <div v-if="sourceLoading" class="md-empty">{{ t('pages.dashboard.sources.loading', '正在读取…') }}</div>
+                    <div v-else-if="sourceList.length === 0" class="md-empty">
+                        {{ t('pages.dashboard.sources.registry_empty', '还没有登记过的源。导入成功后会自动记下来，之后可以一键同步增量。') }}
+                    </div>
+                    <div v-else class="source-list">
+                        <div v-for="source in sourceList" :key="source.source_id" class="source-row">
+                            <div class="source-row-body">
+                                <div class="source-row-title">
+                                    {{ source.name || source.source_id }}
+                                    <span class="md-chip">{{ sourceTypeLabel(source.source_type) }}</span>
+                                    <span v-if="source.discovered" class="md-chip warn">{{ t('pages.dashboard.sources.discovered', '自动发现') }}</span>
+                                    <span v-else-if="source.enabled === false" class="md-chip warn">{{ t('pages.dashboard.sources.paused_source', '已停用') }}</span>
+                                </div>
+                                <div class="source-row-meta">
+                                    <span>{{ t('pages.dashboard.sources.item_count', '张数') }}: {{ source.item_count || 0 }}</span>
+                                    <span class="source-row-endpoint">{{ source.endpoint || '—' }}</span>
+                                </div>
+                            </div>
+                            <div class="source-row-actions">
+                                <button type="button" class="md-btn" :disabled="Boolean(sourceBusy) || sourceJobActive"
+                                    @click="inspectRegisteredSource(source)">{{ t('pages.dashboard.sources.inspect', '预检') }}</button>
+                                <button type="button" class="md-btn primary" :disabled="Boolean(sourceBusy) || sourceJobActive"
+                                    @click="syncSource(source)">
+                                    <span v-if="source.discovered">{{ t('pages.dashboard.sources.import', '导入') }}</span>
+                                    <span v-else>{{ t('pages.dashboard.sources.sync', '同步') }}</span>
+                                </button>
+                                <button v-if="!source.discovered" type="button" class="md-btn"
+                                    :disabled="Boolean(sourceBusy) || sourceJobActive" @click="forgetSource(source)">
+                                    {{ t('pages.dashboard.sources.forget', '移除') }}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button type="button" @click="closeSourceModal" class="codex-btn">{{ t('pages.dashboard.actions.close', 'Close') }}</button>
         </div>
     </div>
 </div>

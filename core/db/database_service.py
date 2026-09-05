@@ -28,6 +28,10 @@ class DatabaseService:
 
     # 表结构版本，用于迁移检测
     SCHEMA_VERSION = 8
+    # 外部源相关的表/列是纯增量的（只加表、只加列，不动既有数据），
+    # 因此单独用 external_schema_version 记录，避免为了它去顶 SCHEMA_VERSION、
+    # 触发老库重跑一遍 v2~v8 的迁移。
+    EXTERNAL_SCHEMA_VERSION = 1
 
     def __init__(self, db_path: str | Path | None = None):
         """初始化数据库服务。
@@ -140,6 +144,80 @@ class DatabaseService:
                 if current_version < 8:
                     logger.info("[DB] migration: emoji_embedding_state table ready")
 
+            # 外部源注册表与 retention_class 列：幂等，放在版本判断之外，
+            # 这样已经是最新 SCHEMA_VERSION 的库也能补齐
+            self._ensure_external_schema(conn)
+
+    def _ensure_external_schema(self, conn: sqlite3.Connection) -> None:
+        """补齐外部表情包源用到的表与列（纯增量，可重复执行）。
+
+        - emoji / emoji_pending 增加 retention_class：native=自己收的，
+          external=从外部源导入的托管副本，pinned=手动钉住不参与自动清理
+        - meme_source：注册过的外部源
+        - meme_source_item：外部源条目与本地文件的对应关系（便于增量同步与去重）
+        """
+        for table in ("emoji", "emoji_pending"):
+            try:
+                conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN retention_class TEXT DEFAULT 'native'"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e).lower():
+                    raise
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_emoji_retention ON emoji(retention_class)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_retention "
+            "ON emoji_pending(retention_class)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meme_source (
+                source_id TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                endpoint TEXT,
+                config_json TEXT,
+                enabled INTEGER DEFAULT 1,
+                status TEXT DEFAULT 'idle',
+                last_error TEXT,
+                item_count INTEGER DEFAULT 0,
+                last_sync_at INTEGER,
+                created_at INTEGER DEFAULT 0,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meme_source_item (
+                source_id TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                path TEXT,
+                source_category TEXT,
+                source_url TEXT,
+                license TEXT,
+                attribution TEXT,
+                remote_hash TEXT,
+                metadata_json TEXT,
+                first_seen_at INTEGER DEFAULT 0,
+                last_seen_at INTEGER DEFAULT 0,
+                stale INTEGER DEFAULT 0,
+                PRIMARY KEY (source_id, external_id),
+                FOREIGN KEY (source_id) REFERENCES meme_source(source_id) ON DELETE CASCADE,
+                FOREIGN KEY (path) REFERENCES emoji(path) ON DELETE SET NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source_item_path ON meme_source_item(path)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_source_item_source ON meme_source_item(source_id)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) "
+            "VALUES ('external_schema_version', ?)",
+            (str(self.EXTERNAL_SCHEMA_VERSION),),
+        )
+
     def _create_tables(self, conn: sqlite3.Connection) -> None:
         """创建所有数据表。"""
         # 主表：表情包元数据（v5 起含 reviewed_at 与图片元数据列）
@@ -168,7 +246,8 @@ class DatabaseService:
                 overlay_text TEXT,
                 emotions_json TEXT,
                 character TEXT,
-                work TEXT
+                work TEXT,
+                retention_class TEXT DEFAULT 'native'
             )
         """)
 
@@ -226,7 +305,8 @@ class DatabaseService:
                 overlay_text TEXT,
                 emotions_json TEXT,
                 character TEXT,
-                work TEXT
+                work TEXT,
+                retention_class TEXT DEFAULT 'native'
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pending_created ON emoji_pending(created_at)")
@@ -313,6 +393,11 @@ class DatabaseService:
     _WORK_COLUMNS: tuple[tuple[str, str], ...] = (
         ("work", "TEXT"),
     )
+    # 外部源新增：保留策略。native=本地收集，external=外部源托管副本，
+    # pinned=手动钉住。external/pinned 不参与容量上限自动清理。
+    _RETENTION_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("retention_class", "TEXT"),
+    )
     # 元数据标量字段名（供 INSERT/UPDATE 透传）
     _EMOJI_SCALAR_COLUMNS: frozenset[str] = frozenset(
         {
@@ -331,6 +416,7 @@ class DatabaseService:
             *(col for col, _ in _META_COLUMNS),
             *(col for col, _ in _SEMANTIC_COLUMNS),
             *(col for col, _ in _WORK_COLUMNS),
+            *(col for col, _ in _RETENTION_COLUMNS),
         }
     )
     # INSERT 语句用列清单（顺序与 _INSERT_EMOJI_SQL 的 VALUES 占位对应）
@@ -351,6 +437,7 @@ class DatabaseService:
         *(col for col, _ in _META_COLUMNS),
         *(col for col, _ in _SEMANTIC_COLUMNS),
         *(col for col, _ in _WORK_COLUMNS),
+        *(col for col, _ in _RETENTION_COLUMNS),
     )
     _INSERT_EMOJI_SQL: str = (
         "INSERT OR REPLACE INTO emoji ("
@@ -376,6 +463,7 @@ class DatabaseService:
         *(col for col, _ in _META_COLUMNS),
         *(col for col, _ in _SEMANTIC_COLUMNS),
         *(col for col, _ in _WORK_COLUMNS),
+        *(col for col, _ in _RETENTION_COLUMNS),
     )
 
     def _migrate_v5(self, conn: sqlite3.Connection) -> None:
@@ -597,6 +685,8 @@ class DatabaseService:
                 values.append(created_at)
             elif col in {"use_count", "last_used_at", "is_favorite"}:
                 values.append(0)
+            elif col == "retention_class":
+                values.append("native")
             else:
                 values.append(None)
         return tuple(values)
@@ -787,6 +877,340 @@ class DatabaseService:
                 "SELECT path, phash FROM emoji WHERE phash IS NOT NULL AND phash != ''"
             ).fetchall()
             return {r["path"]: r["phash"] for r in rows}
+
+    # ── 外部表情包源注册表 ──────────────────────────────────────────
+    # meme_source 记录"从哪儿来"，meme_source_item 记录"哪条对应本地哪个文件"。
+    # 两张表都是增量的，删掉也只是丢失溯源信息，不影响表情包本身可用。
+
+    @staticmethod
+    def _decode_json_object(value: Any) -> dict[str, Any]:
+        """把数据库里的 JSON 文本安全地解析成 dict，坏数据一律当空 dict。"""
+        if isinstance(value, dict):
+            return dict(value)
+        try:
+            parsed = json.loads(str(value or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    def get_sources(self) -> list[dict[str, Any]]:
+        """列出已注册的外部源；config_json 会被解析成 config 字典。"""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM meme_source ORDER BY updated_at DESC, source_id ASC"
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                item["enabled"] = bool(item.get("enabled", 1))
+                item["config"] = self._decode_json_object(item.pop("config_json", None))
+                result.append(item)
+            return result
+
+    async def upsert_source(self, source: dict[str, Any]) -> bool:
+        """写入/更新一个外部源记录（按 source_id 覆盖）。"""
+        if not isinstance(source, dict) or not str(source.get("source_id") or "").strip():
+            return False
+        async with self._write_lock:
+            return await asyncio.to_thread(self._upsert_source_sync, source)
+
+    def _upsert_source_sync(self, source: dict[str, Any]) -> bool:
+        now = int(time.time())
+        source_id = str(source.get("source_id") or "").strip()[:190]
+        source_type = str(source.get("source_type") or "").strip()[:40]
+        name = str(source.get("name") or source_id).strip()[:160]
+        endpoint = str(source.get("endpoint") or "").strip()[:2000]
+        config = source.get("config", source.get("config_json", {}))
+        config_json = (
+            str(config)
+            if isinstance(config, str)
+            else json.dumps(config if isinstance(config, dict) else {}, ensure_ascii=False)
+        )
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO meme_source
+                    (source_id, source_type, name, endpoint, config_json, enabled,
+                     status, last_error, item_count, last_sync_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                    source_type=excluded.source_type,
+                    name=excluded.name,
+                    endpoint=excluded.endpoint,
+                    config_json=excluded.config_json,
+                    enabled=excluded.enabled,
+                    status=excluded.status,
+                    last_error=excluded.last_error,
+                    item_count=excluded.item_count,
+                    last_sync_at=COALESCE(excluded.last_sync_at, meme_source.last_sync_at),
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    source_id,
+                    source_type or "unknown",
+                    name or source_id,
+                    endpoint,
+                    config_json,
+                    1 if bool(source.get("enabled", True)) else 0,
+                    str(source.get("status") or "idle")[:40],
+                    str(source.get("last_error") or "")[:1000] or None,
+                    max(0, int(source.get("item_count") or 0)),
+                    source.get("last_sync_at"),
+                    int(source.get("created_at") or now),
+                    now,
+                ),
+            )
+        return True
+
+    async def update_source_status(
+        self,
+        source_id: str,
+        *,
+        status: str,
+        last_error: str = "",
+        item_count: int | None = None,
+        last_sync_at: int | None = None,
+    ) -> bool:
+        """只更新外部源的运行状态字段，不动配置。"""
+        if not source_id:
+            return False
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._update_source_status_sync,
+                source_id,
+                status,
+                last_error,
+                item_count,
+                last_sync_at,
+            )
+
+    def _update_source_status_sync(
+        self,
+        source_id: str,
+        status: str,
+        last_error: str,
+        item_count: int | None,
+        last_sync_at: int | None,
+    ) -> bool:
+        assignments = ["status = ?", "last_error = ?", "updated_at = ?"]
+        values: list[Any] = [
+            str(status or "idle")[:40],
+            str(last_error or "")[:1000] or None,
+            int(time.time()),
+        ]
+        if item_count is not None:
+            assignments.append("item_count = ?")
+            values.append(max(0, int(item_count)))
+        if last_sync_at is not None:
+            assignments.append("last_sync_at = ?")
+            values.append(int(last_sync_at))
+        values.append(source_id)
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                f"UPDATE meme_source SET {', '.join(assignments)} WHERE source_id = ?",
+                values,
+            )
+            return bool(cur.rowcount)
+
+    async def delete_source(self, source_id: str) -> bool:
+        """忘掉一个外部源。已导入的表情包不受影响，只丢溯源关系。"""
+        if not source_id:
+            return False
+        async with self._write_lock:
+            return await asyncio.to_thread(self._delete_source_sync, source_id)
+
+    def _delete_source_sync(self, source_id: str) -> bool:
+        with self._get_connection() as conn:
+            cur = conn.execute("DELETE FROM meme_source WHERE source_id = ?", (source_id,))
+            return bool(cur.rowcount)
+
+    def get_source_item(self, source_id: str, external_id: str) -> dict[str, Any] | None:
+        """查单条外部源条目，用于增量同步时判断"这条是不是导过了"。"""
+        if not source_id or not external_id:
+            return None
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM meme_source_item WHERE source_id = ? AND external_id = ?",
+                (source_id, external_id),
+            ).fetchone()
+            if not row:
+                return None
+            result = dict(row)
+            result["metadata"] = self._decode_json_object(result.pop("metadata_json", None))
+            return result
+
+    async def link_source_item(self, item: dict[str, Any]) -> bool:
+        """记录/刷新一条"外部源条目 → 本地文件"的对应关系。"""
+        if not isinstance(item, dict) or not item.get("source_id") or not item.get("external_id"):
+            return False
+        async with self._write_lock:
+            return await asyncio.to_thread(self._link_source_item_sync, item)
+
+    def _link_source_item_sync(self, item: dict[str, Any]) -> bool:
+        now = int(time.time())
+        metadata = item.get("metadata", item.get("metadata_json", {}))
+        metadata_json = (
+            str(metadata)
+            if isinstance(metadata, str)
+            else json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=False)
+        )
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO meme_source_item
+                    (source_id, external_id, path, source_category, source_url,
+                     license, attribution, remote_hash, metadata_json,
+                     first_seen_at, last_seen_at, stale)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(source_id, external_id) DO UPDATE SET
+                    path=excluded.path,
+                    source_category=excluded.source_category,
+                    source_url=excluded.source_url,
+                    license=excluded.license,
+                    attribution=excluded.attribution,
+                    remote_hash=excluded.remote_hash,
+                    metadata_json=excluded.metadata_json,
+                    last_seen_at=excluded.last_seen_at,
+                    stale=0
+                """,
+                (
+                    str(item.get("source_id"))[:190],
+                    str(item.get("external_id"))[:180],
+                    item.get("path"),
+                    str(item.get("source_category") or "")[:160],
+                    str(item.get("source_url") or "")[:2000],
+                    str(item.get("license") or "")[:160],
+                    str(item.get("attribution") or "")[:500],
+                    str(item.get("remote_hash") or "")[:128],
+                    metadata_json,
+                    int(item.get("first_seen_at") or now),
+                    now,
+                ),
+            )
+        return True
+
+    def get_source_items(self, source_id: str) -> list[dict[str, Any]]:
+        """列出某个外部源下的全部条目。"""
+        if not source_id:
+            return []
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM meme_source_item WHERE source_id = ? ORDER BY external_id",
+                (source_id,),
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                item["metadata"] = self._decode_json_object(item.pop("metadata_json", None))
+                result.append(item)
+            return result
+
+    async def mark_source_items_stale(self, source_id: str) -> int:
+        """把某个源下所有条目标记为待核对（同步开始时用）。"""
+        if not source_id:
+            return 0
+        async with self._write_lock:
+            return await asyncio.to_thread(self._mark_source_items_stale_sync, source_id)
+
+    def _mark_source_items_stale_sync(self, source_id: str) -> int:
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE meme_source_item SET stale = 1 WHERE source_id = ?",
+                (source_id,),
+            )
+            return int(cur.rowcount or 0)
+
+    async def reconcile_source_items(
+        self,
+        source_id: str,
+        seen_external_ids: list[str],
+    ) -> int:
+        """按本次预检到的条目清单对账：只有真的不在清单里的才标记为已失效。
+
+        Returns:
+            本次被标记为失效（上游已删除）的条目数
+        """
+        if not source_id:
+            return 0
+        seen = {str(value)[:180] for value in seen_external_ids if str(value)}
+        async with self._write_lock:
+            return await asyncio.to_thread(self._reconcile_source_items_sync, source_id, seen)
+
+    def _reconcile_source_items_sync(self, source_id: str, seen: set[str]) -> int:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT external_id, stale FROM meme_source_item WHERE source_id = ?",
+                (source_id,),
+            ).fetchall()
+            stale_ids = [row["external_id"] for row in rows if row["external_id"] not in seen]
+            current_ids = [row["external_id"] for row in rows if row["external_id"] in seen]
+            conn.executemany(
+                "UPDATE meme_source_item SET stale = 1 WHERE source_id = ? AND external_id = ?",
+                [(source_id, external_id) for external_id in stale_ids],
+            )
+            conn.executemany(
+                "UPDATE meme_source_item SET stale = 0 WHERE source_id = ? AND external_id = ?",
+                [(source_id, external_id) for external_id in current_ids],
+            )
+            return len(stale_ids)
+
+    def count_stale_source_items(self, source_id: str) -> int:
+        """统计某个源下已失效（上游已删除）的条目数。"""
+        if not source_id:
+            return 0
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM meme_source_item "
+                "WHERE source_id = ? AND stale = 1",
+                (source_id,),
+            ).fetchone()
+            return int(row["cnt"] if row else 0)
+
+    async def promote_source_pending_path(self, pending_path: str, path: str) -> int:
+        """外部源导入的图片过审入库后，把溯源关系从待审路径改指到正式路径。"""
+        if not pending_path or not path:
+            return 0
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self._promote_source_pending_path_sync, pending_path, path
+            )
+
+    def _promote_source_pending_path_sync(self, pending_path: str, path: str) -> int:
+        updated = 0
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT source_id, external_id, metadata_json "
+                "FROM meme_source_item WHERE path IS NULL"
+            ).fetchall()
+            for row in rows:
+                metadata = self._decode_json_object(row["metadata_json"])
+                if str(metadata.get("pending_path") or "") != pending_path:
+                    continue
+                metadata.pop("pending_path", None)
+                cur = conn.execute(
+                    """
+                    UPDATE meme_source_item
+                    SET path = ?, metadata_json = ?, last_seen_at = ?
+                    WHERE source_id = ? AND external_id = ?
+                    """,
+                    (
+                        path,
+                        json.dumps(metadata, ensure_ascii=False),
+                        int(time.time()),
+                        row["source_id"],
+                        row["external_id"],
+                    ),
+                )
+                updated += int(cur.rowcount or 0)
+        return updated
+
+    def count_external(self) -> int:
+        """统计外部源托管的表情包数量（这部分不参与容量上限清理）。"""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM emoji WHERE retention_class = 'external'"
+            ).fetchone()
+            return int(row["cnt"] if row else 0)
 
     def count_total(self) -> int:
         """统计表情包总数。"""
@@ -1014,6 +1438,12 @@ class DatabaseService:
                         """,
                         (new_path, old_path),
                     )
+                # 注意顺序：emoji 行被删掉时 meme_source_item.path 上的
+                # ON DELETE SET NULL 会把外部源关联抹成 NULL，因此先改指向再删旧行
+                conn.execute(
+                    "UPDATE meme_source_item SET path = ? WHERE path = ?",
+                    (new_path, old_path),
+                )
                 conn.execute("DELETE FROM emoji WHERE path = ?", (old_path,))
                 conn.execute("COMMIT")
                 return True
@@ -1331,12 +1761,16 @@ class DatabaseService:
             pending_count = conn.execute(
                 "SELECT COUNT(*) as cnt FROM emoji_pending"
             ).fetchone()["cnt"]
+            external_count = conn.execute(
+                "SELECT COUNT(*) as cnt FROM emoji WHERE retention_class = 'external'"
+            ).fetchone()["cnt"]
 
             return {
                 "total_emojis": total,
                 "total_tags": tags_count,
                 "total_scenes": scenes_count,
                 "pending_count": pending_count,
+                "external_count": external_count,
                 "categories": {r["category"]: r["cnt"] for r in categories},
                 "db_size_bytes": self._db_path.stat().st_size if self._db_path.exists() else 0,
             }
@@ -1524,7 +1958,8 @@ class DatabaseService:
                        e.is_favorite, e.reviewed_at,
                        e.source_url, e.original_name, e.width, e.height,
                        e.format, e.bytes, e.add_method,
-                       e.overlay_text, e.emotions_json, e.character, e.work
+                       e.overlay_text, e.emotions_json, e.character, e.work,
+                       e.retention_class
                 FROM emoji e {where_sql}
                 ORDER BY {order_sql}
                 LIMIT ? OFFSET ?
@@ -1616,6 +2051,7 @@ class DatabaseService:
                         self._emotions_json_from_meta(meta),
                         str(meta.get("character") or "").strip(),
                         str(meta.get("work") or "").strip(),
+                        str(meta.get("retention_class") or "native"),
                     ),
                 )
                 path = str(meta.get("path") or "")
@@ -1695,7 +2131,8 @@ class DatabaseService:
                        p.created_at, p.tags_text, p.scenes_text,
                        p.source_url, p.original_name, p.width, p.height,
                        p.format, p.bytes, p.add_method,
-                       p.overlay_text, p.emotions_json, p.character, p.work
+                       p.overlay_text, p.emotions_json, p.character, p.work,
+                       p.retention_class
                 FROM emoji_pending p {where_sql}
                 ORDER BY p.created_at DESC, p.id DESC
                 LIMIT ? OFFSET ?
@@ -1767,7 +2204,8 @@ class DatabaseService:
             return None
         with self._get_connection() as conn:
             row = conn.execute(
-                "SELECT path, hash, phash, category FROM emoji_pending WHERE hash = ? LIMIT 1",
+                "SELECT id, path, hash, phash, category, character "
+                "FROM emoji_pending WHERE hash = ? LIMIT 1",
                 (hash_val,),
             ).fetchone()
             return dict(row) if row else None

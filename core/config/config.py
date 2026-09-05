@@ -203,6 +203,17 @@ class PluginConfig(BaseModel):
     # WebUI 默认主题：auto/dark/light/pixel/terminal。页面内切换后写入 KV，优先于该项。
     webui_theme: str = "auto"
 
+    # === 外部表情包源（Meme Pack 压缩包 / GitHub 仓库 / JSON 目录接口）===
+    # 这些上限直接决定一次导入能吃掉多少磁盘和内存，默认值按"小机器也扛得住"设定。
+    external_sources_enabled: bool = True  # 总开关；关掉后外部源相关接口一律拒绝
+    external_source_allow_http: bool = False  # 是否允许明文 http:// 源（默认只允许 https）
+    external_source_default_review: bool = False  # 导入的图默认先进待审核池
+    external_source_max_items: int = 2000  # 单个源最多读取多少张图
+    external_source_max_image_bytes: int = 33_554_432  # 单张图字节上限（32 MiB）
+    external_source_max_archive_bytes: int = 1_073_741_824  # 压缩包体积上限（1 GiB）
+    external_source_max_uncompressed_bytes: int = 4_294_967_296  # 解压后总字节上限（4 GiB）
+    external_source_max_pixels: int = 40_000_000  # 单张图像素上限，挡解压炸弹
+
     # === 内部状态 (不作为 Pydantic 字段) ===
     # 使用 PrivateAttr 或在 __init__ 中设置且不包含在 __annotations__ 中
     # 但 Pydantic v1/v2 处理方式不同。这里使用 __private_attributes__ 机制或直接忽略

@@ -439,6 +439,64 @@
     ],
     "hint": "页面尚未保存主题选择时使用该默认值；在「表情管理」中切换后，将持续使用页面保存的主题。"
   },
+  "_external_source_section": {
+    "description": "=== 外部表情包源 ===",
+    "type": "text",
+    "invisible": true
+  },
+  "external_sources_enabled": {
+    "description": "启用外部表情包源",
+    "type": "bool",
+    "default": true,
+    "hint": "允许在「表情管理」里从表情包压缩包、GitHub 仓库或 JSON 目录接口批量导入。关闭后相关入口一律拒绝请求，已导入的表情不受影响。"
+  },
+  "external_source_allow_http": {
+    "description": "允许明文 HTTP 源",
+    "type": "bool",
+    "default": false,
+    "hint": "默认只允许 https:// 与本地文件。仅在导入自建局域网服务时才需要打开，明文连接可被中途篡改。"
+  },
+  "external_source_default_review": {
+    "description": "导入的图默认进待审核池",
+    "type": "bool",
+    "default": false,
+    "hint": "打开后外部源导入的图会先进「待审核」，人工通过才入库。导入弹窗里也能对单次导入单独勾选。"
+  },
+  "external_source_max_items": {
+    "description": "单个源最多导入张数",
+    "type": "int",
+    "default": 2000,
+    "slider": {
+      "min": 1,
+      "max": 20000,
+      "step": 100
+    },
+    "hint": "超出部分会被截断并在预检结果里提示。"
+  },
+  "external_source_max_image_bytes": {
+    "description": "单张图字节上限",
+    "type": "int",
+    "default": 33554432,
+    "hint": "默认 33554432 字节（32 MiB）。超过的图会被跳过并记入失败列表。"
+  },
+  "external_source_max_archive_bytes": {
+    "description": "压缩包体积上限",
+    "type": "int",
+    "default": 1073741824,
+    "hint": "默认 1073741824 字节（1 GiB），指压缩包本身的大小。"
+  },
+  "external_source_max_uncompressed_bytes": {
+    "description": "解压后总字节上限",
+    "type": "int",
+    "default": 4294967296,
+    "hint": "默认 4294967296 字节（4 GiB）。用来挡「解压炸弹」：几 MB 的包解开后撑爆磁盘。"
+  },
+  "external_source_max_pixels": {
+    "description": "单张图像素上限",
+    "type": "int",
+    "default": 40000000,
+    "hint": "默认 40000000 像素（约 6300x6300）。挡住那种尺寸巨大、解码时会吃光内存的图片。"
+  },
   "_smart_section": {
     "description": "=== 智能选择：文字距离融合权重预设 ===",
     "type": "text",

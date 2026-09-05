@@ -256,6 +256,42 @@
         "终端"
       ]
     },
+    "_external_source_section": {
+      "description": "=== 外部表情包源 ===",
+      "hint": ""
+    },
+    "external_sources_enabled": {
+      "description": "启用外部表情包源",
+      "hint": "允许在「表情管理」里从表情包压缩包、GitHub 仓库或 JSON 目录接口批量导入。关闭后相关入口一律拒绝请求，已导入的表情不受影响。"
+    },
+    "external_source_allow_http": {
+      "description": "允许明文 HTTP 源",
+      "hint": "默认只允许 https:// 与本地文件。仅在导入自建局域网服务时才需要打开，明文连接可被中途篡改。"
+    },
+    "external_source_default_review": {
+      "description": "导入的图默认进待审核池",
+      "hint": "打开后外部源导入的图会先进「待审核」，人工通过才入库。导入弹窗里也能对单次导入单独勾选。"
+    },
+    "external_source_max_items": {
+      "description": "单个源最多导入张数",
+      "hint": "超出部分会被截断并在预检结果里提示。"
+    },
+    "external_source_max_image_bytes": {
+      "description": "单张图字节上限",
+      "hint": "默认 33554432 字节（32 MiB）。超过的图会被跳过并记入失败列表。"
+    },
+    "external_source_max_archive_bytes": {
+      "description": "压缩包体积上限",
+      "hint": "默认 1073741824 字节（1 GiB），指压缩包本身的大小。"
+    },
+    "external_source_max_uncompressed_bytes": {
+      "description": "解压后总字节上限",
+      "hint": "默认 4294967296 字节（4 GiB）。用来挡「解压炸弹」：几 MB 的包解开后撑爆磁盘。"
+    },
+    "external_source_max_pixels": {
+      "description": "单张图像素上限",
+      "hint": "默认 40000000 像素（约 6300x6300）。挡住那种尺寸巨大、解码时会吃光内存的图片。"
+    },
     "_smart_section": {
       "description": "=== 智能选择：文字距离融合权重预设 ===",
       "hint": ""
@@ -360,7 +396,8 @@
         "open_navigation": "打开导航",
         "assign_work": "填写作品",
         "reanalyze": "重新识别",
-        "missing_desc": "识别失败"
+        "missing_desc": "识别失败",
+        "sources": "外部源"
       },
       "empty": {
         "library_title": "暂无表情包",
@@ -665,6 +702,85 @@
         "truncated": "待审核池共 {total} 条，本次只检查了最新的 {cap} 条。把这批处理完再打开一次，会接着往下检查。",
         "batch": "批量重新识别这 {n} 张",
         "load_failed": "清单没读出来，可能是后端或网络出了问题。"
+      },
+      "sources": {
+        "title": "外部表情包源",
+        "tip": "从压缩包、GitHub 仓库或 HTTP 目录整份导入别人做好的表情包",
+        "intro": "整份导入别人做好的表情包：先预检，看清有多少张、占多大、分了哪些类，确认后才写库。导入不会调用视觉模型，直接沿用包里自带的描述和标签，缺描述的可以事后用「识别失败」批量补。",
+        "safety": "安全说明：压缩包在解压前会检查体积、张数与解压后总大小，路径穿越和超大图会被拒；外部源导入的表情包不参与容量淘汰，不会被自动清理挤掉。",
+        "disabled": "外部源功能当前在配置里是关闭状态，打开「启用外部表情包源」后再来。",
+        "local_title": "本地压缩包",
+        "local_hint": "选一个 .zip 或 .meme-pack，上传后立即预检。",
+        "pick_file": "选择压缩包",
+        "github_title": "GitHub 仓库",
+        "github_hint": "填 owner/repo，或直接贴带分支、子目录的仓库链接。",
+        "github_placeholder": "owner/repo",
+        "http_title": "HTTP 目录",
+        "http_hint": "一个返回表情包清单 JSON 的 HTTPS 地址。默认只允许 HTTPS。",
+        "inspect": "预检",
+        "uploading": "正在上传并读取清单…",
+        "inspecting": "正在读取清单…",
+        "pack_name": "名称",
+        "item_count": "张数",
+        "total_bytes": "体积",
+        "category_count": "分类数",
+        "license": "作者声明",
+        "over_capacity": "导完会超过「最大表情包数量」上限（现有 {current} 张，上限 {limit} 张）。外部源的图不会被自动清理，但普通表情包可能被挤掉，建议先调高上限。",
+        "category_map": "分类对应",
+        "category_map_hint": "左边是包里的分类名，右边选它在本地对应哪一类。留「自动」就交给插件按名字和近义词猜，猜不中会落到兜底分类。",
+        "map_auto": "自动",
+        "review": "先进待审核，不直接入库",
+        "review_forced": "配置里开了内容过滤，外部源一律先进待审核，这里不能关。",
+        "scope": "可见范围",
+        "origin_target": "限定会话",
+        "origin_placeholder": "例如 group:123456，留空则只在导入处可见",
+        "assign_character": "整批标成同一个角色",
+        "character": "角色",
+        "character_placeholder": "填已有角色，或写一个新名字自动登记",
+        "character_hint": "不勾选时，只有包里写的角色名恰好能对上你已登记的角色才会写入，对不上的原文留在来源信息里。",
+        "preview": "内容抽样",
+        "truncated": "清单很长，这里只抽了前几条看看。",
+        "start_import": "开始导入（{n} 张）",
+        "imported": "已入库",
+        "to_review": "进待审核",
+        "duplicates": "重复跳过",
+        "import_another": "再导一份",
+        "registry": "已登记的源",
+        "loading": "正在读取…",
+        "registry_empty": "还没有登记过的源。导入成功后会自动记下来，之后可以一键同步增量。",
+        "discovered": "自动发现",
+        "paused_source": "已停用",
+        "import": "导入",
+        "sync": "同步",
+        "forget": "移除",
+        "forgotten": "已从源列表移除，表情包保持原样。",
+        "forget_confirm": "只是不再记录这个源，已经导进来的表情包不会被删。继续吗？",
+        "cancel_confirm": "确定停止这次导入吗？已经入库的图片会保留。",
+        "control_failed": "操作失败。",
+        "error_prefix": "外部源操作失败",
+        "error_sep": "：",
+        "list_failed": "源列表没读出来，可能是后端或网络出了问题",
+        "inspect_failed": "预检没跑完，可能是网络或源不可达",
+        "upload_failed": "压缩包没传上去",
+        "import_failed": "导入没能开始",
+        "need_repo": "填 owner/repo，或者直接贴仓库链接。",
+        "need_endpoint": "填一个返回表情包清单的 HTTPS 地址。",
+        "need_inspect": "先跑一次预检，确认要导的是哪一份。",
+        "bad_archive": "只认 .zip 或 .meme-pack 压缩包。",
+        "phase_queued": "排队中",
+        "phase_inspecting": "读取清单中",
+        "phase_importing": "入库中",
+        "phase_finalizing": "收尾中",
+        "phase_done": "已结束",
+        "queued": "排队中",
+        "running": "正在导入…",
+        "paused": "已暂停",
+        "completed": "导入完成",
+        "cancelled": "已停止",
+        "failed": "导入失败",
+        "type_pack": "本地表情包",
+        "type_github": "GitHub 仓库",
+        "type_http": "HTTP 目录"
       }
     }
   }

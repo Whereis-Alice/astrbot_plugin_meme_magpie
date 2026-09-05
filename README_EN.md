@@ -45,6 +45,7 @@ This plugin is a fork of [nagatoquin33/astrbot_plugin_stealer](https://github.co
 | **LLM tools** | During conversation the model can search, send and collect stickers itself, filling in work and character as it goes |
 | **WebUI dashboard** | Review queue + library: bulk actions, batch import, batch re-analysis, missing-description detector, duplicate cleanup, storage maintenance |
 | **Rate-limited batches** | Concurrency and requests-per-minute are configurable, so hundreds of images will not trigger upstream 429s |
+| **External sources** | Import whole packs from an archive / a GitHub repository / a JSON catalog, with incremental sync |
 | **Data migration** | One command brings over astrbot_plugin_stealer's images, database, categories, character library, blocklist and settings |
 | **Chat filtering** | Separate allow/block lists for collecting and sending, with `group:<id>` and `user:<id>` entries |
 | **Adapters & i18n** | QQ marketplace stickers work across LLBot / NapCat / SnowLuma; UI in 中文 / English / Русский |
@@ -132,7 +133,7 @@ Everything else — send delays, emotion-analysis modes, retrieval presets, stor
 
 ## The dashboard
 
-Open it from the plugin details page ("Meme Thief Dashboard"), no extra port required. It has two areas: the **review queue**, where you approve or delete one by one or in bulk and can fix category, tags, description, character and work before approving; and the **library**, filterable by category / work / keyword with four sort orders and bulk edits. Plus single upload, batch import, batch re-analysis, missing-description detection, duplicate cleanup, storage maintenance and category management — in three themes and three languages.
+Open it from the plugin details page ("Meme Thief Dashboard"), no extra port required. It has two areas: the **review queue**, where you approve or delete one by one or in bulk and can fix category, tags, description, character and work before approving; and the **library**, filterable by category / work / keyword with four sort orders and bulk edits. Plus single upload, batch import, batch re-analysis, missing-description detection, external-source imports, duplicate cleanup, storage maintenance and category management — in three themes and three languages.
 
 > **Careful**: deleting a category in the WebUI also deletes every image file inside it.
 
@@ -145,6 +146,7 @@ Details in [The dashboard](docs/en/webui.md).
 | [Commands](docs/en/commands.md) | Every subcommand, plus what the command prefix should actually be |
 | [Configuration](docs/en/configuration.md) | Key settings by group, including the capacity cap that really does delete files |
 | [The dashboard](docs/en/webui.md) | Review queue and library, batch import, batch re-analysis, rate limits and progress |
+| [External sticker sources](docs/en/external-sources.md) | Importing whole packs from archives / GitHub / JSON catalogs, incremental sync, safety limits |
 | [LLM-driven sticker usage](docs/en/llm-tools.md) | The three LLM tools, letting the model fill in work/character, how known facts reach the prompt |
 | [Migrating from the original plugin](docs/en/migration.md) | How the two plugins relate, the three-step migration, what moves and what does not |
 | [Platform and protocol adapters](docs/en/platforms.md) | LLBot / NapCat / SnowLuma marketplace-sticker differences, message-splitting plugins |

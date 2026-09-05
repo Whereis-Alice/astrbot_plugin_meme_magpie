@@ -64,6 +64,16 @@ Neither mode modifies the bot's actual reply text; the only difference is whethe
 | Max retries | `3` | 0–8 | Retry ceiling for throttling and transient errors |
 | Retry backoff base | `2.0` | 1.0–10.0 | Multiplier between retries |
 
+## External sticker sources
+
+| Setting | Default | Notes |
+|:---|:---|:---|
+| Enable external sticker sources | `true` | Master switch. When off every related route refuses; already-imported stickers are unaffected |
+| Allow plaintext HTTP sources | `false` | Only `https://` and local files by default; only needed for a self-hosted LAN service |
+| Imported images go to Pending Review | `false` | Can also be ticked per import; content filtration forces review on |
+
+The five limit settings (items per source / bytes per image / archive size / uncompressed total / pixels per image) and their defaults are described in [External sticker sources](external-sources.md#related-settings).
+
 ## Storage and chat filtering
 
 | Setting | Default | Description |

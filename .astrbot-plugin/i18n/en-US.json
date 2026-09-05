@@ -256,6 +256,42 @@
         "Terminal"
       ]
     },
+    "_external_source_section": {
+      "description": "=== External sticker sources ===",
+      "hint": ""
+    },
+    "external_sources_enabled": {
+      "description": "Enable external sticker sources",
+      "hint": "Allows bulk import from a sticker-pack archive, a GitHub repository, or a JSON catalogue endpoint inside the sticker manager. When off, those entry points reject every request; stickers already imported are unaffected."
+    },
+    "external_source_allow_http": {
+      "description": "Allow plain HTTP sources",
+      "hint": "Only https:// and local files are allowed by default. Turn this on only when importing from a self-hosted service on your own network - a plain connection can be tampered with in transit."
+    },
+    "external_source_default_review": {
+      "description": "Imported images go to the pending pool",
+      "hint": "When on, images from an external source land in the pending pool and reach the library only after manual approval. The import dialog can also set this for a single import."
+    },
+    "external_source_max_items": {
+      "description": "Max images per source",
+      "hint": "Anything beyond this is truncated, and the inspection result says so."
+    },
+    "external_source_max_image_bytes": {
+      "description": "Per-image byte limit",
+      "hint": "Defaults to 33554432 bytes (32 MiB). Larger images are skipped and listed as failures."
+    },
+    "external_source_max_archive_bytes": {
+      "description": "Archive size limit",
+      "hint": "Defaults to 1073741824 bytes (1 GiB), measured on the archive itself."
+    },
+    "external_source_max_uncompressed_bytes": {
+      "description": "Total uncompressed byte limit",
+      "hint": "Defaults to 4294967296 bytes (4 GiB). This blocks zip bombs: a few-MB archive that fills the disk once expanded."
+    },
+    "external_source_max_pixels": {
+      "description": "Per-image pixel limit",
+      "hint": "Defaults to 40000000 pixels (about 6300x6300). Blocks huge images that would eat all the memory while decoding."
+    },
     "_smart_section": {
       "description": "=== Smart selection: text-distance fusion presets ===",
       "hint": ""
@@ -360,7 +396,8 @@
         "open_navigation": "Open navigation",
         "assign_work": "Set work",
         "reanalyze": "Re-analyze",
-        "missing_desc": "Missing description"
+        "missing_desc": "Missing description",
+        "sources": "External sources"
       },
       "empty": {
         "library_title": "No stickers yet",
@@ -665,6 +702,85 @@
         "truncated": "The review queue holds {total} records; this check covered the newest {cap}. Clear this batch and reopen to keep going further down.",
         "batch": "Re-analyze these {n}",
         "load_failed": "Could not load the list - the backend or network may be down."
+      },
+      "sources": {
+        "title": "External sticker sources",
+        "tip": "Import a ready-made sticker pack in one go, from an archive, a GitHub repo, or an HTTP catalogue",
+        "intro": "Import someone else's finished sticker pack in one go: inspect first to see how many images there are, how much space they take and which categories they use - nothing is written until you confirm. Importing never calls the vision model; the descriptions and tags shipped inside the pack are reused as they are. Anything still missing a description can be filled in later from \"Missing descriptions\".",
+        "safety": "Safety: archive size, image count and total uncompressed size are all checked before anything is extracted, and path traversal or oversized images are rejected. Stickers imported from an external source are exempt from capacity eviction, so automatic cleanup will not squeeze them out.",
+        "disabled": "External sources are switched off in the config. Turn on \"Enable external sticker sources\" and come back.",
+        "local_title": "Local archive",
+        "local_hint": "Pick a .zip or .meme-pack; inspection starts as soon as it is uploaded.",
+        "pick_file": "Choose archive",
+        "github_title": "GitHub repository",
+        "github_hint": "Enter owner/repo, or paste a repo link that already points at a branch and subfolder.",
+        "github_placeholder": "owner/repo",
+        "http_title": "HTTP catalogue",
+        "http_hint": "An HTTPS address that returns a sticker catalogue as JSON. Only HTTPS is allowed by default.",
+        "inspect": "Inspect",
+        "uploading": "Uploading and reading the catalogue...",
+        "inspecting": "Reading the catalogue...",
+        "pack_name": "Name",
+        "item_count": "Images",
+        "total_bytes": "Size",
+        "category_count": "Categories",
+        "license": "Author notice",
+        "over_capacity": "Finishing this import would go past \"Maximum emoji count\" ({current} stored now, limit {limit}). External-source images are never auto-cleaned, but ordinary stickers can be evicted, so raising the limit first is safer.",
+        "category_map": "Category mapping",
+        "category_map_hint": "On the left are the category names used inside the pack; on the right, pick the local category each one maps to. Leave it on \"Auto\" to let the plugin guess by name and synonyms, falling back to the default category when it cannot.",
+        "map_auto": "Auto",
+        "review": "Send to the pending pool instead of straight to the library",
+        "review_forced": "Content filtering is on in the config, so external sources always go to the pending pool first; that cannot be turned off here.",
+        "scope": "Visibility",
+        "origin_target": "Limit to session",
+        "origin_placeholder": "e.g. group:123456; leave empty to keep it visible only where it was imported",
+        "assign_character": "Tag the whole batch as one character",
+        "character": "Character",
+        "character_placeholder": "An existing character, or a new name to register on the fly",
+        "character_hint": "When unchecked, a character is written only if the name inside the pack matches one you already registered; anything else is kept as raw text in the source info.",
+        "preview": "Content sample",
+        "truncated": "The catalogue is long, so only the first few entries are shown here.",
+        "start_import": "Import {n} image(s)",
+        "imported": "Stored",
+        "to_review": "To review",
+        "duplicates": "Duplicates skipped",
+        "import_another": "Import another",
+        "registry": "Registered sources",
+        "loading": "Loading...",
+        "registry_empty": "No sources registered yet. A successful import is remembered automatically, so later additions can be pulled in with one click.",
+        "discovered": "Auto-detected",
+        "paused_source": "Disabled",
+        "import": "Import",
+        "sync": "Sync",
+        "forget": "Remove",
+        "forgotten": "Removed from the source list; the imported stickers are untouched.",
+        "forget_confirm": "This only stops tracking the source - stickers already imported are not deleted. Continue?",
+        "cancel_confirm": "Stop this import? Images already stored are kept.",
+        "control_failed": "That did not work.",
+        "error_prefix": "External source failed",
+        "error_sep": ": ",
+        "list_failed": "Could not load the source list - the backend or network may be down",
+        "inspect_failed": "Inspection did not finish - the network or the source may be unreachable",
+        "upload_failed": "The archive did not upload",
+        "import_failed": "The import could not start",
+        "need_repo": "Enter owner/repo, or paste the repo link.",
+        "need_endpoint": "Enter an HTTPS address that returns a sticker catalogue.",
+        "need_inspect": "Run an inspection first, so it is clear what gets imported.",
+        "bad_archive": "Only .zip and .meme-pack archives are accepted.",
+        "phase_queued": "Queued",
+        "phase_inspecting": "Reading catalogue",
+        "phase_importing": "Storing",
+        "phase_finalizing": "Finishing up",
+        "phase_done": "Finished",
+        "queued": "Queued",
+        "running": "Importing...",
+        "paused": "Paused",
+        "completed": "Import finished",
+        "cancelled": "Stopped",
+        "failed": "Import failed",
+        "type_pack": "Local pack",
+        "type_github": "GitHub repo",
+        "type_http": "HTTP catalogue"
       }
     }
   }

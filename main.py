@@ -22,6 +22,7 @@ from .core.commands.command_handler import CommandHandler
 from .core.config.config import PluginConfig
 from .core.db.database_service import DatabaseService
 from .core.search.meme_selector import MemeSelector
+from .core.sources.source_service import SourceService
 from .core.events.event_handler import EventHandler
 from .core.events.meme_sender_engine import MemeSenderEngine
 from .core.db.index_manager import IndexManager
@@ -95,6 +96,7 @@ class Main(Star):
         # 初始化核心服务类
         self.cache_service = CacheService(self.cache_dir)
         self.db_service = DatabaseService(self.cache_dir / "emoji.db")
+        self.source_service = SourceService(self)
         self.command_handler = CommandHandler(self)
         self.web_server = None
         self.plugin_api = PluginAPI(self)
@@ -244,6 +246,24 @@ class Main(Star):
             errors.append("待审核池容量必须是不小于10的整数")
             fixed.append("待审核池容量已重置为200")
             fixed_values["steal_pool_capacity"] = 200
+        # 外部源的资源上限直接决定单次导入能吃掉多少磁盘和内存，
+        # 手填成 0 或天文数字都会让小机器被一个表情包压死，所以夹在安全区间内。
+        external_limits = (
+            ("external_source_max_items", 1, 20_000, 2000),
+            ("external_source_max_image_bytes", 1024, 1024 * 1024 * 1024, 33_554_432),
+            ("external_source_max_archive_bytes", 1024, 8 * 1024 * 1024 * 1024, 1_073_741_824),
+            ("external_source_max_uncompressed_bytes", 1024, 16 * 1024 * 1024 * 1024, 4_294_967_296),
+            ("external_source_max_pixels", 1, 200_000_000, 40_000_000),
+        )
+        external_fixed = False
+        for name, low, high, default in external_limits:
+            value = getattr(cfg, name, default)
+            if not isinstance(value, int) or isinstance(value, bool) or not (low <= value <= high):
+                errors.append(f"外部源限制 {name} 超出安全范围（{low}~{high}）")
+                fixed_values[name] = default
+                external_fixed = True
+        if external_fixed:
+            fixed.append("外部源资源限制已恢复为安全默认值")
         if errors:
             logger.warning(f"配置验证发现问题: {'; '.join(errors)}")
         if fixed:
@@ -1492,6 +1512,10 @@ class Main(Star):
                     self.plugin_config.DEFAULT_CATEGORIES
                 )
             )
+            try:
+                await self.source_service.initialize()
+            except Exception as e:
+                logger.warning(f"[MemeThief] 外部源服务初始化失败: {e}")
             await self.image_processor_service._auto_migrate_categories()
             self._auto_merge_existing_categories()
             try:
@@ -1574,6 +1598,10 @@ class Main(Star):
                 await self.cache_service.cleanup()
             except Exception:
                 pass
+        try:
+            await self.source_service.close()
+        except Exception:
+            pass
         if self.task_scheduler:
             try:
                 await self.task_scheduler.cleanup()

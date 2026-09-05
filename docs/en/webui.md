@@ -7,7 +7,7 @@ Plugin details page → "Meme Thief Dashboard". Two areas:
 - **Review queue** — where auto-collected images land. Approve or delete individually or in bulk, and edit category, tags, description, character and work before approving.
 - **Library** — filter by category, work or keyword; four sort orders (most sent / recently sent / newest / oldest, all done in SQL); bulk category change, delete, scope, character/work assignment and source-scope repair.
 
-Plus: single upload (with optional AI analysis), batch import, batch re-analysis, duplicate cleanup, storage maintenance (scan and clear stale index entries, orphan files, thumbnails, temp files) and category management.
+Plus: single upload (with optional AI analysis), batch import, batch re-analysis, missing-description detection, external-source imports, duplicate cleanup, storage maintenance (scan and clear stale index entries, orphan files, thumbnails, temp files) and category management.
 
 Three themes (auto / terminal / pixel) and three languages; your choice is remembered.
 
@@ -80,3 +80,9 @@ Once a task is running the panel shows:
 - Re-analysis tasks additionally report how many fields changed and which images have a suggested category change
 
 Tasks can be **paused, resumed and cancelled** at any time; pausing genuinely stops the workers rather than just the UI. Closing the tab does not stop the task — reopen the panel and the progress reattaches.
+
+## External sticker sources
+
+The library page can also import a whole pack somebody else built — a local `.zip` / `.meme-pack`, a GitHub repository, or an HTTPS endpoint returning a catalog as JSON. Preflight shows the item count and categories before anything is written; a successful import registers the source so later additions can be pulled in with one click.
+
+That area has enough rules and safety limits to deserve its own page: [External sticker sources](external-sources.md).

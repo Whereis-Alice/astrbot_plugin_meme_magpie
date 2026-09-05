@@ -11,7 +11,7 @@
 """
 
 import argparse
-import asyncio
+import inspect
 import base64
 import colorsys
 import io
@@ -403,7 +403,7 @@ class PreviewServer:
         if handler is None:
             return web.json_response({"success": False, "error": f"no mock for {endpoint}"}, status=404)
         try:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 result = await handler(request, payload)
             else:
                 result = handler(request, payload)

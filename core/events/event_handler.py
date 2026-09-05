@@ -11,6 +11,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image, Plain
 
 from ..util.safe_io import safe_remove_file
+from ..util.retention import count_capacity_managed, is_capacity_exempt
 from .background_steal_queue import BackgroundStealQueue
 from .event_context import get_event_session_key
 from .platform_detector import PlatformDetector
@@ -185,7 +186,8 @@ class EventHandler:
     def _select_items_for_removal(self, image_index: dict) -> list[tuple[str, int]]:
         """从索引中选出需要移除的条目（按创建时间从旧到新排序后取最旧的）。
 
-        收藏表情包不参与自动清理。
+        收藏表情包和外部源导入的托管副本都不参与自动清理，
+        它们既不占用容量额度、也不会被挑出来删除。
 
         Returns:
             需要移除的 (file_path, created_at) 列表；若无需移除则返回空列表。
@@ -200,12 +202,15 @@ class EventHandler:
             logger.debug("容量控制已关闭（max_reg_num <= 0），跳过清理")
             return []
 
-        if len(image_index) <= max_reg:
+        managed_total = count_capacity_managed(image_index)
+        if managed_total <= max_reg:
             return []
 
         image_items: list[tuple[str, int]] = []
         for file_path, image_info in image_index.items():
             if isinstance(image_info, dict) and image_info.get("is_favorite"):
+                continue
+            if is_capacity_exempt(image_info):
                 continue
             created_at = int(image_info.get("created_at", 0)) if isinstance(image_info, dict) else 0
             image_items.append((file_path, created_at))
@@ -214,12 +219,12 @@ class EventHandler:
             return []
 
         image_items.sort(key=lambda x: x[1])
-        overflow = len(image_index) - max_reg
+        overflow = managed_total - max_reg
         remove_count = min(max(0, overflow), len(image_items))
         if overflow > len(image_items):
             logger.warning(
                 f"[capacity] Need to remove {overflow} entries, but only "
-                f"{len(image_items)} non-favorite entries are eligible"
+                f"{len(image_items)} managed non-favorite entries are eligible"
             )
         return image_items[:remove_count]
 
@@ -310,8 +315,9 @@ class EventHandler:
             if len(items_to_remove) > 20:
                 preview += " …"
             logger.warning(
-                f"[容量控制] 当前 {len(image_index)} 张超出上限 {max_reg}，"
-                f"即将永久删除 {len(items_to_remove)} 个最旧条目（收藏不参与）: {preview}"
+                f"[容量控制] 当前 {count_capacity_managed(image_index)} 张超出上限 {max_reg}，"
+                f"即将永久删除 {len(items_to_remove)} 个最旧条目"
+                f"（收藏与外部源导入不参与）: {preview}"
             )
 
             for remove_path, _ in items_to_remove:

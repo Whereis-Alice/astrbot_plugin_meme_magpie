@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from astrbot.api import logger
 
 from ..util.safe_io import safe_remove_file
+from ..util.retention import count_capacity_managed
 
 if TYPE_CHECKING:
     from ...main import Main  # noqa: F401
@@ -177,16 +178,19 @@ class MaintenanceService:
             return  # 0 = 不限制容量
 
         idx = await self.plugin.index_manager.load_index()
-        overflow = len(idx) - max_reg
+        # 只数参与容量淘汰的条目：外部源导入的托管副本不占额度，
+        # 否则导入一个大包就会天天报"超出上限"却又删不掉任何东西。
+        managed = count_capacity_managed(idx)
+        overflow = managed - max_reg
         if overflow <= 0:
             self._capacity_warned_count = -1
             return
 
         if not getattr(cfg, "capacity_auto_cleanup", False):
-            if self._capacity_warned_count != len(idx):
-                self._capacity_warned_count = len(idx)
+            if self._capacity_warned_count != managed:
+                self._capacity_warned_count = managed
                 msg = format_capacity_warning(
-                    len(idx), max_reg, False, self.plugin.cmd("capacity")
+                    managed, max_reg, False, self.plugin.cmd("capacity")
                 )
                 if msg:
                     logger.warning(msg)
@@ -222,15 +226,16 @@ class MaintenanceService:
         except Exception as e:
             logger.debug(f"[容量控制] 启动巡检跳过: {e}")
             return None
+        managed = count_capacity_managed(idx)
         msg = format_capacity_warning(
-            len(idx),
+            managed,
             max_reg,
             bool(getattr(cfg, "capacity_auto_cleanup", False)),
             self.plugin.cmd("capacity"),
         )
         if msg:
             # 记下来，免得一小时后那轮巡检把同一句话再念一遍
-            self._capacity_warned_count = len(idx)
+            self._capacity_warned_count = managed
             logger.warning(msg)
         return msg
 

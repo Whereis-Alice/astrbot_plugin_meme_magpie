@@ -21,6 +21,7 @@ except ImportError:
 from astrbot.api import logger
 
 from .core.processing.analysis_throttle import AnalysisThrottle, build_analysis_throttle
+from .core.sources.models import ExternalSourceError, ExternalSourceSecurityError
 from .core.util.blacklist import add_blacklist_hash
 from .core.util.normalization import (
     canonicalize_path,
@@ -98,6 +99,15 @@ class PluginAPI:
             ("/emotions", "handle_get_emotions", ["GET"]),
             ("/health", "handle_health_check", ["GET"]),
             ("/prefs", "handle_prefs", ["GET", "POST"]),
+            ("/sources", "handle_sources", ["GET", "POST"]),
+            ("/sources/inspect", "handle_source_inspect", ["POST"]),
+            ("/sources/import", "handle_source_import", ["POST"]),
+            ("/sources/sync", "handle_source_sync", ["POST"]),
+            ("/sources/jobs", "handle_source_job", ["GET"]),
+            ("/sources/jobs/cancel", "handle_source_job_cancel", ["POST"]),
+            ("/sources/jobs/control", "handle_source_job_control", ["POST"]),
+            ("/sources/delete", "handle_source_delete", ["POST"]),
+            ("/sources/upload", "handle_source_upload", ["POST"]),
         ]
         for route, handler_name, methods in routes:
             handler = getattr(self, handler_name)
@@ -125,6 +135,10 @@ class PluginAPI:
     @property
     def _cfg(self):
         return self.plugin.plugin_config
+
+    @property
+    def _sources(self):
+        return getattr(self.plugin, "source_service", None)
 
     def _get_index(self) -> dict[str, Any]:
         """从数据库读取完整索引；DB 不存在时返回空 dict。"""
@@ -601,6 +615,9 @@ class PluginAPI:
                 "overlay_text": str(meta.get("overlay_text", "") or ""),
                 "character": str(meta.get("character", "") or ""),
                 "work": str(meta.get("work", "") or ""),
+                # 外部源导入的图会带 source/retention_class，前端据此打标并说明"不参与容量淘汰"
+                "source": str(meta.get("source", "") or ""),
+                "retention_class": str(meta.get("retention_class") or "native"),
             }
         except ValueError:
             return None
@@ -1023,6 +1040,263 @@ class PluginAPI:
         current = await self._update_dashboard_prefs(payload)
         return jsonify({"success": True, **current})
 
+    # ── External sources（外部表情包源）───────────────────────
+
+    async def _source_json(self) -> dict[str, Any]:
+        try:
+            payload = await request.get_json() or {}
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise ExternalSourceError("request body must be a JSON object")
+        return dict(payload)
+
+    def _validate_source_pack_path(self, payload: dict[str, Any]) -> None:
+        """本地包只允许读插件数据目录，避免面板调用变成任意文件读取。"""
+
+        source_type = str(
+            payload.get("source_type") or payload.get("type") or payload.get("kind") or ""
+        ).lower()
+        if not source_type and payload.get("path"):
+            source_type = "meme_pack"
+        if source_type not in {"pack", "meme_pack", "meme-manager", "meme_manager"}:
+            return
+        raw_path = payload.get("path") or payload.get("endpoint")
+        if not raw_path:
+            raise ExternalSourceError("pack source requires path")
+        source_path = Path(str(raw_path)).expanduser().resolve()
+        # 允许：本插件数据目录（含上传暂存区）与同级的其它插件数据目录（迁移场景）
+        allowed_roots = [self._data_dir.resolve(), self._data_dir.parent.resolve()]
+        if not any(self._path_is_under(source_path, root) for root in allowed_roots):
+            raise ExternalSourceSecurityError(
+                "pack path must be inside AstrBot plugin data; upload the archive first"
+            )
+
+    @staticmethod
+    def _path_is_under(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    async def _resolve_source_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """只带 source_id 时用登记表里的描述符补全，前端不必回传敏感字段。"""
+
+        service = self._sources
+        if service is None:
+            raise ExternalSourceError("source service is unavailable")
+        source_id = str(payload.get("source_id") or "").strip()
+        has_descriptor = any(
+            payload.get(key)
+            for key in ("source_type", "type", "kind", "path", "endpoint", "url", "repository", "repo")
+        )
+        if source_id and not has_descriptor:
+            stored = service.source_spec(source_id)
+            if not stored:
+                raise ExternalSourceError("source was not found")
+            stored.update(payload)
+            payload = stored
+        self._validate_source_pack_path(payload)
+        return payload
+
+    def _source_defaults(self) -> dict[str, Any]:
+        cfg = self._cfg
+        forced = bool(getattr(cfg, "content_filtration", False))
+        return {
+            "enabled": bool(getattr(cfg, "external_sources_enabled", True)),
+            "review": bool(getattr(cfg, "external_source_default_review", False) or forced),
+            "review_forced": forced,
+            "allow_http": bool(getattr(cfg, "external_source_allow_http", False)),
+            "max_items": int(getattr(cfg, "external_source_max_items", 2000)),
+        }
+
+    @staticmethod
+    def _source_error_response(exc: Exception):
+        status = 403 if isinstance(exc, ExternalSourceSecurityError) else 400
+        return jsonify({"success": False, "error": str(exc)}), status
+
+    @staticmethod
+    def _service_unavailable():
+        return jsonify({"success": False, "error": "source service unavailable"}), 503
+
+    @staticmethod
+    def _save_source_upload_limited(upload: Any, target: Path, max_bytes: int) -> int:
+        """边写边计字节数，避免先落盘再检查体积（磁盘可能已经被写爆）。"""
+
+        stream = getattr(upload, "stream", upload)
+        read = getattr(stream, "read", None)
+        if not callable(read):
+            raise ExternalSourceError("archive upload stream is unavailable")
+        total = 0
+        with target.open("xb") as output:
+            while True:
+                chunk = read(64 * 1024)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise ExternalSourceError("archive upload returned invalid data")
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ExternalSourceSecurityError("pack archive exceeds the byte limit")
+                output.write(chunk)
+        return total
+
+    async def handle_sources(self):
+        """GET 列出已登记/自动发现的源；POST 登记一个描述符。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            if request.method == "GET":
+                return jsonify(
+                    {
+                        "success": True,
+                        "sources": service.list_sources(),
+                        "defaults": self._source_defaults(),
+                        # 刷新页面丢了 job_id 也能重新接上正在跑的导入
+                        "job": service.active_job(),
+                    }
+                )
+            payload = await self._resolve_source_payload(await self._source_json())
+            source = await service.register(payload)
+            return jsonify({"success": True, "source": source})
+        except (ExternalSourceError, OSError, ValueError) as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_inspect(self):
+        """预检：只读清单，不写库不落盘。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._resolve_source_payload(await self._source_json())
+            inspection = await service.inspect_dict(payload)
+            return jsonify({"success": True, "inspection": inspection})
+        except (ExternalSourceError, OSError, ValueError) as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_import(self):
+        """开始后台导入（预检与前端看到的是同一套校验）。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._resolve_source_payload(await self._source_json())
+            job = service.start_import(payload)
+            return jsonify({"success": True, "accepted": True, "job": job}), 202
+        except (ExternalSourceError, OSError, ValueError) as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_sync(self):
+        """按已登记的描述符再跑一次，用于拉取源的增量。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._resolve_source_payload(await self._source_json())
+            job = service.start_import(payload)
+            return jsonify({"success": True, "accepted": True, "job": job}), 202
+        except (ExternalSourceError, OSError, ValueError) as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_job(self):
+        """查进度：带 job_id 查指定任务，不带则返回当前活跃任务（可能为 null）。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        job_id = str(request.args.get("job_id", "") or "").strip()
+        if not job_id:
+            return jsonify({"success": True, "job": service.active_job()})
+        job = service.get_job(job_id)
+        if not job:
+            return jsonify({"success": False, "error": "source job not found"}), 404
+        return jsonify({"success": True, "job": job})
+
+    async def handle_source_job_cancel(self):
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._source_json()
+            cancelled = await service.cancel_job(str(payload.get("job_id") or ""))
+            return jsonify({"success": cancelled, "cancelled": cancelled})
+        except ExternalSourceError as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_job_control(self):
+        """暂停/继续导入：小机器上限速排查、让出带宽都用得上。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._source_json()
+            job_id = str(payload.get("job_id") or "").strip()
+            action = str(payload.get("action") or "").strip().lower()
+            if not job_id:
+                raise ExternalSourceError("job_id is required")
+            if action == "pause":
+                ok = service.pause_job(job_id)
+            elif action == "resume":
+                ok = service.resume_job(job_id)
+            else:
+                raise ExternalSourceError("action must be pause or resume")
+            return jsonify({"success": ok, "job": service.get_job(job_id)})
+        except ExternalSourceError as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_delete(self):
+        """从登记表里忘掉一个源；已经导入的图片保持不动。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._source_json()
+            source_id = str(payload.get("source_id") or "").strip()
+            if not source_id:
+                raise ExternalSourceError("source_id is required")
+            deleted = await service.delete_source(source_id)
+            return jsonify({"success": deleted, "deleted": deleted, "images_preserved": True})
+        except ExternalSourceError as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_upload(self):
+        """接收浏览器上传的表情包压缩包，落到暂存区后再预检。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            try:
+                await service.cleanup_staged_uploads()
+            except Exception as cleanup_error:
+                logger.debug(f"[Source] 上传前清理暂存归档失败: {cleanup_error}")
+            files = await request.files
+            upload = files.get("file") if files is not None else None
+            if upload is None:
+                raise ExternalSourceError("archive file is required")
+            filename = Path(str(getattr(upload, "filename", "") or "pack.zip")).name
+            if Path(filename).suffix.lower() not in {".zip", ".meme-pack"}:
+                raise ExternalSourceError("only ZIP or .meme-pack archives are accepted")
+            max_bytes = int(
+                getattr(self._cfg, "external_source_max_archive_bytes", 1024 * 1024 * 1024)
+            )
+            upload_dir = service.import_dir / "uploads"
+            await asyncio.to_thread(upload_dir.mkdir, parents=True, exist_ok=True)
+            target = upload_dir / f"{uuid.uuid4().hex}_{filename}"
+            try:
+                await asyncio.to_thread(
+                    self._save_source_upload_limited, upload, target, max_bytes
+                )
+                inspection = await service.inspect_dict(
+                    {"source_type": "meme_pack", "path": str(target)}
+                )
+            except Exception:
+                await safe_remove_file(str(target))
+                raise
+            return jsonify({"success": True, "path": str(target), "inspection": inspection})
+        except (ExternalSourceError, OSError, ValueError) as exc:
+            return self._source_error_response(exc)
+
     # ── Pending (待审核池) ────────────────────────────────────
 
     def _build_pending_item(self, row: dict[str, Any]) -> dict[str, Any] | None:
@@ -1053,6 +1327,7 @@ class PluginAPI:
                 "overlay_text": str(row.get("overlay_text", "") or ""),
                 "character": str(row.get("character", "") or ""),
                 "work": str(row.get("work", "") or ""),
+                "retention_class": str(row.get("retention_class") or "native"),
             }
         except (ValueError, TypeError):
             return None
@@ -1175,6 +1450,9 @@ class PluginAPI:
                 "overlay_text": str(row.get("overlay_text", "") or ""),
                 "emotions": list(row.get("emotions", []) or []),
                 "character": str(row.get("character", "") or ""),
+                # 上游漏了 work：审核通过会把待审核时填好的作品名丢掉，这里补上
+                "work": str(row.get("work", "") or ""),
+                "retention_class": str(row.get("retention_class") or "native"),
                 # v5：从 pending 继承元数据（宽高/格式/字节/来源/入库方式）
                 "source_url": row.get("source_url"),
                 "original_name": row.get("original_name"),
@@ -1188,6 +1466,13 @@ class PluginAPI:
             if not inserted:
                 raise RuntimeError("insert emoji returned 0")
             db.delete_pending(pending_id)
+
+            # 外部源导入的图走审核时会换路径，这里同步溯源表，避免后续同步误判为"已消失"
+            if hasattr(db, "promote_source_pending_path"):
+                try:
+                    await db.promote_source_pending_path(src_path, cat_path)
+                except Exception as promote_err:
+                    logger.debug(f"外部源溯源路径更新失败（不阻塞）: {promote_err}")
 
             # 审核通过后写入嵌入向量（仅在开启嵌入检索时，失败不阻塞）
             if getattr(self.plugin, "enable_embedding_search", True):
