@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import os
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -205,8 +206,38 @@ class TestSplitCompatPath:
         assert Path(out).read_bytes() == b"x"
         # 原文件与原目录都不动
         assert src.exists() and src.read_bytes() == b"x"
-        # 第二次调用复用同一个文件，不重复建
+        # 第二次调用仍然落在同一个兼容路径上
         assert svc._split_compat_path(str(src)) == out
+
+    def test_old_source_is_not_pruned_as_soon_as_it_is_linked(self, tmp_path, monkeypatch):
+        """回归：兼容文件不能继承原图的旧 mtime 后被当成最旧缓存删掉。"""
+
+        monkeypatch.setattr(MemeSmartSelectService, "SPLIT_COMPAT_KEEP", 3)
+        base = tmp_path / "base"
+        compat = base / MemeSmartSelectService.SPLIT_COMPAT_DIRNAME
+        compat.mkdir(parents=True)
+        for index in range(3):
+            item = compat / f"cached-{index}.png"
+            item.write_bytes(b"cached")
+            os.utime(item, (2_000_000, 2_000_000))
+
+        sources = []
+        for name, payload in (("old-a.png", b"a"), ("old-b.png", b"b")):
+            source = tmp_path / "categories" / "think" / name
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(payload)
+            os.utime(source, (1_000_000, 1_000_000))
+            sources.append(source)
+
+        svc = _service(auto_meme_attach_compat_split=True, base_dir=base)
+        first = svc._split_compat_path(str(sources[0]))
+        time.sleep(0.01)
+        second = svc._split_compat_path(str(sources[1]))
+
+        assert Path(first).exists()
+        assert Path(second).exists()
+        assert Path(first).read_bytes() == b"a"
+        assert Path(second).read_bytes() == b"b"
 
     def test_link_failure_falls_back_to_copy(self, tmp_path, monkeypatch):
         src = tmp_path / "a.png"

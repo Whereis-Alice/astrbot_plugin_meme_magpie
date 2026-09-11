@@ -4,6 +4,7 @@ import os
 import random
 import re
 import shutil
+import time
 from typing import Any
 
 from astrbot.api import logger
@@ -899,16 +900,31 @@ class MemeSmartSelectService:
             compat_dir = os.path.join(str(base_dir), self.SPLIT_COMPAT_DIRNAME)
             os.makedirs(compat_dir, exist_ok=True)
             target = os.path.join(compat_dir, os.path.basename(emoji_path))
-            if not os.path.exists(target):
-                try:
-                    os.link(emoji_path, target)
-                except Exception:
-                    shutil.copy2(emoji_path, target)
+            # 先清理再写入。硬链接和 copy2 都会继承原图的 mtime；若写入后再按
+            # mtime 清理，一张很老的表情会刚建好就被当成“最旧缓存”删掉。
             self._prune_split_compat_dir(compat_dir)
+            self._refresh_split_compat_target(emoji_path, target)
             return target
         except Exception as e:
             logger.debug(f"[MemeThief] 生成分段回复兼容路径失败，按原路径附加: {e}")
             return emoji_path
+
+    @staticmethod
+    def _refresh_split_compat_target(source: str, target: str) -> None:
+        """用当前源文件刷新兼容文件，同时更新目录项的创建/变更时间。"""
+
+        temp_target = f"{target}.tmp-{os.getpid()}-{time.time_ns()}"
+        try:
+            try:
+                os.link(source, temp_target)
+            except Exception:
+                shutil.copy2(source, temp_target)
+            os.replace(temp_target, target)
+        finally:
+            try:
+                os.remove(temp_target)
+            except OSError:
+                pass
 
     def _prune_split_compat_dir(self, compat_dir: str) -> None:
         """兼容目录只保留最近使用的若干个文件，避免无限堆积。"""
@@ -920,7 +936,8 @@ class MemeSmartSelectService:
             ]
             if len(entries) <= self.SPLIT_COMPAT_KEEP:
                 return
-            entries.sort(key=lambda e: e.stat().st_mtime, reverse=True)
+            # ctime 才是缓存条目的建立/刷新时间；mtime 可能来自原图，不能代表新旧。
+            entries.sort(key=lambda e: (e.stat().st_ctime, e.stat().st_mtime), reverse=True)
             for entry in entries[self.SPLIT_COMPAT_KEEP :]:
                 try:
                     os.remove(entry.path)
