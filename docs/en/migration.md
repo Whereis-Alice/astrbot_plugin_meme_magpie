@@ -16,7 +16,7 @@ What this fork adds on top:
 | **LLM can supply metadata directly** | When the chat model collects an image it can state "this is character X from series Y, doing Z" instead of leaving everything to the vision model |
 | **Rate-limited batch analysis** | Batch import and batch re-analysis take a concurrency cap and a requests-per-minute cap, so hundreds of images will not trip upstream 429s |
 | **Source work field** | A new `work` field flows through ingestion, retrieval and WebUI filtering |
-| **Batch re-analysis** | Re-run vision analysis over images already in the library that are missing tags or descriptions, optionally fill-blanks-only |
+| **Batch re-analysis** | Re-run vision analysis over images already in the library that are missing tags or descriptions, optionally fill-blanks-only or with categories applied automatically |
 | **Known facts feed the prompt** | Work and character values you already filled in are written into the analysis prompt, so the model adopts them instead of guessing — biggest win on anime art |
 | **Re-analysis for the review queue** | Images waiting for review can be re-analysed in bulk as well, and there the category does get corrected |
 | **Missing-description detector** | Lists every entry with an empty description in one click, so you can fill them in individually or re-run the whole batch |

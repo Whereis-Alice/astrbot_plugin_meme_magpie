@@ -32,10 +32,12 @@ Re-runs vision analysis over images already in the library. Useful when early im
 
 - **Scope**: selected images / images missing tags or descriptions / only those with no description / everything
 - **Overwrite existing values**: off by default, so it only fills blanks and never touches descriptions you wrote by hand
+- **Apply category changes**: off by default; when enabled, detected categories are applied directly, moving the file and updating the index when the category changes
 - **Item limit**: cap the batch size and test the waters first
-- Re-analysis deliberately **does not change categories** — that would mean moving files, which is risky under concurrency. It reports a *suggested* category and leaves the decision to you.
 
-**The review queue can be re-analysed too**: pending images support the same bulk or single re-run, with the same three scopes. The one difference is that **a pending item's category does get corrected** — there it is only a database field, and changing it moves no files. Library categories map to real directories, which is why those stay advisory.
+Applying category changes is independent of overwriting labels: you can keep a hand-written description while still filing an old failed analysis into the right category. Before each write, the item is relocated by hash; file moves and index updates are serialized so concurrent workers cannot race for the same target path. Semantic fields and the category migrate in one database transaction.
+
+**The review queue can be re-analysed too**: pending images support the same bulk or single re-run, with the same scopes. A pending item's category is only a database field, so it is corrected under the existing rules without moving files; whether a library category changes automatically is controlled by the switch above.
 
 ### Finding entries with no description
 
@@ -77,7 +79,7 @@ Once a task is running the panel shows:
 - Success / failed / analysed / rate-limited / retried counters
 - Estimated time remaining, derived from the observed throughput
 - Per-failure detail: which image, and why
-- Re-analysis tasks additionally report how many fields changed and which images have a suggested category change
+- Re-analysis tasks additionally report how many fields changed, which images have a suggested category change, and which categories were changed automatically
 
 Tasks can be **paused, resumed and cancelled** at any time; pausing genuinely stops the workers rather than just the UI. Closing the tab does not stop the task — reopen the panel and the progress reattaches.
 

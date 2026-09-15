@@ -48,7 +48,8 @@ class PluginAPI:
     REANALYZE_TARGETS = frozenset({"selected", "missing", "no_desc", "all"})
     # 重新识别的作用范围：已入库表情库 / 待审核池。
     REANALYZE_SCOPES = frozenset({"library", "pending"})
-    # 重新识别时允许模型回填的字段（分类不在内，改分类要移动文件）。
+    # 重新识别时允许模型回填的字段。分类要走文件移动和主键迁移，
+    # 因此单独在 auto_category 分支里处理，不混进普通字段更新。
     REANALYZE_FIELDS = ("tags", "desc", "scenes", "overlay_text", "emotions")
     WORK_MAX_CHARS = 60
     DASHBOARD_PREFS_KEY = "dashboard_prefs"
@@ -57,6 +58,10 @@ class PluginAPI:
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.batch_upload_tasks: dict[str, dict] = {}
+        # 正式库改分类会移动文件并改主键路径。识别可以并发，但所有
+        # categories/ 下的移动入口必须共用这把锁，否则并发请求可能同时
+        # _unique_path() / move()，互相踩对方的落点。
+        self._category_move_lock = asyncio.Lock()
 
     # ── Registration ──────────────────────────────────────────
 
@@ -292,16 +297,11 @@ class PluginAPI:
         result.sort(key=lambda x: (-int(x.get("count") or 0), x["key"]))
         return result
 
-    async def _refresh_embedding_for_path(self, path: str) -> None:
+    async def _refresh_embedding_for_path(
+        self, path: str, *, old_path: str | None = None
+    ) -> None:
         db = self._db
         if not db or not path:
-            return
-        entry = {}
-        try:
-            entry = db.get_emoji(path) or {}
-        except Exception:
-            entry = {}
-        if not entry:
             return
         try:
             smart = getattr(
@@ -309,15 +309,27 @@ class PluginAPI:
             )
             if smart and getattr(smart, "_embedding_service", None):
                 service = smart._embedding_service
-                # 旧向量没删干净就不能再插新的：否则同一张图会同时存在新旧两条文档，
-                # 检索时旧描述照样命中。跳过的这条会在下次回填时按文本指纹自动补上。
-                if await service.delete_by_path(path):
-                    await service.insert_emoji(path, entry)
-                else:
+                # 先清旧路径，再清当前路径。当前记录可能在等待向量删除时
+                # 又被别的移动请求迁走；删除完成后重新读 DB，路径已变就不插，
+                # 避免把旧路径向量重新带回来。
+                if old_path and old_path != path and not await service.delete_by_path(old_path):
+                    logger.warning(
+                        "[Embedding] 移动前旧向量未能删除，本次跳过重建，"
+                        f"下次重启回填会按文本指纹自动修复: {old_path}"
+                    )
+                    return
+                if not await service.delete_by_path(path):
                     logger.warning(
                         "[Embedding] 旧向量未能删除，本次跳过重建，"
                         f"下次重启回填会按文本指纹自动修复: {path}"
                     )
+                    return
+                try:
+                    entry = db.get_emoji(path) or {}
+                except Exception:
+                    entry = {}
+                if entry:
+                    await service.insert_emoji(path, entry)
                 smart._invalidate_embedding_index()
         except Exception as e:
             logger.debug(f"[Embedding] 角色更新后重建向量失败: {e}")
@@ -1423,14 +1435,18 @@ class PluginAPI:
         if not category or category == "other" or category not in known:
             category = self._cfg.closest_category(category) if hasattr(self._cfg, "closest_category") else "confused"
 
-        cat_dir = self._cfg.ensure_category_dir(category)
-        cat_path = str(cat_dir / os.path.basename(src_path))
+        cat_path = src_path
 
         moved = False
         try:
-            if os.path.abspath(src_path) != os.path.abspath(cat_path):
-                await asyncio.to_thread(shutil.move, src_path, cat_path)
-            moved = True
+            # 审核通过也是 categories/ 的写入入口：和其它分类移动共用锁，
+            # 并用唯一目标名避免和已有文件撞名。
+            async with self._category_move_lock:
+                cat_dir = self._cfg.ensure_category_dir(category)
+                cat_path = str(self._unique_path(cat_dir, os.path.basename(src_path)))
+                if os.path.abspath(src_path) != os.path.abspath(cat_path):
+                    await asyncio.to_thread(shutil.move, src_path, cat_path)
+                moved = True
 
             emoji_entry: dict[str, Any] = {
                 "path": cat_path,
@@ -1749,26 +1765,62 @@ class PluginAPI:
                 updates["is_favorite"] = 1 if new_favorite else 0
 
             if new_cat and new_cat != meta.get("category"):
-                old_path = Path(target)
-                if not old_path.exists():
-                    return jsonify({"success": False, "error": "Source file not found"})
-                target_dir = self._cfg.ensure_category_dir(new_cat)
-                new_path = self._unique_path(target_dir, old_path.name)
-                await asyncio.to_thread(shutil.move, str(old_path), str(new_path))
-                moved = False
-                try:
-                    moved = await self._move_index_path(target, str(new_path), new_cat, updates)
-                finally:
-                    if not moved and new_path.exists() and not old_path.exists():
-                        try:
-                            await asyncio.to_thread(shutil.move, str(new_path), str(old_path))
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"rollback moved image failed: {new_path} -> {old_path}, {rollback_error}"
+                # 单张编辑也可能和批量任务并发。移动前重新按 hash 定位，
+                # 并和所有 categories/ 移动入口共用同一把锁。
+                async with self._category_move_lock:
+                    found = self._find_index_entry_by_hash(str(img_hash))
+                    if not found:
+                        return jsonify({"success": False, "error": "Image not found"})
+                    target, meta = found
+                    if new_cat and new_cat != meta.get("category"):
+                        if (
+                            new_scope == "local"
+                            and not str(meta.get("origin_target", "")).strip()
+                        ):
+                            return jsonify(
+                                {"success": False, "error": "Origin target missing"}
                             )
-                if not moved:
-                    return jsonify({"success": False, "error": "Update index failed"})
-                await self._refresh_embedding_for_path(str(new_path))
+                        old_path = Path(target)
+                        if not old_path.exists():
+                            return jsonify({"success": False, "error": "Source file not found"})
+                        target_dir = self._cfg.ensure_category_dir(new_cat)
+                        new_path = self._unique_path(target_dir, old_path.name)
+                        await asyncio.to_thread(shutil.move, str(old_path), str(new_path))
+                        moved = False
+                        try:
+                            moved = await self._move_index_path(
+                                target, str(new_path), new_cat, updates
+                            )
+                        finally:
+                            if not moved and new_path.exists() and not old_path.exists():
+                                try:
+                                    await asyncio.to_thread(
+                                        shutil.move, str(new_path), str(old_path)
+                                    )
+                                except Exception as rollback_error:
+                                    logger.error(
+                                        "rollback moved image failed: "
+                                        f"{new_path} -> {old_path}, {rollback_error}"
+                                    )
+                        if not moved:
+                            return jsonify({"success": False, "error": "Update index failed"})
+                        await self._refresh_embedding_for_path(
+                            str(new_path), old_path=target
+                        )
+                    elif updates:
+                        if (
+                            new_scope == "local"
+                            and not str(meta.get("origin_target", "")).strip()
+                        ):
+                            return jsonify(
+                                {"success": False, "error": "Origin target missing"}
+                            )
+                        if not await self._update_index_path(target, updates):
+                            return jsonify(
+                                {"success": False, "error": "Update index failed"}
+                            )
+                        if updates.keys() & {"character", "work", "overlay_text"}:
+                            await self._refresh_embedding_for_path(target)
             elif updates:
                 if not await self._update_index_path(target, updates):
                     return jsonify({"success": False, "error": "Update index failed"})
@@ -1859,21 +1911,27 @@ class PluginAPI:
                 old = Path(p)
                 if not old.exists():
                     continue
-                new = self._unique_path(target_dir, old.name)
-                await asyncio.to_thread(shutil.move, str(old), str(new))
-                moved = False
-                try:
-                    moved = await self._move_index_path(p, str(new), target_cat)
-                finally:
-                    if not moved and new.exists() and not old.exists():
-                        try:
-                            await asyncio.to_thread(shutil.move, str(new), str(old))
-                        except Exception as rollback_error:
-                            logger.error(
-                                f"rollback batch move failed: {new} -> {old}, {rollback_error}"
-                            )
+                # 批量手动移动与批量重识别可能同时跑。每个文件单独持锁：
+                # _unique_path() 和 move() 不会交错，向量重建又不必阻塞别的图片。
+                async with self._category_move_lock:
+                    if not old.exists():
+                        continue
+                    new = self._unique_path(target_dir, old.name)
+                    await asyncio.to_thread(shutil.move, str(old), str(new))
+                    moved = False
+                    try:
+                        moved = await self._move_index_path(p, str(new), target_cat)
+                    finally:
+                        if not moved and new.exists() and not old.exists():
+                            try:
+                                await asyncio.to_thread(shutil.move, str(new), str(old))
+                            except Exception as rollback_error:
+                                logger.error(
+                                    f"rollback batch move failed: {new} -> {old}, {rollback_error}"
+                                )
                 if moved:
                     moved_count += 1
+                    await self._refresh_embedding_for_path(str(new), old_path=p)
             return jsonify({"success": True, "count": moved_count})
         except Exception as e:
             logger.error(f"批量移动失败: {e}", exc_info=True)
@@ -2618,8 +2676,8 @@ class PluginAPI:
     async def handle_batch_reanalyze(self):
         """启动一个批量重新识别任务，补齐或覆盖标签 / 描述 / 场景 / 图上文字 / 情绪。
 
-        分类不会被改动（改分类要移动文件，批量并发下风险高），识别出的分类只
-        作为建议写进结果列表里，由人工决定要不要调整。
+        正式库默认不改分类，只把识别结果作为建议列出；auto_category=True 时才
+        会应用分类并移动文件。待审核池的分类仍是数据库字段，按原有逻辑修正。
         """
         try:
             self._prune_batch_upload_tasks()
@@ -2647,6 +2705,7 @@ class PluginAPI:
                 return jsonify({"success": False, "error": error})
 
             overwrite = bool(data.get("overwrite"))
+            auto_category = scope == "library" and bool(data.get("auto_category"))
             concurrency = self._optional_int(data.get("concurrency"))
             rpm = self._optional_int(data.get("rpm"))
 
@@ -2667,6 +2726,7 @@ class PluginAPI:
                 "paused": False,
                 "cancel_requested": False,
                 "auto_analyze": True,
+                "auto_category": auto_category,
                 "created_at": now,
                 "started_at": 0.0,
                 "updated_at": now,
@@ -2676,6 +2736,7 @@ class PluginAPI:
                     task_id,
                     items,
                     overwrite=overwrite,
+                    auto_category=auto_category,
                     concurrency=concurrency,
                     rpm=rpm,
                 )
@@ -2687,6 +2748,7 @@ class PluginAPI:
                     "task_id": task_id,
                     "total": len(items),
                     "scope": scope,
+                    "auto_category": auto_category,
                     "concurrency": (
                         concurrency if concurrency is not None else defaults["concurrency"]
                     ),
@@ -2703,6 +2765,7 @@ class PluginAPI:
         items: list[dict],
         *,
         overwrite: bool,
+        auto_category: bool = False,
         concurrency: int | None = None,
         rpm: int | None = None,
     ) -> None:
@@ -2725,7 +2788,11 @@ class PluginAPI:
 
             async def handle(item: dict) -> None:
                 await self._reanalyze_batch_item(
-                    task, item, overwrite=overwrite, throttle=throttle
+                    task,
+                    item,
+                    overwrite=overwrite,
+                    auto_category=auto_category,
+                    throttle=throttle,
                 )
 
             await self._run_batch_workers(
@@ -2782,8 +2849,107 @@ class PluginAPI:
             updates[field] = fresh
         return updates
 
+    async def _apply_library_reanalysis(
+        self,
+        *,
+        img_hash: str,
+        analysis: dict,
+        overwrite: bool,
+        auto_category: bool,
+    ) -> dict[str, Any]:
+        """把重新识别结果写回正式库，可选同步应用分类。
+
+        批量任务开始时拿到的 path 只是快照。写回前先按 hash 重新查当前记录，
+        避免图片已被手动移动后继续操作孤儿路径；分类迁移全程持锁，防止并发
+        worker 同时移动同一张图或抢同一个目标文件名。
+        """
+        if not img_hash:
+            raise RuntimeError("图片记录缺少 hash")
+
+        async with self._category_move_lock:
+            found = self._find_index_entry_by_hash(img_hash)
+            if not found:
+                raise RuntimeError("图片索引已不存在，跳过写入")
+            current_path, current_meta = found
+            updates = self._merge_reanalysis(
+                current_meta, analysis, overwrite=overwrite
+            )
+
+            current_category = str(current_meta.get("category", "") or "")
+            suggested_category = str(analysis.get("category", "") or "")
+            category_changed = bool(
+                auto_category
+                and suggested_category
+                and suggested_category != current_category
+            )
+            final_path = current_path
+
+            if category_changed:
+                old_path = Path(current_path)
+                if not await asyncio.to_thread(os.path.exists, current_path):
+                    raise FileNotFoundError("图片文件已不存在")
+
+                target_dir = self._cfg.ensure_category_dir(suggested_category)
+                new_path = self._unique_path(target_dir, old_path.name)
+                await asyncio.to_thread(
+                    shutil.move, str(old_path), str(new_path)
+                )
+                moved = False
+                try:
+                    # 语义字段和分类在同一次 move_path 事务里落库，避免
+                    # “文件已移动，但标签/描述更新失败”的中间状态。
+                    moved = await self._move_index_path(
+                        current_path, str(new_path), suggested_category, updates
+                    )
+                finally:
+                    if not moved and new_path.exists() and not old_path.exists():
+                        try:
+                            await asyncio.to_thread(
+                                shutil.move, str(new_path), str(old_path)
+                            )
+                        except Exception as rollback_error:
+                            logger.error(
+                                "回滚重新识别分类移动失败: "
+                                f"{new_path} -> {old_path}, {rollback_error}"
+                            )
+                if not moved:
+                    raise RuntimeError("移动图片索引失败")
+                final_path = str(new_path)
+            elif updates:
+                if not await self._update_index_path(current_path, updates):
+                    raise RuntimeError("写入索引失败")
+
+        changed = set(updates)
+        if category_changed:
+            changed.add("category")
+            # 向量刷新放在锁外：分类和索引已经安全落库，嵌入调用可能较慢，
+            # 不该阻塞其他图片的文件迁移。
+            await self._refresh_embedding_for_path(
+                final_path, old_path=current_path
+            )
+        elif updates:
+            await self._refresh_embedding_for_path(final_path)
+
+        return {
+            "path": final_path,
+            "old_path": current_path if category_changed else "",
+            "old_category": current_category,
+            "new_category": (
+                suggested_category if category_changed else current_category
+            ),
+            "category_changed": category_changed,
+            "changed": sorted(changed),
+            "updates": updates,
+        }
+
     async def _reanalyze_batch_item(
-        self, task: dict, item: dict, *, overwrite: bool, throttle
+        self,
+        task: dict,
+        item: dict,
+        *,
+        overwrite: bool,
+        auto_category: bool,
+        throttle,
     ) -> None:
         """重跑单张表情的识别，并把结果写回（表情库写索引，待审核池写 pending 行）。"""
         path = str(item.get("path", "") or "")
@@ -2794,6 +2960,19 @@ class PluginAPI:
         task["current_file"] = filename
         img_hash = str(meta.get("hash", "") or "")
         try:
+            if kind == "library":
+                # 任务可能排队很久：先按 hash 找当前路径，快照里的 path 已经过期时
+                # 不能拿旧路径去读文件，更不能在旧路径上移动索引。
+                found = self._find_index_entry_by_hash(img_hash) if img_hash else None
+                if not found:
+                    raise RuntimeError("图片索引已不存在")
+                path, meta = found
+            elif self._db and hasattr(self._db, "get_pending"):
+                current = self._db.get_pending(pending_id)
+                if not current:
+                    raise RuntimeError("待审核记录已不存在")
+                path = str(current.get("path", "") or "")
+                meta = current
             if not path or not await asyncio.to_thread(os.path.exists, path):
                 raise FileNotFoundError("图片文件已不存在")
 
@@ -2819,28 +2998,54 @@ class PluginAPI:
 
             task["analyzed"] = int(task.get("analyzed", 0) or 0) + 1
             task["phase"] = "storing"
-            updates = self._merge_reanalysis(meta, analysis, overwrite=overwrite)
             if kind == "pending":
-                # 待审核记录里的分类只是一个字段，改它不涉及移动文件，可以顺手修正；
-                # 正式库的分类对应真实目录，仍然只给建议、由人决定要不要挪
+                # 待审核记录里的分类只是一个字段，改它不涉及移动文件，可以顺手修正。
+                # 写回前重新读当前行，避免任务排队期间的人工修改被旧快照覆盖。
+                current = (
+                    self._db.get_pending(pending_id)
+                    if self._db and hasattr(self._db, "get_pending")
+                    else None
+                )
+                if not current:
+                    raise RuntimeError("待审核记录已不存在")
+                meta = current
+                updates = self._merge_reanalysis(meta, analysis, overwrite=overwrite)
                 updates.update(
                     self._merge_reanalysis(
                         meta, analysis, overwrite=overwrite, fields=("category",)
                     )
                 )
-            if updates:
-                if kind == "pending":
+                if updates:
                     # 待审核记录不建向量：它还没进正式库，审核通过时会统一建
                     if not self._db or not await self._db.update_pending(
                         pending_id, updates
                     ):
                         raise RuntimeError("写入待审核记录失败")
-                else:
-                    if not await self._update_index_path(path, updates):
-                        raise RuntimeError("写入索引失败")
-                    await self._refresh_embedding_for_path(path)
+            else:
+                outcome = await self._apply_library_reanalysis(
+                    img_hash=img_hash,
+                    analysis=analysis,
+                    overwrite=overwrite,
+                    auto_category=auto_category,
+                )
+                updates = outcome["updates"]
 
             suggested = str(analysis.get("category", "") or "")
+            if kind == "library":
+                category_changed = bool(outcome["category_changed"])
+                old_category = str(outcome["old_category"] or "")
+                new_category = str(outcome["new_category"] or "")
+            else:
+                category_changed = "category" in updates
+                old_category = str(meta.get("category", "") or "")
+                new_category = (
+                    str(updates.get("category") or old_category)
+                    if "category" in updates
+                    else old_category
+                )
+            changed_fields = set(updates)
+            if category_changed:
+                changed_fields.add("category")
             self._append_batch_result(
                 task,
                 {
@@ -2848,13 +3053,16 @@ class PluginAPI:
                     "hash": img_hash,
                     "kind": kind,
                     "pending_id": pending_id,
-                    "category": str(meta.get("category", "") or ""),
+                    "category": new_category,
+                    "old_category": old_category,
+                    "new_category": new_category,
+                    "category_changed": category_changed,
                     "suggested_category": (
                         ""
-                        if "category" in updates or suggested == meta.get("category")
+                        if category_changed or suggested == old_category
                         else suggested
                     ),
-                    "changed": sorted(updates.keys()),
+                    "changed": sorted(changed_fields),
                     "analyzed": True,
                     "success": True,
                 },
@@ -2913,6 +3121,7 @@ class PluginAPI:
             "paused": bool(task.get("paused")),
             "cancel_requested": bool(task.get("cancel_requested")),
             "auto_analyze": bool(task.get("auto_analyze")),
+            "auto_category": bool(task.get("auto_category")),
             "concurrency": int(task.get("concurrency", 1) or 1),
             "rpm": int(task.get("rpm", 0) or 0),
             "rate_limited_count": int(throttle.get("rate_limited", 0) or 0),

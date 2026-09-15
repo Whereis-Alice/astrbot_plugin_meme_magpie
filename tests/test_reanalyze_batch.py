@@ -465,6 +465,349 @@ class TestCollectPendingReanalyzeTargets:
         assert calls == [{"page": 1, "page_size": PluginAPI.REANALYZE_MAX_ITEMS}]
 
 
+# ── 正式库重新识别的可选自动改分类 ────────────────────────
+
+
+class _CategoryConfig:
+    def __init__(self, root: Path):
+        self.root = root
+
+    def ensure_category_dir(self, category: str) -> Path:
+        path = self.root / str(category)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
+class _LibraryDB:
+    def __init__(self, path: Path, meta: dict, *, move_ok: bool = True):
+        self.path = path
+        self.meta = dict(meta)
+        self.move_ok = move_ok
+        self.update_calls: list[tuple[str, dict]] = []
+        self.move_calls: list[tuple[str, str, str, dict]] = []
+
+    def get_index_cache_readonly(self):
+        return {}
+
+    def get_emoji_by_hash(self, img_hash: str):
+        if img_hash != self.meta.get("hash"):
+            return None
+        return str(self.path), dict(self.meta)
+
+    def get_emoji(self, path: str):
+        if path == str(self.path):
+            return dict(self.meta)
+        return {}
+
+    async def update_path(self, path: str, updates: dict):
+        self.update_calls.append((path, dict(updates)))
+        self.meta.update(updates)
+        return True
+
+    async def move_path(self, old_path: str, new_path: str, category: str, updates: dict):
+        self.move_calls.append((old_path, new_path, category, dict(updates)))
+        if not self.move_ok:
+            return False
+        self.path = Path(new_path)
+        self.meta.update(updates)
+        self.meta["category"] = category
+        return True
+
+
+def _category_api(root: Path, db: _LibraryDB):
+    plugin = types.SimpleNamespace(
+        db_service=db,
+        plugin_config=_CategoryConfig(root),
+        base_dir=root,
+        cache_service=None,
+        meme_selector=None,
+    )
+    return PluginAPI(plugin)
+
+
+def _library_fixture(root: Path, *, category: str = "sad", desc: str = ""):
+    old_dir = root / "old"
+    old_dir.mkdir(parents=True, exist_ok=True)
+    source = old_dir / "h1.png"
+    source.write_bytes(b"image")
+    meta = {
+        "hash": "h1",
+        "category": category,
+        "tags": [],
+        "desc": desc,
+        "scenes": [],
+        "overlay_text": "",
+        "emotions": [],
+    }
+    db = _LibraryDB(source, meta)
+    return _category_api(root, db), db, source
+
+
+def _analysis(category: str = "happy"):
+    return {
+        "category": category,
+        "tags": ["笑"],
+        "desc": "一只笑猫",
+        "scenes": ["聊天"],
+        "overlay_text": "哈哈",
+        "emotions": ["喜悦"],
+    }
+
+
+class TestRefreshEmbeddingAfterMove:
+    def _api(self, *, delete_ok=True, entry=None):
+        deleted: list[str] = []
+        inserted: list[tuple[str, dict]]
+        inserted = []
+
+        class DB:
+            def get_emoji(self, path):
+                return dict(entry or {}) if path == "/new.png" else {}
+
+        class Service:
+            async def delete_by_path(self, path):
+                deleted.append(path)
+                return delete_ok
+
+            async def insert_emoji(self, path, item):
+                inserted.append((path, dict(item)))
+
+        service = Service()
+        invalidated: list[str] = []
+        smart_service = types.SimpleNamespace(
+            _embedding_service=service,
+            _invalidate_embedding_index=lambda: invalidated.append("embedding"),
+        )
+        meme_selector = types.SimpleNamespace(
+            _smart_select_service=smart_service,
+            _invalidate_bm25_index=lambda: invalidated.append("bm25"),
+        )
+        plugin = types.SimpleNamespace(
+            db_service=DB(), meme_selector=meme_selector
+        )
+        return PluginAPI(plugin), deleted, inserted, invalidated
+
+    def test_old_vector_delete_failure_skips_insert(self):
+        api, deleted, inserted, invalidated = self._api(delete_ok=False)
+
+        asyncio.run(
+            api._refresh_embedding_for_path("/new.png", old_path="/old.png")
+        )
+
+        assert deleted == ["/old.png"]
+        assert inserted == []
+        assert invalidated == []
+
+    def test_record_moved_again_does_not_reinsert_old_path(self):
+        api, deleted, inserted, invalidated = self._api(entry=None)
+
+        asyncio.run(
+            api._refresh_embedding_for_path("/new.png", old_path="/old.png")
+        )
+
+        assert deleted == ["/old.png", "/new.png"]
+        assert inserted == []
+        assert invalidated == ["embedding", "bm25"]
+
+
+class TestApplyLibraryReanalysis:
+    def test_auto_category_off_keeps_file_in_place(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path)
+
+        outcome = asyncio.run(
+            api._apply_library_reanalysis(
+                img_hash="h1",
+                analysis=_analysis(),
+                overwrite=False,
+                auto_category=False,
+            )
+        )
+
+        assert source.exists()
+        assert db.move_calls == []
+        assert db.update_calls == [(str(source), outcome["updates"])]
+        assert outcome["category_changed"] is False
+        assert outcome["new_category"] == "sad"
+
+    def test_auto_category_on_moves_file_and_updates_index(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path)
+        target = tmp_path / "happy" / "h1.png"
+
+        outcome = asyncio.run(
+            api._apply_library_reanalysis(
+                img_hash="h1",
+                analysis=_analysis(),
+                overwrite=False,
+                auto_category=True,
+            )
+        )
+
+        assert not source.exists()
+        assert target.read_bytes() == b"image"
+        assert len(db.move_calls) == 1
+        old_path, new_path, category, updates = db.move_calls[0]
+        assert (old_path, new_path, category) == (str(source), str(target), "happy")
+        assert updates == outcome["updates"]
+        assert "desc" in updates
+        assert outcome["category_changed"] is True
+        assert outcome["old_category"] == "sad"
+        assert outcome["new_category"] == "happy"
+        assert "category" in outcome["changed"]
+
+    def test_same_category_does_not_move_file(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path, category="happy")
+
+        outcome = asyncio.run(
+            api._apply_library_reanalysis(
+                img_hash="h1",
+                analysis=_analysis("happy"),
+                overwrite=False,
+                auto_category=True,
+            )
+        )
+
+        assert source.exists()
+        assert db.move_calls == []
+        assert len(db.update_calls) == 1
+        assert outcome["category_changed"] is False
+
+    def test_auto_category_is_independent_of_overwrite(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path, desc="人工校对过的描述")
+        target = tmp_path / "happy" / "h1.png"
+
+        outcome = asyncio.run(
+            api._apply_library_reanalysis(
+                img_hash="h1",
+                analysis=_analysis(),
+                overwrite=False,
+                auto_category=True,
+            )
+        )
+
+        assert not source.exists()
+        assert target.exists()
+        assert "desc" not in outcome["updates"]
+        assert set(outcome["updates"]) == {"tags", "scenes", "overlay_text", "emotions"}
+        assert outcome["category_changed"] is True
+        assert db.move_calls[0][3] == outcome["updates"]
+
+    def test_failed_index_move_rolls_file_back(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path)
+        db.move_ok = False
+
+        with pytest.raises(RuntimeError, match="移动图片索引失败"):
+            asyncio.run(
+                api._apply_library_reanalysis(
+                    img_hash="h1",
+                    analysis=_analysis(),
+                    overwrite=False,
+                    auto_category=True,
+                )
+            )
+
+        assert source.read_bytes() == b"image"
+        assert not (tmp_path / "happy" / "h1.png").exists()
+
+    def test_missing_index_does_not_touch_file(self, tmp_path):
+        api, db, source = _library_fixture(tmp_path)
+        db.meta["hash"] = "gone"
+
+        with pytest.raises(RuntimeError, match="图片索引已不存在"):
+            asyncio.run(
+                api._apply_library_reanalysis(
+                    img_hash="h1",
+                    analysis=_analysis(),
+                    overwrite=False,
+                    auto_category=True,
+                )
+            )
+
+        assert source.exists()
+        assert db.move_calls == []
+
+    def test_reanalyze_item_relocates_stale_snapshot_before_analysis(self, tmp_path, monkeypatch):
+        api, db, source = _library_fixture(tmp_path)
+        stale_path = tmp_path / "old-snapshot" / "h1.png"
+        analyzed_paths: list[str] = []
+
+        async def fake_analyze(path, throttle, known=None):
+            analyzed_paths.append(path)
+            return _analysis()
+
+        monkeypatch.setattr(api, "_analyze_existing_image", fake_analyze)
+        task = {
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "analyzed": 0,
+            "results": [],
+            "phase": "",
+            "current_file": "",
+        }
+        item = {
+            "kind": "library",
+            "path": str(stale_path),
+            "filename": "h1.png",
+            "meta": {"hash": "h1", "category": "sad"},
+        }
+
+        asyncio.run(
+            api._reanalyze_batch_item(
+                task,
+                item,
+                overwrite=False,
+                auto_category=True,
+                throttle=types.SimpleNamespace(snapshot=lambda: {}),
+            )
+        )
+
+        assert analyzed_paths == [str(source)]
+        assert task["failed"] == 0
+        assert task["results"][0]["category_changed"] is True
+        assert task["results"][0]["old_category"] == "sad"
+        assert task["results"][0]["new_category"] == "happy"
+
+    def test_reanalyze_item_reports_applied_category_fields(self, tmp_path, monkeypatch):
+        api, db, source = _library_fixture(tmp_path)
+
+        async def fake_analyze(path, throttle, known=None):
+            return _analysis()
+
+        monkeypatch.setattr(api, "_analyze_existing_image", fake_analyze)
+        task = {
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "analyzed": 0,
+            "results": [],
+            "phase": "",
+            "current_file": "",
+        }
+
+        asyncio.run(
+            api._reanalyze_batch_item(
+                task,
+                {
+                    "kind": "library",
+                    "path": str(source),
+                    "filename": "h1.png",
+                    "meta": {"hash": "h1", "category": "sad"},
+                },
+                overwrite=False,
+                auto_category=True,
+                throttle=types.SimpleNamespace(snapshot=lambda: {}),
+            )
+        )
+
+        result = task["results"][0]
+        assert result["category"] == "happy"
+        assert result["old_category"] == "sad"
+        assert result["new_category"] == "happy"
+        assert result["category_changed"] is True
+        assert result["suggested_category"] == ""
+        assert "category" in result["changed"]
+
+
 class TestReanalyzeScopeRouting:
     def test_pending_scope_is_forwarded(self):
         api, _ = _pending_api()

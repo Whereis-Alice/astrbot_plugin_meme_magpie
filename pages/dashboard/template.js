@@ -1274,6 +1274,13 @@ export const TEMPLATE = `
                     <p class="hint-text" style="margin:6px 0 0 24px">
                         {{ t('pages.dashboard.reanalyze.overwrite_hint', '不勾选时只填空白字段，已有的标签和描述保持不动；勾选后识别结果会直接替换旧内容。') }}
                     </p>
+                    <label v-if="!reanalyzeIsPending" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+                        <input type="checkbox" v-model="reanalyzeForm.autoCategory" class="codex-checkbox">
+                        <span style="font-size:0.85rem;color:var(--text-main)">{{ t('pages.dashboard.reanalyze.auto_category', '自动改分类') }}</span>
+                    </label>
+                    <p v-if="!reanalyzeIsPending" class="hint-text" style="margin:6px 0 0 24px">
+                        {{ t('pages.dashboard.reanalyze.auto_category_hint', '开启后，识别出的分类会直接应用到正式库；分类变化时会移动图片文件并更新索引。这个选项独立于「覆盖已有标注」。') }}
+                    </p>
                 </div>
 
                 <div class="mt-16">
@@ -1313,7 +1320,8 @@ export const TEMPLATE = `
 
                 <p class="hint-text" style="margin:12px 0 0">
                     <span v-if="reanalyzeIsPending">{{ t('pages.dashboard.reanalyze.category_note_pending', '待审核记录的分类只是一个待定字段，不对应真实目录，所以这里会连分类一起修正；等你点通过时才按最终分类归档。') }}</span>
-                    <span v-else>{{ t('pages.dashboard.reanalyze.category_note', '为避免大批量移动文件出意外，重新识别不会自动改分类。如果识别出的分类和现有分类不一致，会在结果里作为建议列出，你再决定要不要手动移动。') }}</span>
+                    <span v-else-if="reanalyzeForm.autoCategory">{{ t('pages.dashboard.reanalyze.category_note_auto', '已开启自动改分类：识别结果和当前分类不同时会移动文件并更新索引。批量任务里每一张都会先按 hash 重新定位，移动过程也会串行处理，避免并发抢路径。') }}</span>
+                    <span v-else>{{ t('pages.dashboard.reanalyze.category_note', '默认不自动改分类。如果识别出的分类和现有分类不一致，会在结果里作为建议列出，你再决定要不要手动移动。') }}</span>
                 </p>
 
                 <div v-if="batchUploadError" class="error-banner">
@@ -1433,6 +1441,21 @@ export const TEMPLATE = `
                             <span class="batch-stat-k">{{ t('pages.dashboard.reanalyze.suggested_category', '建议改分类') }}</span>
                             <span class="batch-stat-v">{{ reanalyzeSuggestions.length }}</span>
                         </div>
+                        <div class="batch-stat" :class="{ warn: reanalyzeCategoryChanges.length > 0 }">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.reanalyze.category_changed', '已自动改分类') }}</span>
+                            <span class="batch-stat-v">{{ reanalyzeCategoryChanges.length }}</span>
+                        </div>
+                    </div>
+                    <div v-if="reanalyzeCategoryChanges.length" class="batch-failure-list">
+                        <div class="batch-failure-head">
+                            {{ t('pages.dashboard.reanalyze.category_changed_list', '已自动改分类') }}
+                        </div>
+                        <ul>
+                            <li v-for="(item, idx) in reanalyzeCategoryChanges" :key="'mc' + idx">
+                                <span class="batch-failure-name">{{ item.filename }}</span>
+                                <span class="batch-failure-reason">{{ item.old_category || '—' }} → {{ item.new_category }}</span>
+                            </li>
+                        </ul>
                     </div>
                     <div v-if="reanalyzeSuggestions.length" class="batch-failure-list">
                         <div class="batch-failure-head">

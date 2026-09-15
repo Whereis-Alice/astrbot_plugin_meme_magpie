@@ -661,7 +661,7 @@
         "overwrite_hint": "When unchecked, only empty fields are filled and existing tags or descriptions stay untouched. When checked, analysis results replace the old values.",
         "limit": "Max items this run",
         "limit_hint": "0 means no extra limit. For large libraries, run a few smaller batches so you can check the results along the way.",
-        "category_note": "Re-analysis never moves files, so categories are left unchanged. When the detected category differs from the current one it is listed as a suggestion for you to apply manually.",
+        "category_note": "Categories are not changed by default. When the detected category differs from the current one, it is listed as a suggestion for you to apply manually.",
         "start": "Start ({count})",
         "continue": "Run another batch",
         "changed": "Labels updated",
@@ -686,7 +686,12 @@
         "scan_failed": "Could not read the image counts - the backend or network may be down. Close and reopen this dialog to try again.",
         "target_no_desc": "Only those with no description",
         "target_hint_no_desc": "\"No description\" is the narrower option: it only picks entries whose description is empty. Those are effectively unsearchable, so they are worth fixing first.",
-        "target_empty": "\"{target}\" has 0 images right now - pick a different scope before you start."
+        "target_empty": "\"{target}\" has 0 images right now - pick a different scope before you start.",
+        "auto_category": "Apply category changes",
+        "auto_category_hint": "When enabled, detected categories are applied to the library directly; a category change moves the image file and updates the index. This is independent of overwriting existing labels.",
+        "category_note_auto": "Applying category changes is enabled: if the result differs from the current category, the file is moved and the index updated. Each batch item is relocated by hash first, and moves are serialized so concurrent workers cannot race for paths.",
+        "category_changed": "Categories changed",
+        "category_changed_list": "Automatically changed categories"
       },
       "missing_desc": {
         "title": "Missing descriptions",

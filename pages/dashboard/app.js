@@ -322,6 +322,7 @@ createApp({
         const reanalyzeForm = reactive({
             target: 'missing', overwrite: false, limit: 0,
             concurrency: 2, rpm: 20,
+            autoCategory: false,
             // library = 已入库表情包，pending = 待审核池，两边共用同一个弹窗
             scope: 'library',
         });
@@ -2100,6 +2101,10 @@ createApp({
             batchTaskResults.value.filter((item) => item && item.success && item.suggested_category)
         );
 
+        const reanalyzeCategoryChanges = computed(() =>
+            batchTaskResults.value.filter((item) => item && item.success && item.category_changed)
+        );
+
         // 粗估识别耗时：并发与 RPM 取更严格的一方，单张按 6 秒计
         const batchEstimateMinutes = computed(() => {
             const count = batchFiles.value.length;
@@ -2273,6 +2278,7 @@ createApp({
                 scope: isPending ? 'pending' : 'library',
                 target: target || (hasSelection ? 'selected' : 'missing'),
                 overwrite: false,
+                autoCategory: false,
                 limit: 0,
                 concurrency: batchDefaults.value.concurrency,
                 rpm: batchDefaults.value.rpm,
@@ -2290,6 +2296,7 @@ createApp({
                     scope: reanalyzeForm.scope,
                     target: reanalyzeForm.target,
                     overwrite: Boolean(reanalyzeForm.overwrite),
+                    auto_category: !reanalyzeIsPending.value && Boolean(reanalyzeForm.autoCategory),
                     limit: clampInt(reanalyzeForm.limit, 0, 100000, 0),
                     concurrency: clampInt(reanalyzeForm.concurrency, 1, maxConc, batchDefaults.value.concurrency),
                     rpm: clampInt(reanalyzeForm.rpm, 0, 600, batchDefaults.value.rpm),
@@ -3817,6 +3824,7 @@ createApp({
             submitBatchModal,
             reanalyzeChangedCount,
             reanalyzeSuggestions,
+            reanalyzeCategoryChanges,
             reanalyzeNoDescCount,
             reanalyzeTargetEmptyNote,
 
