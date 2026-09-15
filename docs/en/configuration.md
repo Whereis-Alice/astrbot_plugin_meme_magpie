@@ -27,7 +27,8 @@ Everything is editable in the AstrBot plugin config page. The notable ones:
 | Intent gate | `true` | Checks whether the reply is a good fit for a sticker at all; cuts down on non-sequitur sends |
 | Cancel pending sticker on new message | `true` | A new message in the same chat cancels a sticker still waiting out its delay |
 | Send probability | `0.2` | 0.0 – 1.0 |
-| Send as GIF | `false` | Feels more like a real sticker; the cost is re-encoding the animation on every send. The conversion keeps at most 30 frames and is capped by total pixels (very large animations automatically keep fewer), peaking around 15MB for a 512-square animation. Leave it off if memory is tight |
+| Send as GIF | `false` | Feels more like a real sticker. Files already in GIF format pass through untouched; other animations are converted with at most 30 frames and a total-pixel cap (very large animations automatically keep fewer), peaking around 15MB for a 512-square animation. Leave it off if memory is tight |
+| Send as QQ sticker | `true` | Only affects OneBot/QQ (including LLBot, NapCat and SnowLuma); writes sticker flags for a native sticker look, or sends an ordinary image when off |
 | Fixed delay (s) | `5.0` | Keeps out of the way of message-splitting plugins; 0 sends immediately |
 | Randomize delay | `false` | Pick a random delay between the fixed and maximum values |
 | Per-character delay (s) | `0.3` | Extra wait scaled by reply length, simulating "read the text, then react" |

@@ -265,6 +265,38 @@ class TestSendQqImageAsSticker:
         assert data["subType"] == 1
 
     @pytest.mark.asyncio
+    async def test_qq_sticker_setting_can_be_disabled(self, delivery, tmp_path):
+        module, cls = delivery
+        path = tmp_path / "a.gif"
+        path.write_bytes(b"gif")
+        payload = [{"type": "image", "data": {"file": str(path)}}]
+        event, sent = self._event(cls, payload)
+        plugin = types.SimpleNamespace(send_meme_as_qq_sticker=False)
+
+        ok = await module.send_qq_image_as_sticker(
+            event, str(path), summary="[动画表情]", plugin=plugin
+        )
+
+        assert ok is False
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_qq_sticker_defaults_to_enabled(self, delivery, tmp_path):
+        module, cls = delivery
+        path = tmp_path / "a.gif"
+        path.write_bytes(b"gif")
+        payload = [{"type": "image", "data": {"file": str(path)}}]
+        event, sent = self._event(cls, payload)
+        plugin = types.SimpleNamespace()
+
+        ok = await module.send_qq_image_as_sticker(
+            event, str(path), summary="[动画表情]", plugin=plugin
+        )
+
+        assert ok is True
+        assert sent[0][1][0]["data"]["subType"] == 1
+
+    @pytest.mark.asyncio
     async def test_rejects_non_aiocqhttp_event(self, delivery, tmp_path):
         module, _cls = delivery
         path = tmp_path / "a.gif"

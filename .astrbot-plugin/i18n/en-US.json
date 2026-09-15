@@ -97,7 +97,11 @@
     },
     "send_meme_as_gif": {
       "description": "Send as GIF",
-      "hint": "When enabled, always output as GIF for a native sticker feel. When disabled, send in original format (png/jpg/gif etc.). High-frequency sending of large GIFs may cause high memory usage."
+      "hint": "When enabled, always output as GIF for a native sticker feel. Files that are already GIFs pass through untouched; other animations are converted with frame and pixel budgets. When disabled, send in original format (png/jpg/gif etc.)."
+    },
+    "send_meme_as_qq_sticker": {
+      "description": "Send as QQ sticker",
+      "hint": "Only affects OneBot/QQ (including LLBot, NapCat and SnowLuma). When enabled, sticker flags are written so images render more like native stickers; when disabled, they are sent as ordinary images. Independent from \"Send as GIF\"."
     },
     "meme_send_delay": {
       "description": "Fixed delay (seconds)",

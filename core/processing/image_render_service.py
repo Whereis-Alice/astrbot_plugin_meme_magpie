@@ -132,24 +132,79 @@ class ImageRenderService:
             if PILImage is None:
                 return await self.file_to_base64(file_path)
 
+            # GIF 本身已经带着完整帧、时序和循环信息。重新编码既可能丢帧，
+            # 也无法保证各家 Pillow 版本的调色板行为完全一致，直接透传最稳。
+            if self._is_gif_file(file_path):
+                result = await self.file_to_base64(file_path)
+                if result:
+                    self._gif_base64_cache[cache_key] = (time.time(), result)
+                    self._evict_gif_base64_cache()
+                return result
+
             def _sync_convert_to_gif(fp: str) -> str:
                 with PILImage.open(fp) as im:
                     buf = BytesIO()
                     is_animated = bool(getattr(im, "is_animated", False))
                     n_frames = int(getattr(im, "n_frames", 1) or 1)
+                    source_loop = im.info.get("loop", 0)
 
                     if is_animated and n_frames > 1:
                         budget = self.gif_frame_budget(im.size, n_frames)
+                        selected_indices = self._uniform_frame_indices(n_frames, budget)
+                        selected_set = set(selected_indices)
                         frames: list[Any] = []
                         durations: list[int] = []
-                        frame_step = max(1, n_frames // budget)
-                        for frame_idx in range(0, n_frames, frame_step):
-                            if len(frames) >= budget:
-                                break
+                        fingerprints: list[bytes] = []
+                        frame_durations: list[int] = []
+
+                        # 先把每一帧的时长读完，再按抽样区间合并；这样即使帧被
+                        # 压缩，动画总时长也和源文件一致。
+                        for frame_idx in range(n_frames):
                             im.seek(frame_idx)
-                            # 尺寸保持原样，只是把帧提前压成调色板图，省的是内存不是画质
-                            frames.append(self.to_gif_frame(im))
-                            durations.append(im.info.get("duration", 100))
+                            frame_durations.append(
+                                max(1, int(im.info.get("duration", 100) or 100))
+                            )
+                            if frame_idx in selected_set:
+                                # 尺寸保持原样，只是把帧提前压成调色板图，
+                                # 省的是内存不是画质。
+                                frames.append(self.to_gif_frame(im))
+                                fingerprints.append(self._frame_fingerprint(frames[-1]))
+
+                        # 很短的动画可能只在两个抽样点之间变化。若抽样帧看起来
+                        # 全一样，补进第一张真正不同的帧，避免动图被看成静图。
+                        if len(frames) > 1 and len(set(fingerprints)) == 1:
+                            baseline = fingerprints[0]
+                            for frame_idx in range(n_frames):
+                                if frame_idx in selected_set:
+                                    continue
+                                im.seek(frame_idx)
+                                candidate = self.to_gif_frame(im)
+                                if self._frame_fingerprint(candidate) == baseline:
+                                    candidate.close()
+                                    continue
+
+                                old_frame = frames[-1]
+                                selected_indices[-1] = frame_idx
+                                frames[-1] = candidate
+                                old_frame.close()
+                                break
+
+                        ordered = sorted(zip(selected_indices, frames), key=lambda item: item[0])
+                        selected_indices = [index for index, _ in ordered]
+                        frames = [frame for _, frame in ordered]
+                        duration_ranges = zip(
+                            selected_indices,
+                            selected_indices[1:] + [n_frames],
+                        )
+                        durations = [
+                            max(1, sum(frame_durations[start:end]))
+                            for start, end in duration_ranges
+                        ]
+
+                        try:
+                            loop = max(0, int(source_loop or 0))
+                        except (TypeError, ValueError):
+                            loop = 0
 
                         try:
                             if frames:
@@ -159,7 +214,7 @@ class ImageRenderService:
                                     save_all=True,
                                     append_images=frames[1:],
                                     duration=durations,
-                                    loop=0,
+                                    loop=loop,
                                     optimize=False,
                                     disposal=2,
                                 )
@@ -181,6 +236,41 @@ class ImageRenderService:
         except Exception as e:
             logger.error(f"转换为 GIF base64 失败: {e}")
             return await self.file_to_base64(file_path)
+
+    @staticmethod
+    def _is_gif_file(file_path: str) -> bool:
+        """只看文件魔数，不被错误后缀误导。"""
+        try:
+            with open(file_path, "rb") as handle:
+                return handle.read(6) in (b"GIF87a", b"GIF89a")
+        except OSError:
+            return False
+
+    @staticmethod
+    def _uniform_frame_indices(n_frames: int, max_frames: int) -> list[int]:
+        """均匀抽出包含首帧和末帧的下标。"""
+        count = min(max(1, int(max_frames)), max(0, int(n_frames)))
+        if count <= 0:
+            return []
+        if count == 1:
+            return [0]
+
+        denominator = count - 1
+        last = max(0, int(n_frames) - 1)
+        return [
+            (position * last + denominator // 2) // denominator
+            for position in range(count)
+        ]
+
+    @staticmethod
+    def _frame_fingerprint(frame: Any) -> bytes:
+        """生成用于判断两帧是否有实质差异的缩略指纹。"""
+        sample = frame.convert("RGB")
+        try:
+            sample.thumbnail((32, 32), LANCZOS or PILImage.BICUBIC)
+            return sample.tobytes()
+        finally:
+            sample.close()
 
     def _evict_gif_base64_cache(self) -> None:
         """淘汰 _gif_base64_cache 中最旧的条目。"""

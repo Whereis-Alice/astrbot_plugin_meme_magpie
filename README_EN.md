@@ -177,7 +177,7 @@ Back it up by archiving that one directory.
 - **A vision model is mandatory**; without one, nothing that involves recognition works.
 - "Max stickers" is a hard cap that really deletes files. Read [Library capacity cap](docs/en/configuration.md#library-capacity-cap) before lowering it.
 - Deleting a category in the WebUI deletes the image files inside it.
-- With "send as GIF" enabled, every send re-encodes the animation. Peak memory is budget-capped but still higher than sending the original file — leave it off if memory is tight.
+- With "send as GIF" enabled, files already in GIF format pass through untouched; other animations are converted. Peak memory is frame- and pixel-budget-capped but still higher than sending the original file — leave it off if memory is tight.
 - Sticker content and copyright belong to their creators. Follow your platform's rules and do not use this to spread prohibited content.
 
 ## Licence and credits

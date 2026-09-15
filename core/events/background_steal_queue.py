@@ -14,6 +14,7 @@ from typing import Any
 from astrbot.api import logger
 
 from ..util.safe_io import safe_remove_file
+from .image_download_service import ImageDownloadService
 
 
 @dataclass(slots=True)
@@ -54,6 +55,15 @@ class BackgroundStealQueue:
     @property
     def pending_count(self) -> int:
         return self._queue.qsize()
+
+    @staticmethod
+    def _staging_suffix(file_path: str) -> str:
+        """按文件魔数选择暂存后缀，避免“名字像 jpg、内容是 WebP”的图被误标。"""
+        try:
+            suffix, _ = ImageDownloadService.detect_local_file_type(file_path)
+            return suffix
+        except OSError:
+            return Path(file_path).suffix.lower() or ".jpg"
 
     async def start(self) -> None:
         if self._accepting:
@@ -181,7 +191,7 @@ class BackgroundStealQueue:
                 return False
             staged_path = ""
             try:
-                suffix = Path(ref).suffix or ".jpg"
+                suffix = self._staging_suffix(ref)
                 staged = self.staging_dir / f"{uuid.uuid4().hex}{suffix.lower()}"
                 await self._copy_file(ref, str(staged))
                 staged_path = str(staged)
@@ -258,7 +268,7 @@ class BackgroundStealQueue:
                 async with self._staging_lock:
                     if not self._accepting:
                         return
-                    suffix = Path(source_path).suffix or ".jpg"
+                    suffix = self._staging_suffix(source_path)
                     staged_path = str(
                         self.staging_dir / f"{uuid.uuid4().hex}{suffix.lower()}"
                     )

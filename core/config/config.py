@@ -62,6 +62,7 @@ class PluginConfig(BaseModel):
     auto_send_meme: bool = True
     meme_chance: float = 0.2
     send_meme_as_gif: bool = False
+    send_meme_as_qq_sticker: bool = True
     meme_send_char_delay: float = 0.3
     meme_send_delay: float = 5.0
     meme_send_delay_random: bool = False

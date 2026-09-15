@@ -1449,14 +1449,18 @@ createApp({
                     method: 'POST',
                     body: JSON.stringify({ hash: img.hash, blacklist }),
                 });
-                if (res.ok) {
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data.success) {
                     closePreview();
                     if (images.value.length === 1 && currentPage.value > 1) {
                         currentPage.value--;
                     }
                     refreshView();
                 } else {
-                    showAlert(t('pages.dashboard.alerts.delete_failed', 'Delete failed.'));
+                    showAlert(
+                        data.error || t('pages.dashboard.alerts.delete_failed', 'Delete failed.'),
+                        'error'
+                    );
                 }
             } catch (e) {
                 showAlert(t('pages.dashboard.alerts.action_failed', 'Action failed.'));

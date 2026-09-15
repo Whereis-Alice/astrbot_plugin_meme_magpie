@@ -13,7 +13,7 @@ The plugin itself is platform-agnostic — collecting and sending images works a
 What that means in practice:
 
 - **Collecting** — marketplace stickers are read straight from the raw OneBot segments rather than from AstrBot's image components (otherwise LLBot's `mface` segment is lost entirely). Deciding "this is a sticker, not a photo" looks at `sub_type` / `subType` / `summary` and also at marketplace-only fields such as `emoji_id`, `emoji_package_id` and `key` — that last layer is what catches SnowLuma's `sub_type: 0`. The `emoji_id`, the pack id and the label are stored with the entry so the source can be traced later.
-- **Sending** — when an image goes out *as a sticker*, `summary`, `sub_type` and `subType` are all written at once, so every adapter renders it correctly and quietly ignores the keys it does not know.
+- **Sending** — "Send as QQ sticker" is on by default. `summary`, `sub_type` and `subType` are all written at once, so every adapter renders it correctly and quietly ignores the keys it does not know; turn the setting off to send an ordinary image.
 
 This assumes OneBot's `messageFormat` is `array` (the default). Set it to `string` and the raw message becomes one CQ-code string, at which point marketplace stickers cannot be read at all.
 

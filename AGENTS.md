@@ -128,7 +128,7 @@ self.plugin.wake_prefix(event)            # 只要前缀本身
 ### `_conf_schema.json`
 - `type` 合法值只有：`string, text, int, float, bool, object, list, template_list, file`。写 `str` 会导致配置面板异常。
 - 新增配置项必须同步三处：`_conf_schema.json`、`core/config/config.py` 的 Pydantic 字段、`.astrbot-plugin/i18n/*.json` 的 `config` 段。
-- 当前共 56 个配置键。
+- 当前 schema 顶层共 66 个条目：11 个分组标题 + 55 个配置键。
 
 ### i18n
 `.astrbot-plugin/i18n/{zh-CN,en-US,ru-RU}.json` 是嵌套 JSON：顶层 `metadata`（`display_name` / `short_desc` / `desc`）+ `config`（每个键 `{description, hint, labels}`）。枚举的 `options` 不翻译，翻的是 `labels`。缺失的键会回退到 `zh-CN`。

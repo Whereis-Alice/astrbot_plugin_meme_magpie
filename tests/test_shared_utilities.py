@@ -37,6 +37,12 @@ def test_canonicalize_path_unifies_separators_and_segments():
     assert "\\" not in canonicalize_path(r"C:\memes\cat.gif")
 
 
+def test_canonicalize_path_uses_cross_platform_rules():
+    assert canonicalize_path("C:/Memes/Cat.PNG") == "c:/memes/cat.png"
+    assert canonicalize_path("/data//memes/../a.webp") == "/data/a.webp"
+    assert canonicalize_path(r"DATA\Memes\A.webp") == canonicalize_path("data/memes/a.webp")
+
+
 def test_event_context_uses_consistent_platform_and_session_fallbacks():
     event = types.SimpleNamespace(
         get_platform_name=lambda: "",

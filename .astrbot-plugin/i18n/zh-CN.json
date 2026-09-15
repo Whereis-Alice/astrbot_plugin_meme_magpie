@@ -97,7 +97,11 @@
     },
     "send_meme_as_gif": {
       "description": "以 GIF 格式发送",
-      "hint": "开启后始终以 GIF 输出，更接近真表情包样式。关闭时按原文件格式发送（png/jpg/gif 等）。开启后高频发送大图/动图场景会有较高瞬时内存占用。"
+      "hint": "开启后始终以 GIF 输出，更接近真表情包样式。已是 GIF 的文件会原样透传；其他动图会转成 GIF 并限制帧数与总像素。关闭时按原文件格式发送（png/jpg/gif 等）。"
+    },
+    "send_meme_as_qq_sticker": {
+      "description": "QQ 端按表情发送",
+      "hint": "仅 OneBot/QQ（含 LLBot、NapCat、SnowLuma）生效。开启后写入表情标记，让图片更像原生表情；关闭时按普通图片发送。与「以 GIF 格式发送」独立。"
     },
     "meme_send_delay": {
       "description": "固定延迟（秒）",

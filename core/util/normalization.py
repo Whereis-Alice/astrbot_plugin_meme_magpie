@@ -4,7 +4,7 @@
 检索服务各自维护一套略有差异的别名与去重规则。
 """
 
-import os
+import posixpath
 import re
 from typing import Any
 
@@ -18,11 +18,8 @@ _LOCAL_SCOPE_ALIASES = frozenset({"local", "private", "scoped"})
 
 def canonicalize_path(path: object) -> str:
     """生成用于比较/去重的稳定路径键。"""
-    try:
-        normalized = os.path.normpath(str(path or ""))
-    except Exception:
-        normalized = str(path or "")
-    return os.path.normcase(normalized).replace("\\", "/")
+    raw = str(path or "").replace("\\", "/")
+    return posixpath.normpath(raw).casefold()
 
 
 def normalize_scope_mode(

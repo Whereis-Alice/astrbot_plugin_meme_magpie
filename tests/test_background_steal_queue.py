@@ -62,6 +62,42 @@ class BackgroundQueueTests(unittest.IsolatedAsyncioTestCase):
         path.write_bytes(b"fixture")
         return path
 
+    async def test_local_staging_suffix_follows_magic_bytes(self):
+        source = self._write_file("event-owned.jpg")
+        source.write_bytes(b"GIF89aevent-owned-image")
+
+        accepted = await self.queue.submit_capture_async(
+            [{"media_ref": str(source), "source": "automatic", "extra_meta": {}}]
+        )
+
+        self.assertTrue(accepted)
+        for _ in range(20):
+            if self.processed:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(self.processed), 1)
+        self.assertEqual(Path(self.processed[0]["file_path"]).suffix, ".gif")
+
+    async def test_remote_staging_suffix_follows_magic_bytes(self):
+        downloaded = self._write_file("remote-download.jpg")
+        downloaded.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+
+        async def fake_download(_url):
+            return str(downloaded), False
+
+        self.plugin.event_handler = types.SimpleNamespace(
+            _download_url_to_temp=fake_download
+        )
+        await self.queue._stage_and_enqueue(
+            [{"media_ref": "https://example.test/a.jpg", "source": "automatic"}]
+        )
+        for _ in range(20):
+            if self.processed:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(len(self.processed), 1)
+        self.assertEqual(Path(self.processed[0]["file_path"]).suffix, ".webp")
+
     async def test_capture_returns_before_worker_finishes_and_cleans_file(self):
         source = self._write_file()
         self.plugin.event_handler = types.SimpleNamespace()

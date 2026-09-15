@@ -3,6 +3,7 @@
 import os
 from typing import Any
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import Image
 
@@ -28,6 +29,9 @@ async def send_qq_image_as_sticker(
         return False
     if not file_path or not os.path.exists(file_path):
         return False
+    # 默认按表情发送；关闭后返回 False，让调用方走标准图片发送路径。
+    if not bool(getattr(plugin, "send_meme_as_qq_sticker", True)):
+        return False
 
     # 这里使用适配器内部接口做 QQ 专属优化；任何失败都交给调用方的标准
     # event.send 路径回退，避免平台版本变化中断回复。
@@ -50,5 +54,6 @@ async def send_qq_image_as_sticker(
         data["subType"] = 1
         await event.bot.send(event.message_obj.raw_message, onebot_message)
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning(f"QQ 表情投递失败，将回退为普通图片发送: {e}")
         return False

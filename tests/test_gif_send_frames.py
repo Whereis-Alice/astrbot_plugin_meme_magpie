@@ -3,6 +3,7 @@
 import asyncio
 import base64
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +131,83 @@ def test_animation_never_holds_rgba_frames(monkeypatch, tmp_path):
     with PILImage.open(BytesIO(data)) as out:
         assert out.format == "GIF"
         assert out.n_frames == 8
+
+
+def test_original_gif_is_passed_through_byte_for_byte(tmp_path):
+    """开启强制 GIF 后，源 GIF 不再重编码，避免丢帧和时序漂移。"""
+    path = _write_animation(tmp_path / "a.gif", (48, 48), 6, fmt="GIF", mode="P")
+    service = _service()
+
+    data = _convert(service, path)
+
+    assert data == Path(path).read_bytes()
+
+
+def test_non_gif_animation_keeps_total_duration_and_loop(tmp_path):
+    path = tmp_path / "timed.png"
+    frames = _make_frames((32, 32), 8)
+    durations = [80, 100, 80, 120, 80, 100, 80, 130]
+    frames[0].save(
+        path,
+        format="PNG",
+        save_all=True,
+        append_images=frames[1:],
+        duration=durations,
+        loop=3,
+    )
+    service = _service()
+
+    data = _convert(service, str(path))
+
+    with PILImage.open(path) as src, PILImage.open(BytesIO(data)) as out:
+        assert out.info.get("loop") == 3
+        source_total = sum(info_duration for info_duration in _iter_durations(src))
+        output_total = sum(info_duration for info_duration in _iter_durations(out))
+        assert output_total == source_total
+
+
+def test_sparse_change_frame_is_not_lost_by_sampling(tmp_path):
+    """抽样点全是同一画面时，要补进中间真正变化的那一帧。"""
+    path = tmp_path / "sparse.png"
+    frames = [PILImage.new("RGBA", (32, 32), (20, 30, 40, 255)) for _ in range(5)]
+    changed = PILImage.new("RGBA", (32, 32), (240, 20, 20, 255))
+    changed.paste((20, 30, 40, 255), (24, 24, 32, 32))
+    frames[2] = changed
+    frames[0].save(
+        path,
+        format="PNG",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[10, 20, 30, 40, 50],
+        loop=0,
+    )
+    service = _service()
+
+    data = _convert(service, str(path))
+
+    with PILImage.open(BytesIO(data)) as out:
+        # Pillow 会把相邻且画面完全相同的 GIF 帧合并，并把时长相加；
+        # 这里要验证的是“变化帧没丢、总时长没变”，而不是物理帧数。
+        assert out.n_frames >= 2
+        assert sum(info_duration for info_duration in _iter_durations(out)) == 150
+        first = _frame_bytes(out, 0)
+        assert any(_frame_bytes(out, index) != first for index in range(1, out.n_frames))
+
+
+def _iter_frames(image):
+    for index in range(image.n_frames):
+        image.seek(index)
+        yield image
+
+
+def _iter_durations(image):
+    for _ in _iter_frames(image):
+        yield max(1, int(image.info.get("duration", 100) or 100))
+
+
+def _frame_bytes(image, index):
+    image.seek(index)
+    return image.convert("RGB").tobytes()
 
 
 def test_output_frames_match_the_source_animation(tmp_path):

@@ -13,7 +13,7 @@
 对应的处理是：
 
 - **收图**：商城表情直接从 OneBot 原始消息段里读，不依赖 AstrBot 的图片组件（否则 LLBot 的 `mface` 会整段丢失）。判断「这是表情不是普通图」除了看 `sub_type` / `subType` / `summary`，还会看 `emoji_id`、`emoji_package_id`、`key` 这些商城专属字段——SnowLuma 的 `sub_type: 0` 就是靠这一层兜住的。入库时顺带记下 `emoji_id`、表情包 id 和外显名，方便回溯来源。
-- **发图**：以「表情」形式发出去时，`summary`、`sub_type`、`subType` 三个键一起写，谁认哪个都能正确渲染成表情，多余的键各家都会忽略。
+- **发图**：「QQ 端按表情发送」默认开启。此时 `summary`、`sub_type`、`subType` 三个键一起写，谁认哪个都能正确渲染成表情，多余的键各家都会忽略；关闭后按普通图片发送。
 
 前提是 OneBot 的 `messageFormat` 用 `array`（默认值）。如果你把它改成了 `string`，原始消息会变成一段 CQ 码字符串，商城表情就读不出来了。
 
