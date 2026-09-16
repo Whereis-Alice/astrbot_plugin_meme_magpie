@@ -266,6 +266,7 @@ class MemeAssetExportService:
         event = unwrap_event(event)
         candidate = self._select_candidate(event, emoji_id)
         stored_path, entry = self._resolve_entry(candidate)
+        self._check_permission(entry, event)
         path = await asyncio.to_thread(self._locate_and_inspect, candidate, stored_path, entry)
 
         # Scope and action checks happen after resolving the current DB row,
@@ -285,6 +286,13 @@ class MemeAssetExportService:
                 "asset_changed",
                 "表情包文件内容已变化，索引中的校验值不再匹配",
             )
+
+        # File inspection yields to other tasks.  Do not issue a lease using
+        # permissions or a DB record that changed while that I/O was running.
+        if self._closed:
+            raise MemeAssetExportError("provider_unavailable", "插件正在关闭")
+        _, entry = self._resolve_entry(candidate)
+        self._check_permission(entry, event)
 
         now = time.time()
         handle = MemeAssetHandle(
@@ -329,6 +337,8 @@ class MemeAssetExportService:
         """Release a handle or opaque token issued by this service."""
 
         if isinstance(handle_or_token, MemeAssetHandle):
+            if not self._owns_handle(handle_or_token):
+                return False
             return handle_or_token.release()
         token = str(handle_or_token or "").strip()
         handle = self._handles.get(token)
@@ -389,7 +399,8 @@ class MemeAssetExportService:
         if int(stat.st_size) != int(handle.size):
             raise MemeAssetExportError("asset_changed", "表情包文件大小已变化")
         try:
-            data = path.read_bytes()
+            with path.open("rb") as stream:
+                data = stream.read(min(handle.size, self.max_file_bytes) + 1)
         except OSError as exc:
             raise MemeAssetExportError("file_unreadable", f"读取表情包失败: {exc}") from exc
         if len(data) != handle.size:
@@ -397,6 +408,7 @@ class MemeAssetExportService:
         digest = hashlib.sha256(data).hexdigest()
         if digest != handle.sha256:
             raise MemeAssetExportError("asset_changed", "表情包校验值已变化")
+        handle._assert_usable()
         return data
 
     # ---------- candidate and DB resolution ----------
@@ -531,6 +543,8 @@ class MemeAssetExportService:
             raise MemeAssetExportError(
                 "candidate_expired", "候选对应的正式表情记录已不存在，请重新搜索"
             )
+        if candidate_hash and str(entry.get("hash") or "").strip().lower() != candidate_hash.lower():
+            raise MemeAssetExportError("asset_changed", "候选对应的表情内容已替换，请重新搜索")
         return str(stored_path or entry.get("path") or candidate_path), entry
 
     # ---------- path and image validation ----------
@@ -556,12 +570,14 @@ class MemeAssetExportService:
             paths.append(path)
 
         # First try the exact path(s); this is the common case.
+        inspection_error: MemeAssetExportError | None = None
         for path in paths:
             if not self._is_regular_nonlink(path):
                 continue
             try:
                 inspected = self._inspect_file(path)
-            except MemeAssetExportError:
+            except MemeAssetExportError as exc:
+                inspection_error = inspection_error or exc
                 continue
             if not expected_hash or inspected["sha256"] == expected_hash:
                 return path
@@ -595,6 +611,8 @@ class MemeAssetExportService:
             except OSError:
                 pass
 
+        if inspection_error is not None:
+            raise inspection_error
         if any(path.exists() for path in paths):
             raise MemeAssetExportError("asset_changed", "候选文件存在，但内容与索引不匹配")
         raise MemeAssetExportError("file_missing", "表情包文件不存在或已被删除")

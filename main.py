@@ -837,6 +837,7 @@ class Main(Star):
         turn_state = self._emoji_turn_state(event)
 
         try:
+            turn_state.set_candidates([])
             if not query:
                 yield "搜索失败：缺少 query 参数。请传入你当前心情词，例如：开心、无语、尴尬、感谢。"
                 return
@@ -897,7 +898,8 @@ class Main(Star):
                     origin_target = str(meta.get("origin_target", "") or "") if isinstance(meta, dict) else ""
                     use_count = int(meta.get("use_count", 0) or 0) if isinstance(meta, dict) else 0
 
-                    candidate_id = f"emoji_{i + 1}"
+                    candidate_number = len(candidates) + 1
+                    candidate_id = f"emoji_{candidate_number}"
                     candidates.append(
                         {
                             "id": candidate_id,
@@ -919,7 +921,7 @@ class Main(Star):
                             "use_count": use_count,
                         }
                     )
-                    result_lines.append(f"\n[{i + 1}] 分类：{emotion}")
+                    result_lines.append(f"\n[{candidate_number}] 分类：{emotion}")
                     if work_name:
                         result_lines.append(f"    作品：{work_name}")
                     if character_name:
