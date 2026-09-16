@@ -32,6 +32,13 @@ from .core.processing.image_processor_service import ImageProcessorService
 from .core.processing.llm_meme_hints import LlmMemeHints
 from .core.maintenance.migration_service import MigrationService
 from .core.maintenance.service import MaintenanceService
+from .core.integration.meme_asset import (
+    MemeAssetExportError,
+    MemeAssetExportService,
+    MemeAssetHandle,
+    MemeMagpieIntegrationAPI,
+)
+from .core.integration.candidate_search import MemeCandidateSearchService
 from .core.util.command_hint import (
     CHINESE_COMMAND_GROUP,
     COMMAND_GROUP,
@@ -39,7 +46,10 @@ from .core.util.command_hint import (
     format_command,
     resolve_wake_prefix,
 )
-from .core.util.normalization import canonicalize_path, normalize_label_list
+from .core.util.normalization import (
+    canonicalize_path,
+    normalize_label_list,
+)
 from .core.util.safe_io import safe_remove_file
 from .task_scheduler import TaskScheduler
 from .plugin_api import PluginAPI
@@ -64,6 +74,8 @@ class Main(Star):
     SEARCH_MEME_TOOL_NAME = "magpie_search_meme"
     SEND_MEME_TOOL_NAME = "magpie_send_meme"
     STEAL_MEME_TOOL_NAME = "magpie_steal_meme"
+    # 暴露稳定的异常类型，调用方可以按 code 做机器可读的错误处理。
+    MemeAssetExportError = MemeAssetExportError
 
     # llm_steal_param_mode 的合法取值（见 core/config/config.py）
     LLM_STEAL_PARAM_MODES = frozenset({"merge", "llm_first", "vlm_only"})
@@ -105,6 +117,12 @@ class Main(Star):
         self.event_handler = EventHandler(self)
         self.image_processor_service = ImageProcessorService(self)
         self.meme_selector = MemeSelector(self)
+        # 供其它 AstrBot 插件（例如论坛和图床插件）调用的受控资源接口。
+        # 资源服务只持有短期句柄，不把本地绝对路径交给调用方。
+        self.asset_export_service = MemeAssetExportService(self)
+        self.candidate_search_service = MemeCandidateSearchService(self)
+        self._integration_api = MemeMagpieIntegrationAPI(self)
+        self.integration_api = self._integration_api
         self.task_scheduler = TaskScheduler()
 
         # 初始化自然语言情绪分析器（新增）
@@ -521,6 +539,70 @@ class Main(Star):
         """拼出一条可直接复制执行的本插件命令，例如 `/mp migrate apply`。"""
         return format_command(sub, self.wake_prefix(event), COMMAND_GROUP)
 
+    # ===== 跨插件资源接口：meme_magpie 是表情包的唯一选择器 =====
+
+    def get_meme_integration_service(self) -> MemeCandidateSearchService:
+        """返回结构化搜索服务，兼容热重载中的旧插件实例。"""
+        service = self.__dict__.get("candidate_search_service")
+        if isinstance(service, MemeCandidateSearchService):
+            return service
+        service = MemeCandidateSearchService(self)
+        self.__dict__["candidate_search_service"] = service
+        return service
+
+    def get_meme_integration_api(self) -> MemeMagpieIntegrationAPI:
+        """返回供其它 AstrBot 插件使用的稳定联动门面。
+
+        论坛、图床等插件应通过 ``context.get_registered_star`` 找到本插件后
+        调用这个方法，而不是依赖 ``db_service`` 或表情包目录的内部结构。
+        ``getattr`` 兜底是为了让精简的测试桩和热重载期间的旧实例也能正常报
+        ``provider_unavailable``，而不是在属性访问阶段抛出不透明的错误。
+        """
+        api = self.__dict__.get("_integration_api")
+        if isinstance(api, MemeMagpieIntegrationAPI):
+            return api
+        api = MemeMagpieIntegrationAPI(self)
+        self.__dict__["_integration_api"] = api
+        self.__dict__["integration_api"] = api
+        return api
+
+    # ``get_integration_api`` 是一个有意保留的短别名，方便不想绑定具体
+    # 业务名的通用上传插件发现能力；两者返回同一个门面实例。
+    def get_integration_api(self) -> MemeMagpieIntegrationAPI:
+        return self.get_meme_integration_api()
+
+    def _get_asset_export_service(self) -> MemeAssetExportService:
+        """惰性取得资源服务，兼容旧实例和 ``Main.__new__`` 测试桩。"""
+        service = self.__dict__.get("asset_export_service")
+        if isinstance(service, MemeAssetExportService):
+            return service
+        service = MemeAssetExportService(self)
+        self.__dict__["asset_export_service"] = service
+        return service
+
+    async def export_meme_asset(
+        self,
+        emoji_id: str | int,
+        event: AstrMessageEvent | None = None,
+    ) -> MemeAssetHandle:
+        """按当前事件候选编号签发一个短期、可校验的资源句柄。"""
+        return await self._get_asset_export_service().export_meme_asset(emoji_id, event)
+
+    async def try_export_meme_asset(
+        self,
+        emoji_id: str | int,
+        event: AstrMessageEvent | None = None,
+    ) -> dict[str, Any]:
+        """资源导出的非抛异常版本，适合插件间边界调用。"""
+        return await self._get_asset_export_service().try_export_meme_asset(emoji_id, event)
+
+    def release_meme_asset(self, handle_or_token: MemeAssetHandle | str) -> bool:
+        """释放由本插件签发的资源句柄。"""
+        service = self.__dict__.get("asset_export_service")
+        if not isinstance(service, MemeAssetExportService):
+            return False
+        return service.release_meme_asset(handle_or_token)
+
     @filter.command_group(
         COMMAND_GROUP, alias={LEGACY_COMMAND_GROUP, CHINESE_COMMAND_GROUP}
     )
@@ -709,6 +791,22 @@ class Main(Star):
 
         return await self.meme_selector.smart_search(query, limit=limit, idx=idx, event=event)
 
+    async def search_meme_candidates(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+        *,
+        limit: int = 5,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """供其它插件调用的结构化搜索接口。"""
+        return await self.get_meme_integration_service().search_meme_candidates(
+            event,
+            query,
+            limit=limit,
+            filters=filters,
+        )
+
     def _find_similar_categories(self, query: str, top_n: int = 3) -> list[str]:
         """找到与查询词最相似的多个分类，委托给 MemeSelector。"""
         return self.meme_selector.find_similar_categories(query, top_n)
@@ -774,6 +872,7 @@ class Main(Star):
 
             candidates = []
             result_lines = [f"找到 {len(results)} 个匹配的表情包：\n"]
+            candidate_created_at = time.time()
 
             for i, (path, desc, emotion, tags) in enumerate(results):
                 if os.path.exists(path):
@@ -802,9 +901,13 @@ class Main(Star):
                     candidates.append(
                         {
                             "id": candidate_id,
+                            "emoji_id": candidate_id,
                             "path": path,
+                            "hash": str(meta.get("hash", "") or "") if isinstance(meta, dict) else "",
+                            "candidate_created_at": candidate_created_at,
                             "desc": desc,
                             "emotion": emotion,
+                            "category": emotion,
                             "tags": tags,
                             "scenes": scenes_str,
                             "overlay_text": overlay_text,
@@ -1588,6 +1691,12 @@ class Main(Star):
         if self._terminated:
             return
         self._terminated = True
+        asset_service = self.__dict__.get("asset_export_service")
+        if isinstance(asset_service, MemeAssetExportService):
+            try:
+                asset_service.close()
+            except Exception:
+                pass
         try:
             await self.task_scheduler.cancel_task("raw_cleanup_loop")
             await self.task_scheduler.cancel_task("capacity_control_loop")

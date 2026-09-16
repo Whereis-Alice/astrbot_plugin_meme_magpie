@@ -43,6 +43,7 @@ This plugin is a fork of [nagatoquin33/astrbot_plugin_stealer](https://github.co
 | **Semantic search** | Text embeddings + on-image text + usage scenes; falls back to BM25 when embeddings are unavailable |
 | **Emotion matching** | Extracts search terms and an emotion prior from the bot's own reply; the reply text is never modified |
 | **LLM tools** | During conversation the model can search, send and collect stickers itself, filling in work and character as it goes |
+| **Cross-plugin integration** | Structured candidates and permission-checked short-lived asset handles for forum and image-hosting plugins |
 | **WebUI dashboard** | Review queue + library: bulk actions, batch import, batch re-analysis, missing-description detector, duplicate cleanup, storage maintenance |
 | **Rate-limited batches** | Concurrency and requests-per-minute are configurable, so hundreds of images will not trigger upstream 429s |
 | **External sources** | Import whole packs from an archive / a GitHub repository / a JSON catalog, with incremental sync |
@@ -148,6 +149,7 @@ Details in [The dashboard](docs/en/webui.md).
 | [The dashboard](docs/en/webui.md) | Review queue and library, batch import, batch re-analysis, rate limits and progress |
 | [External sticker sources](docs/en/external-sources.md) | Importing whole packs from archives / GitHub / JSON catalogs, incremental sync, safety limits |
 | [LLM-driven sticker usage](docs/en/llm-tools.md) | The three LLM tools, letting the model fill in work/character, how known facts reach the prompt |
+| [Cross-plugin integration](docs/en/integration.md) | Structured search, asset handles, and image-hosting calls |
 | [Migrating from the original plugin](docs/en/migration.md) | How the two plugins relate, the three-step migration, what moves and what does not |
 | [Platform and protocol adapters](docs/en/platforms.md) | LLBot / NapCat / SnowLuma marketplace-sticker differences, message-splitting plugins |
 | [FAQ](docs/en/faq.md) | Frequently asked questions |

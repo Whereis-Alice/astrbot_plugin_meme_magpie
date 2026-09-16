@@ -9,6 +9,7 @@
 | [WebUI 管理面板](webui.md) | 审核区与图库、批量导入、批量重新识别、限流与进度显示 |
 | [外部表情包源](external-sources.md) | 从压缩包 / GitHub 仓库 / JSON 接口整份导入别人做好的表情包，增量同步与安全边界 |
 | [LLM 主动用图](llm-tools.md) | 三个 LLM 工具、让模型自己填作品 / 角色、已知信息如何进提示词 |
+| [跨插件联动](integration.md) | 结构化搜索、短期资源句柄，以及与图床插件的调用流程 |
 | [从 astrbot_plugin_stealer 迁移](migration.md) | 两个插件的关系、迁移三步走、搬什么与不搬什么 |
 | [平台与协议端支持](platforms.md) | LLBot / NapCat / SnowLuma 商城表情差异、和分段回复插件配合 |
 | [常见问题](faq.md) | FAQ |
