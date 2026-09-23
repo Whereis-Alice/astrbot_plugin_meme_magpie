@@ -9,6 +9,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
 from ..processing.natural_emotion_analyzer import EmotionQuery
+from ..search.candidate_reranker import MemeCandidateReranker, MemeDecision
 from ..util.command_hint import command_like_pattern
 from .event_context import get_event_session_key
 
@@ -23,6 +24,8 @@ class _MemeTurnState:
         self._auto_allowed = False
         self._auto_reason = ""
         self._auto_send_meme_claimed = False
+        self._rerank_complete = False
+        self._rerank_decision: MemeDecision | None = None
 
     def mark_active_sent(self) -> None:
         """标记当前回合已主动发送过表情包。"""
@@ -79,6 +82,8 @@ class _MemeTurnState:
         self._auto_allowed = False
         self._auto_reason = ""
         self._auto_send_meme_claimed = False
+        self._rerank_complete = False
+        self._rerank_decision = None
 
 
 class MemeSenderEngine:
@@ -92,6 +97,7 @@ class MemeSenderEngine:
         self._auto_emoji_cooldowns_max = 1000  # 最大条目数，防止内存泄漏
         self._auto_emoji_cooldowns_lock = asyncio.Lock()
         self._pending_auto_emoji_tasks: dict[str, asyncio.Task] = {}
+        self._candidate_reranker = MemeCandidateReranker(plugin_instance)
 
     # --- 状态管理 ---
 
@@ -320,6 +326,20 @@ class MemeSenderEngine:
                 return base + random.random() * rand_max
         return base
 
+    async def _rerank_for_turn(
+        self, event: AstrMessageEvent, text: str, user_message: str,
+    ) -> MemeDecision | None:
+        state = self.emoji_turn_state(event)
+        if state.is_active_sent():
+            return MemeDecision()
+        if not state._rerank_complete:
+            try:
+                state._rerank_decision = await self._candidate_reranker.choose(event, text, user_message)
+            finally:
+                # Attach failure/timeout must not make a second model request.
+                state._rerank_complete = True
+        return state._rerank_decision
+
     async def resolve_emoji_query(
         self,
         event: AstrMessageEvent,
@@ -381,18 +401,31 @@ class MemeSenderEngine:
         if selector is None or not hasattr(selector, "attach_emoji_to_result"):
             return False
         try:
-            final_emotions, search_text = await asyncio.wait_for(
-                self.resolve_emoji_query(event, text, emotions, user_message=user_message),
-                timeout=self.attach_timeout(),
+            decision = await asyncio.wait_for(
+                self._rerank_for_turn(event, text, user_message), timeout=self.attach_timeout(),
             )
-            if not final_emotions and not search_text:
-                return False
-            attached = await asyncio.wait_for(
-                selector.attach_emoji_to_result(
-                    event, result, final_emotions, search_text or text
-                ),
-                timeout=self.attach_timeout(),
-            )
+            if self.emoji_turn_state(event).is_active_sent():
+                return True  # A tool sent a meme while the decision was in flight.
+            if decision is not None:
+                if not self._candidate_reranker.is_current(decision, event):
+                    return True  # Handled abstention; do not queue a random fallback.
+                attached = await asyncio.wait_for(
+                    selector.attach_selected_emoji(event, result, decision.path),
+                    timeout=self.attach_timeout(),
+                )
+            else:
+                final_emotions, search_text = await asyncio.wait_for(
+                    self.resolve_emoji_query(event, text, emotions, user_message=user_message),
+                    timeout=self.attach_timeout(),
+                )
+                if not final_emotions and not search_text:
+                    return False
+                attached = await asyncio.wait_for(
+                    selector.attach_emoji_to_result(
+                        event, result, final_emotions, search_text or text
+                    ),
+                    timeout=self.attach_timeout(),
+                )
         except asyncio.TimeoutError:
             logger.debug(
                 f"[MemeSenderEngine] attach 模式选图超过 {self.attach_timeout():.1f}s，"
@@ -442,12 +475,16 @@ class MemeSenderEngine:
         """
         try:
             task_start = asyncio.get_event_loop().time()
-            final_emotions, search_text = await self.resolve_emoji_query(
-                event, text, emotions, user_message=user_message
-            )
-
-            if not final_emotions and not search_text:
-                return
+            decision = await self._rerank_for_turn(event, text, user_message)
+            if decision is not None:
+                if not decision.path:
+                    return
+            else:
+                final_emotions, search_text = await self.resolve_emoji_query(
+                    event, text, emotions, user_message=user_message
+                )
+                if not final_emotions and not search_text:
+                    return
 
             result = event.get_result()
             if (
@@ -463,7 +500,14 @@ class MemeSenderEngine:
             if delay > 0:
                 await asyncio.sleep(delay)
 
-            sent = await self.try_send_emoji(event, final_emotions, search_text or text)
+            if self.emoji_turn_state(event).is_active_sent():
+                return
+            if decision is not None:
+                if not self._candidate_reranker.is_current(decision, event):
+                    return
+                sent = await self.plugin.meme_selector.send_emoji_with_text(event, decision.path, text)
+            else:
+                sent = await self.try_send_emoji(event, final_emotions, search_text or text)
             if sent:
                 await self.mark_auto_emoji_sent(event)
                 self.emoji_turn_state(event).mark_active_sent()

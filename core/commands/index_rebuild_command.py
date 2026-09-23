@@ -8,6 +8,19 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from ..db.database_service import DatabaseService
+
+
+# The scan owns the path, content hash and current directory category. Keep
+# every other persisted scalar/related field when matching an old record,
+# especially when a moved file can only be found by hash or legacy filename.
+_RESTORABLE_FIELDS = (
+    DatabaseService._EMOJI_SCALAR_COLUMNS - {"hash", "category"}
+) | {
+    "tags", "emotions", "scenes", "scene", "source_message", "qq_emoji_id",
+    "qq_emoji_package_id", "origin_url", "qq_key", "action",
+}
+
 
 class IndexRebuildCommand:
     """负责索引重建、元数据合并和迁移。"""
@@ -92,7 +105,15 @@ class IndexRebuildCommand:
             def _has_meaningful_metadata(meta: dict[str, Any] | None) -> bool:
                 if not isinstance(meta, dict):
                     return False
-                return bool(meta.get("tags") or meta.get("desc") or meta.get("scenes"))
+                # File timestamps and DB defaults alone are not rich metadata;
+                # otherwise a bare duplicate would mask a later annotated copy.
+                return any(
+                    meta.get(key)
+                    for key in (
+                        "tags", "desc", "scenes", "overlay_text", "emotions",
+                        "character", "work", "action", "is_favorite", "use_count",
+                    )
+                ) or meta.get("retention_class") in {"external", "pinned"}
 
             def _build_lookup_maps(
                 index_map: dict[str, Any],
@@ -162,25 +183,7 @@ class IndexRebuildCommand:
                     return False
 
                 restored = False
-                if source_data.get("desc"):
-                    target_data["desc"] = source_data["desc"]
-                    restored = True
-                if source_data.get("tags"):
-                    target_data["tags"] = source_data["tags"]
-                    restored = True
-
-                for key in (
-                    "source_message",
-                    "source",
-                    "origin_target",
-                    "scope_mode",
-                    "qq_emoji_id",
-                    "qq_emoji_package_id",
-                    "origin_url",
-                    "qq_key",
-                    "scenes",
-                    "scene",
-                ):
+                for key in _RESTORABLE_FIELDS:
                     if key in source_data:
                         target_data[key] = source_data[key]
                         restored = True

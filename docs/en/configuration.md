@@ -47,6 +47,20 @@ Everything is editable in the AstrBot plugin config page. The notable ones:
 
 Neither mode modifies the bot's actual reply text; the only difference is whether an extra lightweight call happens.
 
+### Optional candidate reranking
+
+`enable_meme_rerank` defaults to `false`. When enabled, existing search supplies up to
+10 visible candidates. The emotion-analysis provider (or the current session provider
+when unset) chooses a candidate ID or `none`, checking overlay text, speaker intent,
+work, character and context. An explicit `none` never triggers a random replacement.
+No TypeSafe account or additional API key is required.
+
+- Independent of query rewriting. Successful decisions replace the old query/selection chain; failed requests or invalid IDs fall back to that chain.
+- Sends only the current user message (up to 1000 characters), assistant reply (up to 2000) and candidate metadata. No local paths, image bytes or conversation history are supplied. Ensure the selected provider is suitable for this data before enabling.
+- At most one text-model call per decision and two concurrent decisions. `meme_rerank_timeout` defaults to 6 seconds (maximum 30), including queueing, search and inference. Attach mode also observes its attach timeout.
+- Existing probability, cooldown, allowlists and cancellation remain in effect. Files, records and scope are rechecked after inference and before sending; local entries with unknown origins are excluded.
+- Does not change search/send tools, resource export or their current-event candidate IDs.
+
 ## Models and retrieval
 
 | Setting | Default | Description |
@@ -79,8 +93,10 @@ The five limit settings (items per source / bytes per image / archive size / unc
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| Max stickers | `2000` | Library cap; `0` = unlimited. Going over the cap **permanently deletes** the oldest entries (favourites excluded). Lives in the "Capacity and safety" group at the very top of the config page — see [Library capacity cap](#library-capacity-cap) |
-| Auto-clean over capacity | `false` | Off: overflow only logs a warning and nothing is deleted. On: the background job prunes the oldest every hour |
+| Max stickers | `2000` | Library cap; `0` = unlimited. Manual cleanup or enabled auto-clean **permanently deletes** excess images using the selected strategy (favourites excluded). Lives in the "Capacity and safety" group at the very top of the config page — see [Library capacity cap](#library-capacity-cap) |
+| Auto-clean over capacity | `false` | Off: overflow only logs a warning and nothing is deleted. On: the background job prunes hourly using the selected strategy, oldest first by default |
+| Eviction ordering (`capacity_eviction_strategy`) | `oldest` | `oldest` preserves existing ordering; `weighted` considers usage and library age |
+| Low-usage weight (`capacity_usage_weight`) | `0.7` | In weighted mode: 70% low usage, 30% age; range 0–1 |
 | Cleanup strategy | `balanced` | `conservative` stale index + temp only / `balanced` also orphan files and thumbnails / `aggressive` also the `raw` originals (smallest footprint, no way back to the original file) |
 | Send / collect allow and block lists | `[]` | `group:<id>` or `user:<id>`; both lists can be active at once |
 | List priority | `whitelist_first` | Who wins when both match |
@@ -91,11 +107,19 @@ The five limit settings (items per source / bytes per image / archive size / unc
 This is the only mechanism in the plugin that deletes your data on its own, so it gets its own section:
 
 - **Where to change it**: the very first group on the AstrBot plugin config page, "=== Capacity and safety (important) ===". "Max stickers" is the first field in it.
-- "Max stickers" is a hard cap. Above it, the oldest entries go first and **the image files go with them — there is no undo** (entries marked as favourite are never touched).
+- "Max stickers" is the capacity-cleanup target. Manual cleanup or enabled auto-clean removes excess entries using the selected strategy, oldest first by default, and **the image files go with them — there is no undo** (entries marked as favourite are never touched).
 - Default `2000`, plenty for almost everyone. Set `0` for unlimited (bounded only by your disk).
 - By default **nothing is deleted automatically**: going over the cap only writes one warning to the log (search for `容量控制`) telling you the current count and the overflow. Run `/mp capacity` to actually prune, or turn on "auto-clean over capacity" to have it done hourly.
 - The plugin also runs this check once at startup and says so in the log if you are over the cap (warning only, nothing is deleted).
 - `/mp status` only reads the numbers. `/mp capacity` is the one that deletes.
+
+Weighted ordering normalizes usage and age within the deletable candidates and favors
+keeping frequently used images. Ties use usage, age and path for stable ordering.
+It **does not enable automatic cleanup**. Imported/pinned entries remain outside the
+quota and cannot be evicted; favorites count toward the quota but are protected;
+character labels alone do not confer protection. These accounting rules are unchanged.
+`rebuild_index` never runs capacity cleanup and restores existing favorites, character,
+work, emotions, usage counts and creation timestamps.
 
 > ⚠️ **Upgrading never rewrites a config you have already saved.** AstrBot only fills in defaults for keys that are missing, so a value already stored in your config file is never replaced by a new default.
 >

@@ -18,6 +18,10 @@ from .semantic_schema import (
 )
 
 
+class ClassificationResponseError(ValueError):
+    """The model replied, but did not return a usable classification."""
+
+
 class ClassificationParser:
     """负责解析 VLM 的分类响应。"""
 
@@ -98,6 +102,8 @@ class ClassificationParser:
         Returns:
             (category, tags, description, emotion, scenes, overlay_text, emotions)
         """
+        if not isinstance(response, str) or not response.strip():
+            raise ClassificationResponseError("视觉模型返回空分类响应")
         response = response.strip()
 
         data = self._extract_json_payload(response)
@@ -115,10 +121,18 @@ class ClassificationParser:
             logger.warning(f"Image moderation rejected: {file_path}")
             return self.CATEGORY_FILTERED, [], "", self.CATEGORY_FILTERED, [], "", []
 
-        category = data.get("category", "")
+        # Reject missing/ill-typed required fields before applying category aliases
+        # or optional-field defaults. Otherwise even {} becomes a successful
+        # confused/emoji entry and is cached as if the image had been understood.
+        for field in ("category", "description"):
+            value = data.get(field)
+            if not isinstance(value, str) or not self._sanitize_model_scalar(value):
+                raise ClassificationResponseError(f"视觉模型分类响应缺少有效的 {field} 字段")
+
+        category = data["category"]
         tags = data.get("tags", [])
         description = clip_chars(
-            self._sanitize_model_scalar(data.get("description", "emoji")) or "emoji",
+            self._sanitize_model_scalar(data["description"]),
             MAX_DESC_CHARS,
         )
         scenes = data.get("scenes", [])
@@ -207,6 +221,8 @@ class ClassificationParser:
             return self.CATEGORY_FILTERED, [], "", self.CATEGORY_FILTERED, [], "", []
 
         parts = [p.strip() for p in response.strip().split("|")]
+        if len(parts) < 3 or not parts[0] or not parts[2]:
+            raise ClassificationResponseError("视觉模型响应既不是有效分类 JSON，也不是完整的旧管道格式")
         emotion_result = parts[0] if parts else ""
         tags_str = parts[1] if len(parts) > 1 else ""
         tags_result = self.normalize_label_list(tags_str, MAX_TAGS)
@@ -215,7 +231,9 @@ class ClassificationParser:
         scenes_result = normalize_values(scenes_str)
         overlay_text = clip_chars(parts[4] if len(parts) > 4 else "", MAX_OVERLAY_CHARS)
 
-        category = self._normalize_category(emotion_result, fallback_other=True)
+        category = self._normalize_category(emotion_result, fallback_other=False)
+        if not category:
+            raise ClassificationResponseError("视觉模型旧格式响应没有有效分类")
         emotions = [category] if category and category != self.CATEGORY_FILTERED else []
         return (
             category,

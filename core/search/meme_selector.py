@@ -429,3 +429,11 @@ class MemeSelector:
         return await self._smart_select_service.attach_emoji_to_result(
             event, result, emotions, text
         )
+
+    async def attach_selected_emoji(self, event: AstrMessageEvent, result, path: str) -> str | None:
+        """Attach a preselected candidate without running a second selection."""
+        if self.plugin._emoji_turn_state(event).is_active_sent():
+            return None
+        if not self._check_group_allowed(event) or not self.is_path_allowed_for_event(path, event):
+            return None
+        return await self._smart_select_service.attach_selected_emoji(event, result, path)

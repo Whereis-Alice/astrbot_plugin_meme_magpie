@@ -25,7 +25,7 @@ Three independent switches, none of them coupled:
 
 - **Collect** — watch chat images and store them in a review queue, gated by probability or cooldown. Nothing enters the library until you approve it in the WebUI.
 - **Understand** — a vision model (VLM) fills in category, tags, usage scenes, on-image text, character and source work.
-- **Send** — after the bot replies, roll the dice on whether to attach a sticker; which one gets picked comes from semantic search plus emotion matching.
+- **Send** — after the bot replies, roll the dice on whether to attach a sticker; which one gets picked comes from semantic search plus emotion matching. Optional [candidate reranking](docs/en/configuration.md#optional-candidate-reranking) lets the model choose a candidate or abstain.
 
 Done collecting? `/mp off`. Everything already in the library still works.
 
@@ -125,7 +125,7 @@ Everything is edited on the AstrBot plugin config page. The knobs people actuall
 | Collect probability | `0.3` | Chance each image is taken in probability mode |
 | Require review | `true` | Turn it off and images skip the review queue |
 | Send probability | `0.2` | Chance of attaching a sticker to a reply |
-| **Max stickers** | `2000` | Hard library cap. Above it, the oldest entries **and their files are permanently deleted**; `0` = unlimited |
+| **Max stickers** | `2000` | Library cap. Manual cleanup or enabled auto-clean **permanently deletes** excess entries and files using the selected strategy (oldest first by default); `0` = unlimited |
 | Batch concurrency / RPM | `2` / `20` | The rate-limit valves for batch analysis; lower them if you get 429s |
 
 > ⚠️ **"Max stickers" is the only mechanism in the plugin that deletes your data on its own.** It is the first field of the "Capacity and safety" group at the very top of the config page. By default it only warns, but read [Library capacity cap](docs/en/configuration.md#library-capacity-cap) before you lower it.
@@ -186,7 +186,7 @@ Back it up by archiving that one directory.
 
 **AGPL-3.0** — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-> Upstream's README says MIT, but the `LICENSE` file actually committed to that repository is AGPL-3.0 (and GitHub detects it as AGPL-3.0). Where the two disagree, a downstream project can only rely on the licence that is actually present and stricter, so this fork is AGPL-3.0. You may use, modify and redistribute it freely, but distributing a modified version — including offering it as a network service — requires publishing the source.
+> An early upstream snapshot's README said MIT while its `LICENSE` was AGPL-3.0; the current upstream README now also states AGPL-3.0. This derivative continues under AGPL-3.0. You may use, modify and redistribute it subject to that licence's source-availability obligations, including those for modified versions offered as a network service.
 
 Forked from [nagatoquin33/astrbot_plugin_stealer](https://github.com/nagatoquin33/astrbot_plugin_stealer). Original copyright belongs to nagatoquin33; modifications in this fork are copyright Whereis-Alice. The original idea drew on maibot's sticker collection and meme_manager's tag-injection approach.
 

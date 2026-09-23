@@ -11,11 +11,31 @@
     },
     "max_reg_num": {
       "description": "Maximum emoji count (0 = unlimited)",
-      "hint": "Library size limit; 0 means unlimited. Once exceeded, the oldest stickers are permanently deleted (favorites are kept) together with their image files, which cannot be recovered - hence the generous default. Note: after upgrading from an older release this field still shows the value stored in your config file (the default before 1.4.0 was only 100), so please double-check it once."
+      "hint": "Library size limit; 0 means unlimited. Manual cleanup or enabled auto-clean permanently deletes excess stickers and their files using the selected strategy (oldest first by default; favorites are kept). There is no undo. Auto-clean is off by default. Early releases defaulted to only 100; check your retained setting after upgrading."
     },
     "capacity_auto_cleanup": {
       "description": "Auto-clean when over capacity",
-      "hint": "Off (default): only a log warning is emitted and nothing is deleted; run mp capacity manually when you want to clean up. On: an hourly background check permanently deletes the oldest stickers."
+      "hint": "Off (default): only a log warning is emitted and nothing is deleted; run mp capacity manually when you want to clean up. On: an hourly background check permanently deletes excess stickers using the selected strategy, oldest first by default."
+    },
+    "capacity_eviction_strategy": {
+      "description": "Capacity eviction ordering",
+      "hint": "Changes ordering only, never enables automatic cleanup. Existing favorite/import/pinned protections and quota accounting remain unchanged.",
+      "labels": [
+        "Oldest first (existing behavior)",
+        "Weighted usage and age"
+      ]
+    },
+    "capacity_usage_weight": {
+      "description": "Weighted eviction: low-usage weight",
+      "hint": "Only for weighted mode. Default 0.7: 70% low usage, 30% library age."
+    },
+    "enable_meme_rerank": {
+      "description": "Candidate reranking (may abstain)",
+      "hint": "Off by default. Uses the emotion-analysis or current-session provider. Sends only the current exchange and candidate metadata, not image bytes, paths or history. Independent of query rewriting; adds one model request, with legacy fallback on failure."
+    },
+    "meme_rerank_timeout": {
+      "description": "Candidate decision timeout (seconds)",
+      "hint": "Includes queueing, retrieval and inference. Falls back on timeout; attach mode also observes its own timeout."
     },
     "_steal_section": {
       "description": "=== Collecting ===",

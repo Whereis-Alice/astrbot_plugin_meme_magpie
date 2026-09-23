@@ -903,10 +903,9 @@ createApp({
             } catch (e) { healthStatus.value = 'error'; }
         };
 
-        let isFetching = false;
+        let imageRequestId = 0;
         const fetchImages = async (page = 1) => {
-            if (isFetching) return;
-            isFetching = true;
+            const requestId = ++imageRequestId;
             loading.value = true;
             try {
                 const params = new URLSearchParams({
@@ -924,12 +923,12 @@ createApp({
                 }
                 const res = await apiFetch('api/images?' + params.toString());
                 const data = await res.json();
+                if (requestId !== imageRequestId) return [];
                 const nextImages = data.images || [];
                 const nextTotal = Number(data.total || 0);
                 const lastPage = Math.max(1, Math.ceil(nextTotal / pageSize.value));
 
                 if (page > lastPage && nextTotal > 0) {
-                    isFetching = false;
                     return await fetchImages(lastPage);
                 }
 
@@ -959,8 +958,7 @@ createApp({
                 console.error(e);
                 return [];
             } finally {
-                loading.value = false;
-                isFetching = false;
+                if (requestId === imageRequestId) loading.value = false;
             }
         };
 

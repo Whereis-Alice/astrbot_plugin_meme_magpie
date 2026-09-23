@@ -5,10 +5,12 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
+
+from .classification_parser import ClassificationResponseError
 
 try:
     from PIL import Image as PILImage
@@ -119,11 +121,10 @@ class VLMCallService:
         self.plugin = plugin_instance
         self.plugin_config = getattr(plugin_instance, "plugin_config", None)
         self.vision_provider_id = (
-            str(getattr(self.plugin_config, "vision_provider_id", "") or "")
+            str(getattr(self.plugin_config, "vision_provider_id", "") or "").strip()
             if self.plugin_config
             else ""
         )
-        self._cached_framework_vlm_id: str | None = None
 
     async def _resolve_vision_provider(self, event=None) -> str | None:
         """统一的视觉模型 provider 解析逻辑。
@@ -135,9 +136,9 @@ class VLMCallService:
         if self.vision_provider_id:
             return self.vision_provider_id
 
-        if self._cached_framework_vlm_id is not None:
-            return self._cached_framework_vlm_id or None
-
+        # Framework settings can change independently of plugin update_config.
+        # Read the current local configuration on every resolution, including
+        # after a previous lookup found no default provider.
         framework_vlm_id = ""
         try:
             if hasattr(self.plugin, "context"):
@@ -145,11 +146,9 @@ class VLMCallService:
                 provider_settings = astrbot_config.get("provider_settings", {})
                 framework_vlm_id = str(
                     provider_settings.get("default_image_caption_provider_id", "") or ""
-                )
+                ).strip()
         except Exception as e:
             logger.debug(f"读取框架视觉模型配置失败: {e}")
-
-        self._cached_framework_vlm_id = framework_vlm_id
 
         if framework_vlm_id:
             logger.info(f"使用框架全局图片描述模型: {framework_vlm_id}")
@@ -163,7 +162,12 @@ class VLMCallService:
         return None
 
     async def _call_vision_model(
-        self, event: AstrMessageEvent | None, img_path: str, prompt: str
+        self,
+        event: AstrMessageEvent | None,
+        img_path: str,
+        prompt: str,
+        *,
+        response_validator: Callable[[str], Any] | None = None,
     ) -> str:
         """调用视觉模型分析图片。
 
@@ -219,7 +223,8 @@ class VLMCallService:
                 actual_prompt = self._montage_prompt(montage) + prompt
 
             return await self._do_vlm_call(
-                provider_id, actual_prompt, resolved_img_path, temp_files=temp_files
+                provider_id, actual_prompt, resolved_img_path, temp_files=temp_files,
+                response_validator=response_validator,
             )
         finally:
             # 清理临时文件（预处理产出 + 格式自救产出）
@@ -719,6 +724,8 @@ class VLMCallService:
         prompt: str,
         file_url: str,
         temp_files: list[str] | None = None,
+        *,
+        response_validator: Callable[[str], Any] | None = None,
     ) -> str:
         """执行 VLM 调用（带重试 + 格式自救）。
 
@@ -727,6 +734,7 @@ class VLMCallService:
             prompt: 提示词
             file_url: 图片本地路径或 URL
             temp_files: 调用方的临时文件清单；格式自救产生的新文件会登记进来待清理
+            response_validator: 可选分类校验器；无效响应使用同一个有限重试预算
 
         Returns:
             str: 模型响应文本
@@ -734,12 +742,14 @@ class VLMCallService:
         # 重试配置
         try:
             max_retries = int(getattr(self.plugin, "vision_max_retries", 3))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             max_retries = 3
+        max_retries = max(1, min(max_retries, 10))
         try:
             retry_delay = float(getattr(self.plugin, "vision_retry_delay", 1.0))
         except (TypeError, ValueError):
             retry_delay = 1.0
+        retry_delay = min(60.0, max(0.0, retry_delay)) if math.isfinite(retry_delay) else 1.0
         last_error: Exception | None = None
         converted_once = False
         attempt = 0
@@ -759,11 +769,17 @@ class VLMCallService:
                 # LLMResponse.completion_text 是 @property，自动处理 result_chain
                 text = (result.completion_text or "").strip() if result else ""
                 if text:
+                    if response_validator is not None:
+                        response_validator(text)
                     logger.debug(f"VLM响应: {text[:200]}")
                     return text
 
                 logger.warning("VLM返回空响应")
-                last_error = Exception("VLM返回空响应")
+                last_error = (
+                    ClassificationResponseError("VLM返回空分类响应")
+                    if response_validator is not None
+                    else Exception("VLM返回空响应")
+                )
 
             except Exception as e:
                 last_error = e
@@ -815,8 +831,12 @@ class VLMCallService:
             attempt += 1
             # 指数退避
             if attempt < max_retries:
-                await asyncio.sleep(retry_delay * (2 ** (attempt - 1)))
+                await asyncio.sleep(min(60.0, retry_delay * (2 ** (attempt - 1))))
 
+        if isinstance(last_error, ClassificationResponseError):
+            raise ClassificationResponseError(
+                f"视觉模型分类响应无效（已尝试{max_retries}次）: {last_error}"
+            ) from last_error
         raise Exception(f"视觉模型调用失败（已重试{max_retries}次）: {last_error}") from last_error
 
     @staticmethod

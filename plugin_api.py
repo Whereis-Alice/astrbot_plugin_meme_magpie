@@ -23,6 +23,7 @@ from astrbot.api import logger
 from .core.processing.analysis_throttle import AnalysisThrottle, build_analysis_throttle
 from .core.sources.models import ExternalSourceError, ExternalSourceSecurityError
 from .core.util.blacklist import add_blacklist_hash
+from .core.util.category_paths import category_path, validate_category_key
 from .core.util.normalization import (
     canonicalize_path,
     normalize_character_key,
@@ -3453,6 +3454,13 @@ class PluginAPI:
             if not keys:
                 return jsonify({"success": False, "error": "分类列表无效"})
 
+            # Validate the entire batch before saving any configuration.
+            for key in keys:
+                validate_category_key(key)
+                category_path(self._cfg.categories_dir, key)
+            if len({key.casefold() for key in keys}) != len(keys):
+                return jsonify({"success": False, "error": "分类 key 不能存在大小写重名"})
+
             self.plugin.update_config({"categories": keys})
 
             cur_info = dict(getattr(self._cfg, "category_info", {}) or {})
@@ -3478,10 +3486,18 @@ class PluginAPI:
             if len(cur_cats) <= 1:
                 return jsonify({"success": False, "error": "至少需要保留1个分类"})
 
+            cat_dir = category_path(self._data_dir / "categories", key)
             updated = [c for c in cur_cats if c != key]
             deleted = 0
 
             index = self._build_full_index_snapshot()
+            # Check every record before the first removal; legacy metadata may
+            # contain paths that are no longer inside this category directory.
+            for p, m in index.items():
+                if isinstance(m, dict) and m.get("category") == key:
+                    file = Path(p)
+                    if file.is_symlink() or not file.resolve().is_relative_to(cat_dir.resolve()):
+                        return jsonify({"success": False, "error": "分类中存在越界或链接文件，请先修复索引"})
             deleted_paths: list[str] = []
             for p, m in list(index.items()):
                 if not isinstance(m, dict) or m.get("category") != key:
@@ -3500,7 +3516,7 @@ class PluginAPI:
             if deleted_paths:
                 await self._delete_index_paths(deleted_paths)
 
-            cat_dir = self._data_dir / "categories" / key
+            cat_dir = category_path(self._data_dir / "categories", key)
             try:
                 if cat_dir.exists():
                     await asyncio.to_thread(shutil.rmtree, cat_dir, True)

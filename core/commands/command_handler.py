@@ -438,7 +438,7 @@ class CommandHandler:
         return 0
 
     async def enforce_capacity(self, event: AstrMessageEvent):
-        """手动执行容量控制，删除最旧的表情包以控制总数量。"""
+        """手动执行容量控制，按所选淘汰策略清理超额表情包。"""
         try:
             # 加载图片索引
             image_index = await self.plugin.index_manager.load_index()
@@ -471,7 +471,7 @@ class CommandHandler:
 
             yield event.plain_result(
                 f"容量控制完成\n"
-                f"永久删除了 {removed_count} 个最旧的表情包（含图片文件，收藏的不删）\n"
+                f"按所选淘汰策略永久删除了 {removed_count} 个表情包（含图片文件，收藏的不删）\n"
                 f"当前数量: {new_count}/{max_count}"
             )
         except Exception as e:

@@ -26,15 +26,16 @@ This plugin is a derivative work of:
     https://github.com/nagatoquin33/astrbot_plugin_stealer
     Copyright (C) nagatoquin33
 
-Note on the upstream licence: the upstream README states MIT, while the LICENSE
-file actually committed to that repository is the GNU Affero General Public
-License v3.0 (GitHub's licence detection also reports AGPL-3.0). Because the two
-statements disagree, this fork complies with the licence that is actually
-present and more restrictive, and is therefore released under AGPL-3.0.
+Note on the upstream licence: an early snapshot's README stated MIT while its
+LICENSE file was AGPL-3.0. The current upstream README also states AGPL-3.0.
+This derivative continues to comply with AGPL-3.0.
 
-说明：上游仓库的 README 声称 MIT，但仓库中实际提交的 LICENSE 文件是 AGPL-3.0
-（GitHub 的许可证识别结果同样是 AGPL-3.0）。两处声明冲突时，本项目按实际存在
-且更严格的 AGPL-3.0 履行义务，因此本项目同样采用 AGPL-3.0 授权。
+说明：上游早期快照的 README 曾声明 MIT，但其 LICENSE 文件为 AGPL-3.0；
+当前上游 README 已统一为 AGPL-3.0。本衍生项目继续遵循 AGPL-3.0。
+
+Selected improvements were adapted from upstream through commit
+fbbb8483536887f10fbc8355781c19f33d79b6ed (3.1.2).
+部分改进参考并移植自上游上述提交，具体改动见 CHANGELOG.md。
 
 
 Third-party dependencies / 第三方依赖

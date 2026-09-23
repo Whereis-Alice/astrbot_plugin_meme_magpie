@@ -11,6 +11,12 @@ Plus: single upload (with optional AI analysis), batch import, batch re-analysis
 
 Three themes (auto / terminal / pixel) and three languages; your choice is remembered.
 
+Rapid filter/category/character changes only apply the latest request's result.
+Category keys must be safe single directory names. Existing valid Chinese names and
+case are preserved without automatic renaming or migration. Path separators, device
+names and linked directories are rejected; category updates validate the whole batch
+before saving.
+
 > **Careful**: deleting a category in the WebUI deletes every image file in it.
 
 ## Batch import and batch re-analysis
@@ -36,6 +42,12 @@ Re-runs vision analysis over images already in the library. Useful when early im
 - **Item limit**: cap the batch size and test the waters first
 
 Applying category changes is independent of overwriting labels: you can keep a hand-written description while still filing an old failed analysis into the right category. Before each write, the item is relocated by hash; file moves and index updates are serialized so concurrent workers cannot race for the same target path. Semantic fields and the category migrate in one database transaction.
+
+Changing the vision model updates both actual requests and analysis-cache signatures;
+when unset, the framework's current default is read for each resolution. Empty JSON,
+missing required classification fields and invalid text retry within the existing budget
+and fail explicitly rather than becoming fabricated successful classifications.
+Valid moderation rejections and complete legacy pipe-delimited responses remain supported.
 
 **The review queue can be re-analysed too**: pending images support the same bulk or single re-run, with the same scopes. A pending item's category is only a database field, so it is corrected under the existing rules without moving files; whether a library category changes automatically is controlled by the switch above.
 

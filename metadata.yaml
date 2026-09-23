@@ -41,7 +41,7 @@ help: |
   - /mp blacklist <序号|文件名>：删除并加入黑名单，之后不再重复收录
   - /mp scope <序号|文件名> <public|local>：设置表情包的可见范围
   - /mp clean：清理未入库的暂存图片（已入库的表情包不受影响）
-  - /mp capacity：立即执行容量上限清理（会删掉超出上限的最旧表情包，只看容量请用 /mp status）
+  - /mp capacity：立即按所选淘汰策略清理超额表情包（默认最旧优先，只看容量请用 /mp status）
   - /mp tag_stats [N]：标签体检（高频 / 低频 / 无标签）
   - /mp clear_emotion_cache：清理情绪匹配缓存
   - /mp rebuild_index：重建检索索引（不会删图）
@@ -60,7 +60,7 @@ help: |
   WebUI：在插件管理页面打开"表情神偷管理面板"，可浏览 / 编辑 / 批量导入 / 批量重新识别 / 识别失败检测；
   批量识别支持配置并发数与每分钟请求上限，并实时显示进度、预估剩余时间和失败明细。
   还能从压缩包 / GitHub 仓库 / JSON 接口整份导入别人做好的表情包（先预检再入库，支持增量同步）。
-version: 1.9.0
+version: 1.10.0
 support_platforms:
   - aiocqhttp
   - telegram

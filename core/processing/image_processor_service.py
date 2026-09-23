@@ -109,9 +109,6 @@ class ImageProcessorService:
         self.vision_provider_id = (
             str(self.plugin_config.vision_provider_id or "") if self.plugin_config else ""
         )
-        # 框架 VLM provider 缓存，None 表示未查询过
-        self._cached_framework_vlm_id: str | None = None
-
         # 子服务（职责拆分）
         from .prompt_manager import PromptManager
         from .phash_dedup_service import PHashDedupService
@@ -248,9 +245,8 @@ class ImageProcessorService:
         if content_filtration is not None:
             self.content_filtration = content_filtration
         if vision_provider_id is not None:
-            self.vision_provider_id = vision_provider_id
-            # 插件 provider 变更时，重置框架缓存以便重新解析
-            self._cached_framework_vlm_id = None
+            self.vision_provider_id = str(vision_provider_id or "").strip()
+            self._vlm_call_service.vision_provider_id = self.vision_provider_id
         if emoji_classification_prompt is not None:
             self.emoji_classification_prompt = emoji_classification_prompt
         if emoji_classification_with_filter_prompt is not None:
@@ -974,7 +970,12 @@ class ImageProcessorService:
             )
 
             # 调用视觉模型
-            response = await self._call_vision_model(event, file_path, prompt)
+            response = await self._call_vision_model(
+                event,
+                file_path,
+                prompt,
+                response_validator=lambda text: self._parse_classification_response(text, file_path),
+            )
 
             # 解析JSON响应
             return self._parse_classification_response(response, file_path)
@@ -1057,9 +1058,13 @@ class ImageProcessorService:
 
     # ===== 门面委托：VLMCallService =====
 
-    async def _call_vision_model(self, event, img_path: str, prompt: str):
+    async def _call_vision_model(
+        self, event, img_path: str, prompt: str, *, response_validator=None
+    ):
         """Call vision model（已迁移到 VLMCallService）。"""
-        return await self._vlm_call_service._call_vision_model(event, img_path, prompt)
+        return await self._vlm_call_service._call_vision_model(
+            event, img_path, prompt, response_validator=response_validator
+        )
 
     async def _prepare_image_for_vlm(self, img_path: str):
         """Prepare image for VLM（已迁移到 VLMCallService）。"""
@@ -1161,56 +1166,8 @@ class ImageProcessorService:
         return await self._render_service.file_to_gif_base64(file_path)
 
     async def _resolve_vision_provider(self, event=None) -> str | None:
-        """统一的视觉模型 provider 解析逻辑。
-
-        优先级：
-        1. 插件配置的 vision_provider_id
-        2. AstrBot 框架配置的 default_image_caption_provider_id（视觉描述模型）
-        3. 都未配置时返回 None
-
-        Args:
-            event: 消息事件对象（可选）
-
-        Returns:
-            str | None: 提供商ID，未配置时返回 None
-        """
-        # 1. 优先使用插件配置的视觉模型
-        if self.vision_provider_id:
-            logger.debug(f"[视觉模型] 使用插件配置的提供商: {self.vision_provider_id}")
-            return self.vision_provider_id
-        else:
-            logger.debug("[视觉模型] 插件未配置 vision_provider_id，尝试使用框架全局配置")
-
-        # 2. 使用缓存的框架 VLM provider（避免每次都读配置）
-        if self._cached_framework_vlm_id is not None:
-            # 空字符串表示已查询过但没有配置
-            return self._cached_framework_vlm_id or None
-
-        # 3. 首次查询：从 AstrBot 框架配置获取 default_image_caption_provider_id
-        framework_vlm_id = ""
-        try:
-            if hasattr(self.plugin, "context"):
-                astrbot_config = self.plugin.context.get_config()
-                provider_settings = astrbot_config.get("provider_settings", {})
-                framework_vlm_id = str(
-                    provider_settings.get("default_image_caption_provider_id", "") or ""
-                )
-        except Exception as e:
-            logger.debug(f"读取框架视觉模型配置失败: {e}")
-
-        # 缓存结果（update_config 时会重置为 None 以便重新查询）
-        self._cached_framework_vlm_id = framework_vlm_id
-
-        if framework_vlm_id:
-            logger.info(f"使用框架全局图片描述模型: {framework_vlm_id}")
-            return framework_vlm_id
-
-        logger.warning(
-            "未配置视觉模型，无法进行图片分类。"
-            "请在插件配置中设置 vision_provider_id，"
-            "或在 AstrBot 全局配置中设置 default_image_caption_provider_id。"
-        )
-        return None
+        """缓存签名和实际请求共用同一个、实时读取框架默认值的解析器。"""
+        return await self._vlm_call_service._resolve_vision_provider(event)
 
     # ── 渲染门面方法（委托给 ImageRenderService）────────────────
 

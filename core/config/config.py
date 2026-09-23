@@ -10,6 +10,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context, StarTools
 
 from ..util.normalization import normalize_character_key, normalize_label_list
+from ..util.category_paths import category_path, validate_category_key
 
 
 # 早期版本（含上游 stealer）把内置 VLM 提示词写进了 _conf_schema.json 的 default，
@@ -118,12 +119,16 @@ class PluginConfig(BaseModel):
     max_reg_num: int = 2000
     # 后台每小时的容量巡检是否直接删文件。默认只在日志里告警，删不删由用户决定。
     capacity_auto_cleanup: bool = False
+    capacity_eviction_strategy: str = "oldest"
+    capacity_usage_weight: float = 0.7
     content_filtration: bool = False  # 内容审核开关
     content_filtration_fail_open: bool = False
     storage_cleanup_strategy: str = "balanced"
     image_processing_cooldown: int = 30
     enable_natural_emotion_analysis: bool = True  # 情绪识别模式
     emotion_analysis_provider_id: str = ""  # 情绪分析专用模型
+    enable_meme_rerank: bool = False
+    meme_rerank_timeout: float = 6.0
     smart_meme_selection: bool = True  # 智能表情包选择
 
     # === 待审核池 / 嵌入检索 ===
@@ -527,6 +532,13 @@ class PluginConfig(BaseModel):
             self._data.save_config()
 
     def __setattr__(self, key: str, value: Any):
+        if key == "categories":
+            keys = [validate_category_key(item) for item in value]
+            if len({item.casefold() for item in keys}) != len(keys):
+                raise ValueError("分类 key 不能存在大小写重名")
+            if hasattr(self, "categories_dir"):
+                for item in keys:
+                    category_path(self.categories_dir, item)
         super().__setattr__(key, value)
 
         if key in self._TARGET_POLICY_CONFIG_KEYS:
@@ -553,6 +565,12 @@ class PluginConfig(BaseModel):
             bool: 是否更新成功
         """
         try:
+            if "categories" in updates:
+                keys = [validate_category_key(key) for key in updates["categories"]]
+                if len({key.casefold() for key in keys}) != len(keys):
+                    raise ValueError("分类 key 不能存在大小写重名")
+                for key in keys:
+                    category_path(self.categories_dir, key)
             fields = getattr(type(self), "model_fields", None)
             if fields is None:
                 fields = getattr(type(self), "__fields__", {})
@@ -662,7 +680,7 @@ class PluginConfig(BaseModel):
         return result
 
     def ensure_category_dir(self, category: str) -> Path:
-        category_dir = self.categories_dir / str(category)
+        category_dir = category_path(self.categories_dir, category)
         category_dir.mkdir(parents=True, exist_ok=True)
         return category_dir
 

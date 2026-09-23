@@ -42,7 +42,7 @@ Command group `mp`, aliases `magpie` and `神偷`. The table lists subcommands o
 | `blacklist <index\|filename>` | Delete and blocklist it so it is never collected again |
 | `scope <index\|filename> <public\|local>` | Set scope; `local` restricts sending to the source chat |
 | `clean` | Empty the `raw` staging directory; stickers already in the library are untouched |
-| `capacity` | Run a capacity-control pass now. **This permanently deletes the oldest stickers above the cap** (favourites are kept; use `status` if you only want to read the numbers) |
+| `capacity` | Run a capacity-control pass now. **This permanently deletes excess stickers using the selected strategy** (oldest first by default; favourites are kept; use `status` if you only want to read the numbers) |
 | `tag_stats [N]` | Tag health check: frequent tags, noisy rare tags, untagged entries (N defaults to 15) |
 | `rebuild_index` | Rebuild the retrieval index. Index only — it **never deletes images** |
 | `rebuild_vectors` | Wipe and rebuild the semantic search vectors. Use it when you edited a description but search still returns the old one; says so and does nothing if no embedding model is configured |

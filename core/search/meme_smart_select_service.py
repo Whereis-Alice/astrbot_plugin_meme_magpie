@@ -995,6 +995,12 @@ class MemeSmartSelectService:
         emoji_path = await self.pick_emoji_only(event, emotions, cleaned_text)
         if not emoji_path:
             return None
+        return await self.attach_selected_emoji(event, result, emoji_path)
+
+    async def attach_selected_emoji(
+        self, event: AstrMessageEvent, result: Any, emoji_path: str,
+    ) -> str | None:
+        """Append an already selected image using the existing delivery adapter."""
         attach_path = self._split_compat_path(emoji_path)
         if self._result_has_image_path(result, attach_path):
             logger.debug("[MemeThief] 消息链里已有这张表情，跳过重复附加")
