@@ -427,7 +427,32 @@
         "select_all_results": "全选全部 {count}",
         "clear_library": "清空表情库",
         "clear_library_tip": "删除图库里的全部表情包（含磁盘文件），不可恢复",
-        "clearing": "正在清空..."
+        "clearing": "正在清空...",
+        "export": "导出"
+      },
+      "export": {
+        "title": "导出备份包",
+        "tip": "把图库导出成备份包：包含描述、标签、分类、收藏等完整信息，可再导入回来",
+        "intro": "导出的压缩包带完整分析信息（描述 / 标签 / 场景 / 情绪 / 角色 / 作品 / 收藏 / 使用统计），可以用「外部源 → 上传压缩包」原样导入回来，也可以当整个表情库的备份。",
+        "scope_all": "全部图库（{n} 张）",
+        "scope_filtered": "当前筛选结果（{n} 张）",
+        "filter_hint": "按列表当前条件导出：搜索词 / 分类 / 角色 / 收藏。",
+        "include_pending": "包含待审核池（{n} 条）",
+        "include_blacklist": "包含黑名单",
+        "start": "开始导出",
+        "again": "重新导出",
+        "download": "下载备份包",
+        "queued": "排队中",
+        "packing": "正在打包…",
+        "completed": "打包完成",
+        "failed": "导出失败",
+        "start_failed": "导出没能开始。",
+        "done_toast": "备份包已生成，点「下载备份包」保存。",
+        "stat_library": "图库",
+        "stat_pending": "待审核",
+        "stat_blacklist": "黑名单",
+        "stat_missing": "跳过（文件缺失）",
+        "stat_size": "体积"
       },
       "empty": {
         "library_title": "暂无表情包",
@@ -828,7 +853,16 @@
         "failed": "导入失败",
         "type_pack": "本地表情包",
         "type_github": "GitHub 仓库",
-        "type_http": "HTTP 目录"
+        "type_http": "HTTP 目录",
+        "backup_title": "识别到 meme神偷 备份包",
+        "backup_hint": "这个包由 meme神偷 导出，带完整分析信息（描述 / 标签 / 场景 / 情绪 / 角色 / 作品 / 收藏 / 使用统计）。导入是「只增不覆盖」：图片已存在就跳过或按下面的开关补空字段。",
+        "merge_existing": "只补空字段：已存在的图片只填缺少的描述 / 标签等，不覆盖已有内容",
+        "restore_pending": "恢复待审核池（{n} 条）",
+        "restore_blacklist": "恢复黑名单（{n} 条）",
+        "merged": "补全字段",
+        "pending_restored": "恢复待审核",
+        "pending_skipped": "待审核池已满跳过",
+        "blacklist_restored": "恢复黑名单"
       }
     }
   }

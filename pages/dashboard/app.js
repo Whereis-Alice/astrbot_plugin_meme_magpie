@@ -256,6 +256,7 @@ createApp({
         const modalBusyExtra = {
             batchUpload: () => Boolean(batchTaskId.value),
             source: () => Boolean(sourceJob.value),
+            export: () => exportActive.value,
         };
         const touchModal = (key) => { if (key) modalTouched[key] = true; };
         const releaseModal = (key) => { if (key) delete modalTouched[key]; };
@@ -412,12 +413,24 @@ createApp({
             origin_target: '',
             assign_character: false,
             character: '',
+            // magpie-backup 包专用：只补空字段 / 恢复待审核池 / 恢复黑名单
+            merge_existing: false,
+            restore_pending: true,
+            restore_blacklist: true,
         });
         const sourceDefaults = ref({
             enabled: true, review: false, review_forced: false, allow_http: false, max_items: 2000,
         });
         const sourceJob = ref(null);
         let sourcePollInterval = null;
+
+        // ── 备份导出：全库 / 当前筛选 → magpie-backup 压缩包 ──────────────
+        const exportOpen = ref(false);
+        const exportForm = reactive({ scope: 'all', include_pending: false, include_blacklist: false });
+        const exportTask = ref(null);
+        const exportStarting = ref(false);
+        const exportError = ref(null);
+        let exportPollInterval = null;
 
         const observeImages = () => {
             if (!imgObserver) return;
@@ -3417,11 +3430,18 @@ createApp({
                 }
                 fetchSources();
                 // 有图进库/进审核区就把背后的列表刷新，别让用户以为没导进来
-                if (Number(sourceJob.value?.imported || 0) > 0) {
+                const merged = Number(sourceJob.value?.merged || 0);
+                const restored = Number(sourceJob.value?.pending_restored || 0);
+                const blacklistRestored = Number(sourceJob.value?.blacklist_restored || 0);
+                if (
+                    Number(sourceJob.value?.imported || 0) > 0
+                    || merged > 0
+                    || blacklistRestored > 0
+                ) {
                     refreshView();
                     fetchWorks();
                 }
-                if (Number(sourceJob.value?.pending || 0) > 0) {
+                if (Number(sourceJob.value?.pending || 0) > 0 || restored > 0) {
                     fetchPendingImages(1);
                     fetchPendingStats();
                 }
@@ -3636,6 +3656,11 @@ createApp({
                     options.create_character = true;
                 }
             }
+            if (sourceInspection.value?.backup) {
+                options.merge_existing = Boolean(sourceForm.merge_existing);
+                options.restore_pending = Boolean(sourceForm.restore_pending);
+                options.restore_blacklist = Boolean(sourceForm.restore_blacklist);
+            }
             return options;
         };
 
@@ -3763,6 +3788,111 @@ createApp({
             }
         };
 
+        // ── 备份导出：magpie-backup 压缩包 ─────────────────────────
+
+        const exportActive = computed(() => (
+            ['queued', 'running'].includes(String(exportTask.value?.status || ''))
+        ));
+        const exportProgressPercent = computed(() => {
+            const total = Number(exportTask.value?.total || 0);
+            if (!total) return 0;
+            return Math.min(
+                100,
+                Math.round((Number(exportTask.value?.processed || 0) / total) * 100),
+            );
+        });
+        const exportStatusText = computed(() => {
+            switch (String(exportTask.value?.status || '')) {
+                case 'queued': return t('pages.dashboard.export.queued', '排队中');
+                case 'running': return t('pages.dashboard.export.packing', '正在打包…');
+                case 'completed': return t('pages.dashboard.export.completed', '打包完成');
+                case 'failed': return t('pages.dashboard.export.failed', '导出失败');
+                default: return '';
+            }
+        });
+        const stopExportPoll = () => {
+            if (exportPollInterval) clearInterval(exportPollInterval);
+            exportPollInterval = null;
+        };
+        const openExportModal = () => {
+            exportOpen.value = true;
+            exportError.value = null;
+            exportForm.scope = 'all';
+            // 首屏没进过审核区时 pendingStats 还是 0，这里补一次，别让「包含待审核池」选项消失
+            fetchPendingStats();
+        };
+        const closeExportModal = () => {
+            stopExportPoll();
+            exportOpen.value = false;
+        };
+        const exportFilters = () => ({
+            q: String(searchQuery.value || ''),
+            category: selectedCategory.value === '__favorite__' ? '' : String(selectedCategory.value || ''),
+            character: String(selectedCharacter.value || ''),
+            favorite_only: selectedCategory.value === '__favorite__',
+        });
+        const pollExportTask = async () => {
+            const taskId = exportTask.value?.task_id;
+            if (!taskId) { stopExportPoll(); return; }
+            try {
+                const res = await apiFetch(
+                    'api/images/export/status?task_id=' + encodeURIComponent(taskId),
+                );
+                const data = await res.json();
+                if (!data.success) return;
+                exportTask.value = data.task || exportTask.value;
+                const status = String(exportTask.value?.status || '');
+                if (!['completed', 'failed', 'cancelled'].includes(status)) return;
+                stopExportPoll();
+                if (status === 'failed') {
+                    exportError.value = exportTask.value?.error
+                        || t('pages.dashboard.export.failed', '导出失败');
+                } else if (status === 'completed') {
+                    showAlert(
+                        t('pages.dashboard.export.done_toast', '备份包已生成，点「下载备份包」保存。'),
+                        'success',
+                    );
+                }
+            } catch (e) {
+                console.error('Export poll error:', e);
+            }
+        };
+        const startExportPoll = () => {
+            stopExportPoll();
+            exportPollInterval = setInterval(pollExportTask, 800);
+        };
+        const startExport = async () => {
+            if (exportStarting.value || exportActive.value) return;
+            exportStarting.value = true;
+            exportError.value = null;
+            exportTask.value = null;
+            try {
+                const payload = {
+                    scope: exportForm.scope === 'filtered' ? 'filtered' : 'all',
+                    include_pending: Boolean(exportForm.include_pending),
+                    include_blacklist: Boolean(exportForm.include_blacklist),
+                    ...exportFilters(),
+                };
+                const res = await apiFetch('api/images/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (!data.success || !data.task) {
+                    exportError.value = data.error
+                        || t('pages.dashboard.export.start_failed', '导出没能开始。');
+                    return;
+                }
+                exportTask.value = data.task;
+                startExportPoll();
+            } catch (e) {
+                exportError.value = `${t('pages.dashboard.export.start_failed', '导出没能开始')}: ${e.message}`;
+            } finally {
+                exportStarting.value = false;
+            }
+        };
+
         // 受保护弹窗登记表：顺序＝模板里的叠放顺序，Esc 先处理最上面那个
         const guardedModals = [
             { key: 'preview', open: previewOpen, close: closePreview },
@@ -3777,6 +3907,7 @@ createApp({
             { key: 'pendingEdit', open: pendingEditOpen, close: closePendingEdit },
             { key: 'missingDesc', open: missingDescOpen, close: closeMissingDescModal },
             { key: 'source', open: sourceOpen, close: closeSourceModal },
+            { key: 'export', open: exportOpen, close: closeExportModal },
         ];
         // 每次重新打开都按「干净」算，别让上一次的输入痕迹一直把窗口锁着
         guardedModals.forEach((modal) => {
@@ -3828,6 +3959,7 @@ createApp({
             clearTimeout(resizeTimer);
             clearTimeout(searchTimeout);
             stopSourcePoll();
+            stopExportPoll();
         });
 
         return {
@@ -4180,6 +4312,18 @@ createApp({
             cancelSourceJob,
             controlSourceJob,
             forgetSource,
+
+            exportOpen,
+            exportForm,
+            exportTask,
+            exportStarting,
+            exportError,
+            exportActive,
+            exportProgressPercent,
+            exportStatusText,
+            openExportModal,
+            closeExportModal,
+            startExport,
         };
     },
     template: TEMPLATE,

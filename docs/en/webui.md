@@ -29,6 +29,23 @@ Both areas support **cross-page selection**: once batch mode is on, paging never
 
 "Clear library" in the library toolbar wipes the whole library in one shot (image files and thumbnail cache included) and bypasses the selection UI. It asks twice, and the second step requires typing `DELETE`. It only touches the real library — the review queue, the blacklist and external-source records are untouched. Files that cannot be removed keep their index row so storage cleanup can retry later.
 
+## Backup export and restore
+
+"Export" in the library toolbar packs the library into a `magpie-backup` archive for periodic backups or moving everything to another machine:
+
+- **Scope**: the whole library, or just the current filter (search / category / character / favourites);
+- **Optional sections**: review queue and blacklist, each its own checkbox, both off by default;
+- **What is inside**: images under per-category folders plus a full metadata JSON — description, tags, scenes, emotions, overlay text, character, work, favourites, use count, last used, created/reviewed timestamps, perceptual hash, scope and origin, retention class;
+- **Download**: packing runs in the background with a progress bar; the file lives in `exports/` for 2 hours before cleanup.
+
+Restore uses the same channel: **External sources → upload archive**. When a `magpie-backup` pack is detected, three switches appear:
+
+- **Fill blank fields only** — for images that already exist, fill missing description / tags and never overwrite anything (off by default, purely additive);
+- **Restore review queue** — put the archived pending items back; anything beyond the pool capacity is skipped with a note in the progress view;
+- **Restore blacklist** — write the archived blacklist hashes back.
+
+New categories from the backup are created automatically and characters are registered automatically, so restoring on a fresh machine needs no manual config. Duplicates are skipped by content hash, so importing the same pack twice never creates duplicates. The archive also carries a compatibility subset (`semantic_metadata.json`) so older plugin versions or other tools can still read descriptions and tags.
+
 ## Batch import and batch re-analysis
 
 Both live in the WebUI library page and share the same rate limiter.

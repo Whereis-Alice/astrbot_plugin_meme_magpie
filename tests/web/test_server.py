@@ -19,6 +19,7 @@ import json
 import random
 import time
 import uuid
+import zipfile
 from pathlib import Path
 
 from aiohttp import web
@@ -146,6 +147,8 @@ class PreviewState:
         self.blacklist: set[str] = set()
         self.batch_tasks: dict[str, dict] = {}
         self.prefs: dict[str, str] = {"theme": "auto", "view": "grid", "page_size": "auto"}
+        self.export_task: dict | None = None
+        self.export_bytes: bytes = b""
         self._next_pending_id = 1
         self._now = int(time.time())
         if seed:
@@ -409,6 +412,8 @@ class PreviewServer:
                 result = handler(request, payload)
         except Exception as exc:  # noqa: BLE001 - mock 层统一兜底
             return web.json_response({"success": False, "error": str(exc)}, status=500)
+        if isinstance(result, web.StreamResponse):
+            return result
         return web.json_response(result)
 
     # ── 图片渲染 ──────────────────────────────────────────────
@@ -522,6 +527,81 @@ class PreviewServer:
             "thumbnails_removed": 0,
             "failed": 0,
         }
+
+    def api_images_export(self, request, payload):
+        """POST /images/export —— 预览版：同步生成一个真实的小 zip 供下载按钮验证。"""
+        st = self.state
+        scope = str(payload.get("scope") or "all").lower()
+        q = str(payload.get("q", "")).lower().strip()
+        category = str(payload.get("category", "") or "")
+        favorite_only = bool(payload.get("favorite_only"))
+        if category == "__favorite__":
+            category, favorite_only = "", True
+        items = [
+            m for m in st.library
+            if st._match(m, q=q, category=category, favorite_only=favorite_only)
+        ] if scope == "filtered" else list(st.library)
+
+        included_pending = list(st.pending) if payload.get("include_pending") else []
+        included_blacklist = sorted(st.blacklist) if payload.get("include_blacklist") else []
+        export_payload = {
+            "schema": "magpie-backup/1",
+            "plugin": PLUGIN_BASE.strip("/"),
+            "library": [
+                {"hash": m["hash"], "category": m["category"], "desc": m.get("desc", ""),
+                 "tags": m.get("tags", []), "file": f"memes/{m['category']}/{m['hash']}.png"}
+                for m in items
+            ],
+            "pending": [{"hash": m["hash"], "category": m["category"]} for m in included_pending],
+            "blacklist": included_blacklist,
+        }
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "manifest.json",
+                json.dumps(
+                    {
+                        "id": "preview-backup",
+                        "name": "preview-backup",
+                        "format": "magpie-backup",
+                        "schema": "magpie-backup/1",
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            archive.writestr("magpie_export.json", json.dumps(export_payload, ensure_ascii=False))
+        st.export_bytes = buffer.getvalue()
+        task = {
+            "task_id": "preview-export",
+            "status": "completed",
+            "phase": "done",
+            "total": len(items),
+            "processed": len(items),
+            "library": len(items),
+            "pending": len(included_pending),
+            "blacklist": len(included_blacklist),
+            "missing": 0,
+            "bytes": len(st.export_bytes),
+            "current_file": "",
+            "error": "",
+            "file_name": "magpie-backup-preview.zip",
+            "download_url": f"{PLUGIN_BASE}/images/export/download?task_id=preview-export",
+        }
+        st.export_task = task
+        return {"success": True, "task": task}
+
+    def api_images_export_status(self, request, payload):
+        task = self.state.export_task
+        if not task:
+            return {"success": False, "error": "任务不存在或已过期"}
+        return {"success": True, "task": task}
+
+    def api_images_export_download(self, request, payload):
+        return web.Response(
+            body=self.state.export_bytes or b"",
+            content_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="magpie-backup-preview.zip"'},
+        )
 
     @staticmethod
     def _library_view(item: dict) -> dict:

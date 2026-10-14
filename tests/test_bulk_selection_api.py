@@ -8,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.db.database_service import DatabaseService
 from astrbot_plugin_meme_magpie import plugin_api as plugin_api_module
 from astrbot_plugin_meme_magpie.plugin_api import PluginAPI
 
@@ -216,3 +217,101 @@ class TestClearImages:
         assert result["deleted"] == 0
         assert result["index_removed"] == 1
         assert deleted_paths == list(index.keys())
+
+
+def _png_bytes(color=(255, 0, 0)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+async def _export_plugin(tmp_path: Path):
+    """真实 DatabaseService + 磁盘文件，供导出任务跑通。"""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db = DatabaseService(data_dir / "emoji.db")
+    cat_dir = data_dir / "categories" / "happy"
+    cat_dir.mkdir(parents=True)
+    img_a = cat_dir / "a.png"
+    img_b = cat_dir / "b.png"
+    img_a.write_bytes(_png_bytes((255, 0, 0)))
+    img_b.write_bytes(_png_bytes((0, 255, 0)))
+    await db.insert_batch(
+        [
+            {"path": str(img_a), "hash": "h1", "category": "happy", "desc": "A"},
+            {"path": str(img_b), "hash": "h2", "category": "sad", "desc": "B"},
+        ]
+    )
+    return _api(db=db, base_dir=data_dir), db, data_dir
+
+
+class TestExportEndpoints:
+    @pytest.mark.asyncio
+    async def test_start_status_download_round(self, quart_stub, tmp_path, monkeypatch):
+        import asyncio
+        import zipfile
+
+        api, _db, data_dir = await _export_plugin(tmp_path)
+        quart_stub(payload={"scope": "all", "include_pending": False, "include_blacklist": False})
+
+        started = await api.handle_export_start()
+        assert started["success"] is True
+        task_id = started["task"]["task_id"]
+
+        task = None
+        for _ in range(200):
+            quart_stub(args={"task_id": task_id})
+            status = await api.handle_export_status()
+            assert status["success"] is True
+            task = status["task"]
+            if task["status"] in {"completed", "failed"}:
+                break
+            await asyncio.sleep(0.02)
+
+        assert task is not None
+        assert task["status"] == "completed", task.get("error")
+        assert task["library"] == 2
+        assert task["bytes"] > 0
+        assert task["download_url"].endswith(f"task_id={task_id}")
+
+        archive_path = data_dir / "exports" / f"{task_id}.zip"
+        assert archive_path.is_file()
+        with zipfile.ZipFile(archive_path) as archive:
+            assert "manifest.json" in archive.namelist()
+
+        sent: dict = {}
+
+        async def fake_send_file(path, **kwargs):
+            sent["path"] = path
+            sent["kwargs"] = kwargs
+            return {"sent": path}
+
+        monkeypatch.setattr(plugin_api_module, "send_file", fake_send_file)
+        quart_stub(args={"task_id": task_id})
+        download = await api.handle_export_download()
+        assert download == {"sent": str(archive_path)}
+        assert sent["kwargs"]["as_attachment"] is True
+        assert sent["kwargs"]["attachment_filename"].endswith(".zip")
+
+    @pytest.mark.asyncio
+    async def test_filtered_scope_requires_matches(self, quart_stub, tmp_path):
+        api, _db, _data_dir = await _export_plugin(tmp_path)
+        quart_stub(payload={"scope": "filtered", "q": "no-such-description"})
+
+        result = await api.handle_export_start()
+
+        assert result["success"] is False
+        assert "没有可导出" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_status_unknown_task_returns_error(self, quart_stub):
+        api = _api(db=None)
+        quart_stub(args={"task_id": "nope"})
+
+        result = await api.handle_export_status()
+
+        assert result["success"] is False

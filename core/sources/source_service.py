@@ -468,9 +468,14 @@ class SourceService:
             "imported": 0,
             "duplicates": 0,
             "pending": 0,
+            "merged": 0,
+            "pending_restored": 0,
+            "pending_skipped": 0,
+            "blacklist_restored": 0,
             "stale": 0,
             "failed": 0,
             "errors": [],
+            "notes": [],
             "current_file": "",
             "paused": False,
             "cancel_requested": False,
@@ -629,7 +634,6 @@ class SourceService:
             inspection, reader = await self.inspect(spec)
             if not inspection.ok:
                 raise ExternalSourceError("; ".join(inspection.errors))
-            self._touch_job(job, total=len(inspection.items), phase="importing")
             category_map = spec.get("category_map") if isinstance(spec.get("category_map"), dict) else {}
             review = bool(
                 spec.get("review", self._cfg("external_source_default_review", False))
@@ -642,6 +646,18 @@ class SourceService:
                 raise ExternalSourceError(
                     "local-scope import requires origin_target group:<id> or user:<id>"
                 )
+            # magpie-backup 包：完整元数据回填 + 可选的待审核池/黑名单恢复
+            backup = bool(getattr(inspection, "backup", False))
+            backup_info = dict(getattr(inspection, "backup_info", {}) or {}) if backup else {}
+            merge_existing = backup and bool(spec.get("merge_existing", False))
+            restore_pending = backup and bool(spec.get("restore_pending", True))
+            restore_blacklist = backup and bool(spec.get("restore_blacklist", True))
+            pending_items = (
+                list(getattr(inspection, "pending_items", []) or []) if restore_pending else []
+            )
+            self._touch_job(
+                job, total=len(inspection.items) + len(pending_items), phase="importing"
+            )
             if review and self.db and hasattr(self.db, "count_pending"):
                 pending_capacity = int(self._cfg("steal_pool_capacity", 200))
                 if self.db.count_pending() + len(inspection.items) > pending_capacity:
@@ -678,6 +694,8 @@ class SourceService:
                         scope_mode=scope_mode,
                         origin_target=origin_target,
                         character=character,
+                        backup=backup,
+                        merge_existing=merge_existing,
                     )
                     job[outcome] = int(job.get(outcome, 0)) + 1
                 except asyncio.CancelledError:
@@ -695,6 +713,11 @@ class SourceService:
                         0.0, time.time() - float(job.get("started_at") or time.time())
                     )
                     self._touch_job(job)
+            if pending_items:
+                await self._restore_pending_items(job, reader, pending_items)
+            if restore_blacklist:
+                restored = await self._restore_blacklist(job, backup_info)
+                job["blacklist_restored"] = int(restored)
             self._touch_job(job, phase="finalizing", current_file="")
             if self.db and hasattr(self.db, "reconcile_source_items"):
                 await self.db.reconcile_source_items(
@@ -780,9 +803,16 @@ class SourceService:
         scope_mode: str,
         origin_target: str,
         character: str,
+        backup: bool = False,
+        merge_existing: bool = False,
     ) -> str:
-        # 导入弹窗里手填的角色优先；包内自带的角色名只有命中已注册角色才采纳。
-        character = character or self._match_known_character(item.character)
+        # 导入弹窗里手填的角色优先；备份包里的角色自动注册，第三方包只认已注册角色。
+        if not character and item.character:
+            character = (
+                self._ensure_backup_character(item.character)
+                if backup
+                else self._match_known_character(item.character)
+            )
         image_hash = hashlib.sha256(raw).hexdigest()
         if self.db and hasattr(self.db, "blacklisted_hashes"):
             if image_hash in self.db.blacklisted_hashes():
@@ -790,6 +820,12 @@ class SourceService:
         width, height, image_format, suffix = self._validate_image(raw)
         existing = self.db.get_emoji_by_hash(image_hash) if self.db else None
         if existing:
+            if merge_existing and backup:
+                merged = await self._merge_existing_entry(
+                    existing[0], dict(existing[1] or {}), item, character
+                )
+                await self._link_item(source, item, image_hash, existing[0])
+                return "merged" if merged else "duplicates"
             if (
                 character
                 and self.db
@@ -802,6 +838,16 @@ class SourceService:
         if self.db and hasattr(self.db, "get_pending_by_hash"):
             pending = self.db.get_pending_by_hash(image_hash)
             if pending:
+                if merge_existing and backup:
+                    merged = await self._merge_pending_entry(pending, item, character)
+                    await self._link_item(
+                        source,
+                        item,
+                        image_hash,
+                        None,
+                        pending_path=str(pending.get("path") or ""),
+                    )
+                    return "merged" if merged else "duplicates"
                 if (
                     character
                     and not str(pending.get("character") or "").strip()
@@ -820,31 +866,46 @@ class SourceService:
                     pending_path=str(pending.get("path") or ""),
                 )
                 return "duplicates"
-        category = self._map_category(item.category, category_map)
-        now = int(time.time())
-        metadata = {
-            "hash": image_hash,
-            "category": category,
-            "tags": self._normalize_labels(item.tags),
-            "scenes": self._normalize_labels(item.scenes),
-            "desc": item.text_description[:1000],
-            "overlay_text": str(item.visible_text or "")[:500],
-            "emotions": self._normalize_labels(item.emotions),
-            "source": f"external:{source['source_type']}",
-            "source_url": str(item.source_url or "")[:2000],
-            "original_name": str(item.filename or Path(item.relative_path).name)[:255],
-            "width": width,
-            "height": height,
-            "format": image_format.lower(),
-            "bytes": len(raw),
-            "add_method": "external_import",
-            "scope_mode": scope_mode,
-            "origin_target": origin_target,
-            "character": character,
-            "work": str(item.work or "")[:120],
-            "created_at": now,
-            "retention_class": "external",
-        }
+        if backup:
+            # 导入弹窗里手选的「分类对应」优先，其余保持备份里的原分类
+            mapped = str(category_map.get(str(item.category or "").strip(), "") or "").strip()
+            category = self._ensure_backup_category(mapped or item.category)
+            metadata = self._backup_library_metadata(
+                item,
+                category=category,
+                character=character,
+                width=width,
+                height=height,
+                image_format=image_format,
+                size=len(raw),
+                fallback_scope=scope_mode,
+                fallback_origin=origin_target,
+            )
+        else:
+            category = self._map_category(item.category, category_map)
+            metadata = {
+                "category": category,
+                "tags": self._normalize_labels(item.tags),
+                "scenes": self._normalize_labels(item.scenes),
+                "desc": item.text_description[:1000],
+                "overlay_text": str(item.visible_text or "")[:500],
+                "emotions": self._normalize_labels(item.emotions),
+                "source": f"external:{source['source_type']}",
+                "source_url": str(item.source_url or "")[:2000],
+                "original_name": str(item.filename or Path(item.relative_path).name)[:255],
+                "width": width,
+                "height": height,
+                "format": image_format.lower(),
+                "bytes": len(raw),
+                "add_method": "external_import",
+                "scope_mode": scope_mode,
+                "origin_target": origin_target,
+                "character": character,
+                "work": str(item.work or "")[:120],
+                "created_at": int(time.time()),
+                "retention_class": "external",
+            }
+        metadata["hash"] = image_hash
         if review:
             config = getattr(self.plugin, "plugin_config", None)
             target_dir = Path(getattr(config, "pending_dir", self.data_dir / "pending"))
@@ -868,6 +929,352 @@ class SourceService:
             raise ExternalSourceError("failed to insert image metadata")
         await self._link_item(source, item, image_hash, str(target))
         return "imported"
+
+    # ── magpie-backup 恢复：分类/角色自动创建 + 完整元数据回填 ──
+
+    def _ensure_backup_category(self, raw: str) -> str:
+        """备份包里的分类原样恢复；本地没有就自动创建，保证恢复后分类不串。"""
+        category = str(raw or "").strip()[:80]
+        config = getattr(self.plugin, "plugin_config", None)
+        if not category or config is None or not self._is_safe_category(category):
+            return self._map_category(category, {})
+        known = [str(key) for key in (config.get_categories() or [])]
+        if category in known:
+            return category
+        # 大小写不同的同名分类先对齐到已有 key，避免建出重名目录
+        for key in known:
+            if key.casefold() == category.casefold():
+                return key
+        try:
+            self.plugin.update_config({"categories": known + [category]})
+            info = dict(getattr(config, "category_info", {}) or {})
+            info.setdefault(category, {"name": category, "desc": ""})
+            config.category_info = info
+            config.save_category_info()
+            config.ensure_category_dirs([category])
+            logger.info(f"[Source] 备份恢复：已自动创建分类 {category}")
+            return category
+        except Exception as exc:
+            logger.warning(f"[Source] 自动创建分类失败 {category}: {exc}")
+            return self._map_category(category, {})
+
+    def _ensure_backup_character(self, raw: Any) -> str:
+        """备份包里的角色自动注册，避免恢复后角色筛选丢标签。"""
+        text = str(raw or "").strip()
+        config = getattr(self.plugin, "plugin_config", None)
+        if not text or len(text) > 80 or config is None:
+            return ""
+        try:
+            key = str(config.normalize_character_key(text) or "").strip()
+        except Exception:
+            return ""
+        if not key:
+            return ""
+        known = [str(item) for item in (config.get_characters() or [])]
+        if key in known:
+            return key
+        try:
+            info = dict(getattr(config, "character_info", {}) or {})
+            info.setdefault(key, {"name": text, "desc": ""})
+            config.characters = known + [key]
+            config.character_info = info
+            config.save_characters()
+            config.save_character_info()
+            logger.info(f"[Source] 备份恢复：已自动注册角色 {key}")
+            return key
+        except Exception as exc:
+            logger.warning(f"[Source] 自动注册角色失败 {key}: {exc}")
+            return ""
+
+    @staticmethod
+    def _backup_int(value: Any, *, maximum: int) -> int:
+        try:
+            number = int(value or 0)
+        except (TypeError, ValueError):
+            number = 0
+        return max(0, min(number, maximum))
+
+    @classmethod
+    def _backup_timestamp(cls, value: Any, *, allow_zero: bool = False) -> int:
+        """读回备份里的时间戳；明显穿越到未来的脏值不采信。"""
+        stamp = cls._backup_int(value, maximum=2**53)
+        if stamp <= 0:
+            return 0 if allow_zero else 0
+        return min(stamp, int(time.time()) + 86400)
+
+    @staticmethod
+    def _backup_flag(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _backup_labels(self, value: Any, *, limit: int = 32) -> list[str]:
+        values = value if isinstance(value, list) else []
+        return self._normalize_labels([str(item) for item in values], limit=limit)
+
+    def _backup_scope(
+        self, raw: dict[str, Any], fallback_scope: str, fallback_origin: str
+    ) -> tuple[str, str]:
+        scope = normalize_scope_mode(raw.get("scope_mode")) or fallback_scope
+        scope = normalize_scope_mode(scope) or "public"
+        origin = str(raw.get("origin_target") or fallback_origin or "").strip()[:190]
+        if scope == "local" and not (
+            origin.startswith("group:") or origin.startswith("user:")
+        ):
+            # 缺来源群的 local 图在恢复时降级为 public，别把作用域写坏
+            scope, origin = "public", ""
+        return scope, origin
+
+    def _backup_library_metadata(
+        self,
+        item: SourceItem,
+        *,
+        category: str,
+        character: str,
+        width: int,
+        height: int,
+        image_format: str,
+        size: int,
+        fallback_scope: str,
+        fallback_origin: str,
+    ) -> dict[str, Any]:
+        raw = item.metadata if isinstance(item.metadata, dict) else {}
+        scope, origin = self._backup_scope(raw, fallback_scope, fallback_origin)
+        created_at = self._backup_timestamp(raw.get("created_at")) or int(time.time())
+        reviewed_at = self._backup_timestamp(raw.get("reviewed_at"), allow_zero=True)
+        return {
+            "hash": str(raw.get("hash") or ""),
+            "phash": str(raw.get("phash") or "")[:128],
+            "category": category,
+            "tags": self._backup_labels(raw.get("tags")),
+            "scenes": self._backup_labels(raw.get("scenes")),
+            "desc": item.text_description[:1000],
+            "overlay_text": str(item.visible_text or "")[:500],
+            "emotions": self._backup_labels(raw.get("emotions")),
+            "source": str(raw.get("source") or "")[:64],
+            "source_url": str(item.source_url or "")[:2000],
+            "original_name": str(item.filename or Path(item.relative_path).name)[:255],
+            "width": width,
+            "height": height,
+            "format": image_format.lower(),
+            "bytes": size,
+            "add_method": str(raw.get("add_method") or "backup_import")[:32],
+            "scope_mode": scope,
+            "origin_target": origin,
+            "character": character,
+            "work": str(item.work or "")[:120],
+            "created_at": created_at,
+            "reviewed_at": reviewed_at or None,
+            "use_count": self._backup_int(raw.get("use_count"), maximum=1_000_000_000),
+            "last_used_at": self._backup_timestamp(raw.get("last_used_at"), allow_zero=True),
+            "is_favorite": 1 if self._backup_flag(raw.get("is_favorite")) else 0,
+            "retention_class": str(raw.get("retention_class") or "native")[:32],
+        }
+
+    def _backup_pending_metadata(self, item: SourceItem) -> dict[str, Any]:
+        raw = item.metadata if isinstance(item.metadata, dict) else {}
+        scope, origin = self._backup_scope(raw, "public", "")
+        category = self._ensure_backup_category(item.category or str(raw.get("category") or ""))
+        return {
+            "phash": str(raw.get("phash") or "")[:128],
+            "category": category,
+            "tags": self._backup_labels(raw.get("tags")),
+            "scenes": self._backup_labels(raw.get("scenes")),
+            "desc": item.text_description[:1000],
+            "overlay_text": str(item.visible_text or "")[:500],
+            "emotions": self._backup_labels(raw.get("emotions")),
+            "source": str(raw.get("source") or "")[:64],
+            "source_url": str(item.source_url or "")[:2000],
+            "original_name": str(item.filename or Path(item.relative_path).name)[:255],
+            "add_method": str(raw.get("add_method") or "backup_import")[:32],
+            "scope_mode": scope,
+            "origin_target": origin,
+            "character": self._ensure_backup_character(item.character),
+            "work": str(item.work or "")[:120],
+            "created_at": self._backup_timestamp(raw.get("created_at")) or int(time.time()),
+            "retention_class": str(raw.get("retention_class") or "native")[:32],
+        }
+
+    async def _merge_existing_entry(
+        self,
+        path: str,
+        meta: dict[str, Any],
+        item: SourceItem,
+        character: str,
+    ) -> bool:
+        """只补空字段：已有内容一律不动，用户手写的描述/标签绝不被覆盖。"""
+        db = self.db
+        if db is None or not hasattr(db, "update_path"):
+            return False
+        raw = item.metadata if isinstance(item.metadata, dict) else {}
+        updates: dict[str, Any] = {}
+
+        def fill(key: str, value: Any) -> None:
+            if value in (None, "", [], {}):
+                return
+            current = meta.get(key)
+            if current in (None, "", [], {}, 0):
+                updates[key] = value
+
+        fill("phash", str(raw.get("phash") or "")[:128])
+        fill("desc", item.text_description[:1000])
+        fill("overlay_text", str(item.visible_text or "")[:500])
+        fill("work", str(item.work or "")[:120])
+        fill("source_url", str(item.source_url or "")[:2000])
+        fill("original_name", str(item.filename or "")[:255])
+        fill("tags", self._backup_labels(item.tags))
+        fill("scenes", self._backup_labels(item.scenes))
+        fill("emotions", self._backup_labels(item.emotions))
+        if character and not str(meta.get("character") or "").strip():
+            updates["character"] = character
+        use_count = self._backup_int(raw.get("use_count"), maximum=1_000_000_000)
+        if use_count and not self._backup_int(meta.get("use_count"), maximum=1_000_000_000):
+            updates["use_count"] = use_count
+        last_used = self._backup_timestamp(raw.get("last_used_at"), allow_zero=True)
+        if last_used and not self._backup_timestamp(meta.get("last_used_at"), allow_zero=True):
+            updates["last_used_at"] = last_used
+        if self._backup_flag(raw.get("is_favorite")) and not meta.get("is_favorite"):
+            updates["is_favorite"] = 1
+        if not updates:
+            return False
+        return bool(await db.update_path(path, updates))
+
+    async def _merge_pending_entry(
+        self, pending: dict[str, Any], item: SourceItem, character: str
+    ) -> bool:
+        """待审核条目的只补空字段：字段白名单与 update_pending 保持一致。"""
+        db = self.db
+        pending_id = int(pending.get("id") or 0)
+        if not pending_id or db is None or not hasattr(db, "update_pending"):
+            return False
+        raw = item.metadata if isinstance(item.metadata, dict) else {}
+        updates: dict[str, Any] = {}
+
+        def fill(key: str, value: Any) -> None:
+            if value in (None, "", [], {}):
+                return
+            current = pending.get(key)
+            if current in (None, "", [], {}, 0):
+                updates[key] = value
+
+        fill("phash", str(raw.get("phash") or "")[:128])
+        fill("desc", item.text_description[:1000])
+        fill("overlay_text", str(item.visible_text or "")[:500])
+        fill("work", str(item.work or "")[:120])
+        fill("tags", self._backup_labels(item.tags))
+        fill("scenes", self._backup_labels(item.scenes))
+        fill("emotions", self._backup_labels(item.emotions))
+        if character and not str(pending.get("character") or "").strip():
+            updates["character"] = character
+        if not updates:
+            return False
+        return bool(await db.update_pending(pending_id, updates))
+
+    async def _restore_pending_items(
+        self,
+        job: dict[str, Any],
+        reader: Any,
+        pending_items: list[SourceItem],
+    ) -> None:
+        """把备份包里的待审核条目放回待审核池；容量不足时跳过并记一条说明。"""
+        db = self.db
+        if db is None:
+            job["pending_skipped"] = int(job.get("pending_skipped", 0)) + len(pending_items)
+            return
+        capacity = int(self._cfg("steal_pool_capacity", 200))
+        current = int(db.count_pending()) if hasattr(db, "count_pending") else 0
+        free = max(0, capacity - current)
+        skipped = 0
+        for item in pending_items:
+            await self._await_resume(job)
+            self._touch_job(
+                job,
+                current_file=str(item.filename or item.relative_path or item.external_id)[:200],
+            )
+            try:
+                if free <= 0:
+                    skipped += 1
+                    continue
+                raw = await self._read_source_item(reader, item)
+                image_hash = hashlib.sha256(raw).hexdigest()
+                if self._hash_exists_anywhere(image_hash):
+                    job["duplicates"] = int(job.get("duplicates", 0)) + 1
+                    continue
+                width, height, image_format, suffix = self._validate_image(raw)
+                config = getattr(self.plugin, "plugin_config", None)
+                target_dir = Path(getattr(config, "pending_dir", self.data_dir / "pending"))
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = self._unique_target(target_dir, item, image_hash, suffix)
+                await self._write_atomic(target, raw)
+                metadata = self._backup_pending_metadata(item)
+                metadata.update(
+                    {
+                        "path": str(target),
+                        "hash": image_hash,
+                        "width": width,
+                        "height": height,
+                        "format": image_format.lower(),
+                        "bytes": len(raw),
+                    }
+                )
+                pending_id = await db.insert_pending(metadata)
+                if not pending_id:
+                    await safe_remove_file(str(target))
+                    job["duplicates"] = int(job.get("duplicates", 0)) + 1
+                    continue
+                free -= 1
+                job["pending_restored"] = int(job.get("pending_restored", 0)) + 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                job["failed"] = int(job.get("failed", 0)) + 1
+                errors = job["errors"]
+                if len(errors) < self.JOB_MAX_ERRORS:
+                    errors.append(f"{item.external_id}: {exc}")
+                logger.warning(f"[Source] 恢复待审核条目失败 {item.external_id}: {exc}")
+            finally:
+                job["processed"] = int(job.get("processed", 0)) + 1
+                self._touch_job(job)
+        if skipped:
+            job["pending_skipped"] = int(job.get("pending_skipped", 0)) + skipped
+            notes = job.setdefault("notes", [])
+            if len(notes) < 10:
+                notes.append(
+                    f"待审核池容量不足（{current}/{capacity}），本轮跳过 {skipped} 条待审核恢复"
+                )
+
+    def _hash_exists_anywhere(self, image_hash: str) -> bool:
+        db = self.db
+        if db is None:
+            return False
+        try:
+            if hasattr(db, "get_emoji_by_hash") and db.get_emoji_by_hash(image_hash):
+                return True
+            if hasattr(db, "get_pending_by_hash") and db.get_pending_by_hash(image_hash):
+                return True
+        except Exception as exc:
+            logger.debug(f"[Source] 恢复去重查询失败: {exc}")
+        return False
+
+    async def _restore_blacklist(self, job: dict[str, Any], backup_info: dict[str, Any]) -> int:
+        entries = backup_info.get("blacklist")
+        db = self.db
+        if not entries or db is None or not hasattr(db, "add_blacklist_batch"):
+            return 0
+        now = int(time.time())
+        mapping: dict[str, int] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            hash_value = str(entry.get("hash") or "").strip()[:128]
+            if not hash_value:
+                continue
+            mapping[hash_value] = int(entry.get("created_at") or 0) or now
+        if not mapping:
+            return 0
+        restored = await db.add_blacklist_batch(mapping)
+        logger.info(f"[Source] 备份恢复：写入 {restored} 条黑名单")
+        return int(restored)
 
     def _match_known_character(self, raw: Any) -> str:
         """把外部源自带的角色名对到已注册角色，对不上就返回空字符串。

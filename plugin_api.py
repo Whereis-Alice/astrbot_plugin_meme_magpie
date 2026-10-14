@@ -20,6 +20,7 @@ except ImportError:
 
 from astrbot.api import logger
 
+from .core.maintenance.backup_service import BackupService
 from .core.processing.analysis_throttle import AnalysisThrottle, build_analysis_throttle
 from .core.sources.models import ExternalSourceError, ExternalSourceSecurityError
 from .core.util.blacklist import add_blacklist_hash
@@ -57,10 +58,16 @@ class PluginAPI:
     VALID_THEMES = frozenset({"auto", "dark", "light", "pixel", "terminal"})
     # WebUI 每页条数：auto = 按窗口自适应（旧行为），其余是固定档位。
     VALID_PAGE_SIZES = frozenset({"auto", "60", "120", "240"})
+    # 备份导出任务：完成后保留多久（含下载文件），过期的任务与 zip 一起清掉
+    EXPORT_TASK_TTL_SECONDS = 2 * 60 * 60
+    EXPORT_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
         self.batch_upload_tasks: dict[str, dict] = {}
+        self.export_tasks: dict[str, dict] = {}
+        self._export_task_handles: dict[str, asyncio.Task] = {}
+        self._backup_service: BackupService | None = None
         # 正式库改分类会移动文件并改主键路径。识别可以并发，但所有
         # categories/ 下的移动入口必须共用这把锁，否则并发请求可能同时
         # _unique_path() / move()，互相踩对方的落点。
@@ -86,6 +93,9 @@ class PluginAPI:
             ("/images/batch-upload", "handle_batch_upload", ["POST"]),
             ("/images/batch-upload-status", "handle_batch_upload_status", ["GET"]),
             ("/images/batch-upload-control", "handle_batch_upload_control", ["POST"]),
+            ("/images/export", "handle_export_start", ["POST"]),
+            ("/images/export/status", "handle_export_status", ["GET"]),
+            ("/images/export/download", "handle_export_download", ["GET"]),
             ("/images/batch-reanalyze", "handle_batch_reanalyze", ["POST"]),
             ("/images/reanalyze-scan", "handle_reanalyze_scan", ["GET"]),
             ("/images/missing-description", "handle_missing_description", ["GET"]),
@@ -2044,6 +2054,239 @@ class PluginAPI:
             )
         except Exception as e:
             logger.error(f"清空表情库失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    # ── Backup export（图库备份导出）──────────────────────────
+
+    def _backup_service_instance(self) -> BackupService:
+        if self._backup_service is None:
+            self._backup_service = BackupService(self.plugin)
+        return self._backup_service
+
+    @staticmethod
+    def _export_task_public(task: dict) -> dict:
+        return {key: value for key, value in task.items() if not key.startswith("_")}
+
+    def _prune_export_tasks(self) -> None:
+        """清理超过 TTL 的导出任务与 zip 文件，并顺手清掉无主的旧包。"""
+        now = time.time()
+        export_dir = self._data_dir / "exports"
+        expired = [
+            task_id
+            for task_id, task in self.export_tasks.items()
+            if str(task.get("status") or "") in self.EXPORT_TERMINAL_STATUSES
+            and now - float(task.get("completed_at") or task.get("updated_at") or now)
+            > self.EXPORT_TASK_TTL_SECONDS
+        ]
+        for task_id in expired:
+            self.export_tasks.pop(task_id, None)
+            self._export_task_handles.pop(task_id, None)
+            try:
+                (export_dir / f"{task_id}.zip").unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            if export_dir.is_dir():
+                for path in export_dir.glob("*.zip"):
+                    if path.stem in self.export_tasks:
+                        continue
+                    if now - path.stat().st_mtime > self.EXPORT_TASK_TTL_SECONDS:
+                        path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    async def handle_export_start(self):
+        """POST /images/export —— 启动备份导出任务（全库或当前筛选）。"""
+        try:
+            db = self._db
+            if db is None:
+                return jsonify({"success": False, "error": "db 不可用"})
+            data = await request.get_json() or {}
+            scope = str(data.get("scope") or "all").strip().lower()
+            if scope not in {"all", "filtered"}:
+                scope = "all"
+            include_pending = bool(data.get("include_pending", False))
+            include_blacklist = bool(data.get("include_blacklist", False))
+            category = str(data.get("category", "") or "")
+            character = str(data.get("character", "") or "")
+            work = str(data.get("work", "") or "")
+            search = str(data.get("q", "") or "").lower()
+            favorite_raw = data.get("favorite_only", False)
+            favorite_only = (
+                favorite_raw.strip().lower() == "true"
+                if isinstance(favorite_raw, str)
+                else bool(favorite_raw)
+            )
+
+            hashes: set[str] | None = None
+            if scope == "filtered":
+                getter = getattr(db, "get_emoji_hashes", None)
+                if not callable(getter):
+                    return jsonify({"success": False, "error": "db 不支持按筛选导出"})
+                hashes = set(
+                    getter(
+                        category=category or None,
+                        search_query=search if search else None,
+                        favorite_only=favorite_only,
+                        character=character or None,
+                        work=work or None,
+                    )
+                )
+                if not hashes:
+                    return jsonify({"success": False, "error": "当前筛选没有可导出的图片"})
+
+            self._prune_export_tasks()
+            task_id = uuid.uuid4().hex
+            now = time.time()
+            task: dict[str, Any] = {
+                "task_id": task_id,
+                "status": "queued",
+                "phase": "collecting",
+                "total": 0,
+                "processed": 0,
+                "library": 0,
+                "pending": 0,
+                "blacklist": 0,
+                "missing": 0,
+                "bytes": 0,
+                "current_file": "",
+                "error": "",
+                "file_name": f"magpie-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip",
+                "download_url": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.export_tasks[task_id] = task
+            handle = asyncio.create_task(
+                self._run_export_task(
+                    task_id,
+                    hashes=hashes,
+                    include_pending=include_pending,
+                    include_blacklist=include_blacklist,
+                    filters={
+                        "scope": scope,
+                        "q": search,
+                        "category": category,
+                        "character": character,
+                        "work": work,
+                        "favorite_only": favorite_only,
+                        "include_pending": include_pending,
+                        "include_blacklist": include_blacklist,
+                    },
+                ),
+                name=f"meme_export_{task_id[:8]}",
+            )
+            self._export_task_handles[task_id] = handle
+            handle.add_done_callback(
+                lambda _task, value=task_id: self._export_task_handles.pop(value, None)
+            )
+            return jsonify({"success": True, "task": self._export_task_public(task)})
+        except Exception as e:
+            logger.error(f"备份导出启动失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    async def _run_export_task(
+        self,
+        task_id: str,
+        *,
+        hashes: set[str] | None,
+        include_pending: bool,
+        include_blacklist: bool,
+        filters: dict[str, Any],
+    ) -> None:
+        task = self.export_tasks.get(task_id)
+        if task is None:
+            return
+        task.update({"status": "running", "phase": "collecting", "updated_at": time.time()})
+        try:
+            service = self._backup_service_instance()
+            payload = await asyncio.to_thread(
+                service.collect,
+                hashes=hashes,
+                include_pending=include_pending,
+                include_blacklist=include_blacklist,
+            )
+            total = len(payload["library"]) + len(payload["pending"])
+            task.update({"total": total, "phase": "packing", "updated_at": time.time()})
+            dest = self._data_dir / "exports" / f"{task_id}.zip"
+
+            def progress(processed: int, current: str) -> None:
+                task["processed"] = processed
+                task["current_file"] = current
+                task["updated_at"] = time.time()
+
+            stats = await asyncio.to_thread(
+                service.write_zip,
+                dest,
+                payload,
+                plugin_version=service.plugin_version(),
+                filters=filters,
+                progress=progress,
+            )
+            task.update(
+                {
+                    "status": "completed",
+                    "phase": "done",
+                    "processed": total,
+                    "library": int(stats.get("library") or 0),
+                    "pending": int(stats.get("pending") or 0),
+                    "blacklist": int(stats.get("blacklist") or 0),
+                    "missing": int(stats.get("missing") or 0)
+                    + int(payload.get("missing") or 0),
+                    "bytes": int(stats.get("bytes") or 0),
+                    "current_file": "",
+                    "download_url": f"/{PLUGIN_NAME}/images/export/download?task_id={task_id}",
+                    "completed_at": time.time(),
+                    "updated_at": time.time(),
+                }
+            )
+        except Exception as e:
+            logger.error(f"备份导出失败: {e}", exc_info=True)
+            task.update(
+                {
+                    "status": "failed",
+                    "phase": "done",
+                    "error": str(e),
+                    "completed_at": time.time(),
+                    "updated_at": time.time(),
+                }
+            )
+
+    async def handle_export_status(self):
+        """GET /images/export/status —— 导出任务进度。"""
+        try:
+            self._prune_export_tasks()
+            task_id = str(request.args.get("task_id", "") or "").strip()
+            task = self.export_tasks.get(task_id)
+            if task is None:
+                return jsonify({"success": False, "error": "任务不存在或已过期"})
+            return jsonify({"success": True, "task": self._export_task_public(task)})
+        except Exception as e:
+            logger.error(f"备份导出状态查询失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    async def handle_export_download(self):
+        """GET /images/export/download —— 下载完成后备份包。"""
+        if send_file is None:
+            return jsonify({"success": False, "error": "send_file 不可用"}), 500
+        try:
+            task_id = str(request.args.get("task_id", "") or "").strip()
+            task = self.export_tasks.get(task_id)
+            path = self._data_dir / "exports" / f"{task_id}.zip"
+            if (
+                not task_id
+                or task is None
+                or task.get("status") != "completed"
+                or not path.is_file()
+            ):
+                return jsonify({"success": False, "error": "备份文件不存在或已过期"}), 404
+            return await send_file(
+                str(path),
+                as_attachment=True,
+                attachment_filename=str(task.get("file_name") or f"{task_id}.zip"),
+            )
+        except Exception as e:
+            logger.error(f"备份下载失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
     async def handle_batch_delete(self):

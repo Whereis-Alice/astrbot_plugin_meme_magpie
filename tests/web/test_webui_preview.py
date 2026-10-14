@@ -7,6 +7,7 @@
 import base64
 import io
 import re
+import zipfile
 
 import pytest
 
@@ -563,3 +564,66 @@ def test_bulk_selection_ui_wiring():
     # 清空图库是双确认：确认框 + 手输 DELETE
     assert "pages.dashboard.prompt.clear_library" in app_js
     assert 'trim().toUpperCase() !== \'DELETE\'' in app_js
+
+
+@pytest.mark.asyncio
+async def test_export_endpoints_preview_flow():
+    async with _client() as client:
+        started = (await (
+            await client.post(
+                f"{PLUGIN_BASE}/images/export",
+                json={"scope": "all", "include_pending": True, "include_blacklist": True},
+            )
+        ).json())
+        assert started["success"] is True
+        task = started["task"]
+        assert task["status"] == "completed"
+        assert task["library"] > 0
+        assert task["pending"] > 0
+
+        status = (await (
+            await client.get(
+                f"{PLUGIN_BASE}/images/export/status?task_id={task['task_id']}"
+            )
+        ).json())
+        assert status["success"] is True
+        assert status["task"]["task_id"] == task["task_id"]
+
+        download = await client.get(
+            f"{PLUGIN_BASE}/images/export/download?task_id={task['task_id']}"
+        )
+        assert download.status == 200
+        body = await download.read()
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            assert "manifest.json" in archive.namelist()
+            assert "magpie_export.json" in archive.namelist()
+
+
+def test_backup_ui_wiring():
+    """导出入口、备份导入选项与接口路径必须都接上。"""
+    template = (DASHBOARD_DIR / "template.js").read_text(encoding="utf-8")
+    app_js = (DASHBOARD_DIR / "app.js").read_text(encoding="utf-8")
+
+    for name in (
+        "exportOpen",
+        "exportForm",
+        "exportTask",
+        "exportActive",
+        "openExportModal",
+        "closeExportModal",
+        "startExport",
+    ):
+        assert name in template, name
+        assert re.search(rf"^\s+{name},$", app_js, re.M), name
+
+    for path in (
+        "api/images/export'",
+        "api/images/export/status",
+    ):
+        assert path in app_js, path
+
+    # 备份包识别与导入开关
+    assert 'data-modal-guard="export"' in template
+    assert "sourceInspection.backup" in template
+    assert "merge_existing" in template and "restore_blacklist" in template
+    assert "restore_pending" in app_js

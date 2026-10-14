@@ -31,6 +31,8 @@ my-pack/
 
 读取逻辑跟随公开的 [AstrBot Meme Pack 协议](https://github.com/anka-afk/astrbot-meme-pack-index/blob/main/ASTRBOT_MEME_PACK_PROTOCOL_ZH.md)，不认识的字段会安全忽略。
 
+如果压缩包是 meme神偷 自己导出的 **`magpie-backup` 备份包**（见 [WebUI 管理面板](webui.md)），读取器会识别出完整元数据：除描述 / 标签 / 场景 / 情绪 / 角色 / 作品外，还会回填收藏、使用次数、最近使用时间、入库时间、感知哈希、可见范围与来源、保留级别；导入弹窗会多出「只补空字段 / 恢复待审核池 / 恢复黑名单」三个开关，备份里的新分类自动创建、角色自动注册。导入依然只增不覆盖，图片按内容哈希去重。
+
 ### GitHub 仓库
 
 填 `owner/repo`，或者直接贴链接：

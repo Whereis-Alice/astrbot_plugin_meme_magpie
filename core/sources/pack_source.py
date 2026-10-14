@@ -19,7 +19,34 @@ from .models import ExternalSourceError, ExternalSourceSecurityError, PackInspec
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+# magpie-backup 的整库元数据文件（几千到上万张图时比普通清单大得多），
+# 它是我们自己的格式，单独放宽上限；第三方清单仍受 4MB 约束。
+_MAX_BACKUP_METADATA_BYTES = 32 * 1024 * 1024
+BACKUP_FORMAT = "magpie-backup"
 _ID_RE = re.compile(r"[^\w.-]+", re.UNICODE)
+
+
+def _metadata_limit(name: str) -> int:
+    return _MAX_BACKUP_METADATA_BYTES if name.endswith("magpie_export.json") else _MAX_MANIFEST_BYTES
+
+
+def _backup_payload(values: list[Any]) -> dict[str, Any]:
+    """在已读取的 JSON 里找 magpie-backup 的导出描述文件。
+
+    manifest.json 也带 schema 字段，所以优先挑真正带 library / pending /
+    blacklist 段落的那份；只有清单时退回第一份匹配的。
+    """
+    fallback: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        schema = str(value.get("schema") or "").strip()
+        if schema != BACKUP_FORMAT and not schema.startswith(f"{BACKUP_FORMAT}/"):
+            continue
+        if any(key in value for key in ("library", "pending", "blacklist")):
+            return value
+        fallback = fallback or value
+    return fallback
 
 
 def safe_member_path(value: str) -> str:
@@ -276,9 +303,10 @@ class PackSource:
                         "memes_data.json",
                         "semantic_index.json",
                         "semantic_metadata.json",
+                        "magpie_export.json",
                     )
                 ):
-                    if info.file_size > _MAX_MANIFEST_BYTES:
+                    if info.file_size > _metadata_limit(logical_name):
                         errors.append(f"{logical_name} exceeds the metadata size limit")
                         continue
                     try:
@@ -288,11 +316,27 @@ class PackSource:
                 if Path(logical_name).suffix.lower() in IMAGE_EXTENSIONS and not self._is_preview(logical_name):
                     image_members.append((logical_name, info))
         manifest = self._find_manifest(json_values)
-        items = self._build_items(image_members, manifest, json_values, warnings)
-        if not items:
+        backup_payload = _backup_payload(json_values)
+        is_backup = (
+            str(manifest.get("format") or "").strip() == BACKUP_FORMAT or bool(backup_payload)
+        )
+        pending_members: list[tuple[str, zipfile.ZipInfo | None]] = []
+        if is_backup:
+            pending_members = [pair for pair in image_members if pair[0].startswith("pending/")]
+            image_members = [pair for pair in image_members if not pair[0].startswith("pending/")]
+        # 备份包是整库恢复用的，按配置的上限（默认 2000）截断会静默丢图，放宽到 2 万张
+        limit = max(self.max_items, 20000) if is_backup else self.max_items
+        items = self._build_items(image_members, manifest, json_values, warnings, limit=limit)
+        pending_items = (
+            self._build_items(pending_members, manifest, json_values, warnings, limit=limit)
+            if is_backup
+            else []
+        )
+        if not items and not pending_items:
             errors.append("pack contains no supported images")
-        if len(image_members) > self.max_items:
-            warnings.append(f"source contains more than {self.max_items} images; preview is truncated")
+        total_images = len(image_members) + len(pending_members)
+        if total_images > limit:
+            warnings.append(f"source contains more than {limit} images; preview is truncated")
         name = str(manifest.get("name") or manifest.get("id") or self.source_path.stem)
         return PackInspection(
             source_type="meme_pack",
@@ -301,10 +345,15 @@ class PackSource:
             endpoint=str(self.source_path),
             manifest=manifest,
             items=items,
+            pending_items=pending_items,
+            backup=is_backup,
+            backup_info=(
+                self._backup_info(manifest, backup_payload, pending_items) if is_backup else {}
+            ),
             warnings=warnings,
             errors=errors,
             total_bytes=total_uncompressed,
-            truncated=len(image_members) > self.max_items,
+            truncated=total_images > limit,
             source_path=self.source_path,
             is_archive=True,
         )
@@ -335,10 +384,11 @@ class PackSource:
             root / "memes_data.json",
             root / "semantic_index.json",
             root / "semantic_metadata.json",
+            root / "magpie_export.json",
         ):
             if candidate.is_file():
                 try:
-                    if candidate.stat().st_size > _MAX_MANIFEST_BYTES:
+                    if candidate.stat().st_size > _metadata_limit(candidate.name):
                         raise ExternalSourceError(
                             f"{candidate.relative_to(root)} exceeds the metadata size limit"
                         )
@@ -371,11 +421,26 @@ class PackSource:
             except (OSError, ValueError, ExternalSourceSecurityError) as exc:
                 errors.append(str(exc))
         manifest = self._find_manifest(json_values)
-        items = self._build_items(image_members, manifest, json_values, warnings)
-        if not items:
+        backup_payload = _backup_payload(json_values)
+        is_backup = (
+            str(manifest.get("format") or "").strip() == BACKUP_FORMAT or bool(backup_payload)
+        )
+        pending_members: list[tuple[str, zipfile.ZipInfo | None]] = []
+        if is_backup:
+            pending_members = [pair for pair in image_members if pair[0].startswith("pending/")]
+            image_members = [pair for pair in image_members if not pair[0].startswith("pending/")]
+        limit = max(self.max_items, 20000) if is_backup else self.max_items
+        items = self._build_items(image_members, manifest, json_values, warnings, limit=limit)
+        pending_items = (
+            self._build_items(pending_members, manifest, json_values, warnings, limit=limit)
+            if is_backup
+            else []
+        )
+        if not items and not pending_items:
             errors.append("pack contains no supported images")
-        if len(image_members) > self.max_items:
-            warnings.append(f"source contains more than {self.max_items} images; preview is truncated")
+        total_images = len(image_members) + len(pending_members)
+        if total_images > limit:
+            warnings.append(f"source contains more than {limit} images; preview is truncated")
         name = str(manifest.get("name") or manifest.get("id") or root.name)
         return PackInspection(
             source_type="meme_pack",
@@ -384,13 +449,49 @@ class PackSource:
             endpoint=str(root),
             manifest=manifest,
             items=items,
+            pending_items=pending_items,
+            backup=is_backup,
+            backup_info=(
+                self._backup_info(manifest, backup_payload, pending_items) if is_backup else {}
+            ),
             warnings=warnings,
             errors=errors,
             total_bytes=total_uncompressed,
-            truncated=len(image_members) > self.max_items,
+            truncated=total_images > limit,
             source_path=root,
             is_archive=False,
         )
+
+    @staticmethod
+    def _backup_info(
+        manifest: dict[str, Any],
+        payload: dict[str, Any],
+        pending_items: list[SourceItem],
+    ) -> dict[str, Any]:
+        """整理 magpie-backup 的恢复信息（黑名单明细留在服务端）。"""
+        raw_blacklist = payload.get("blacklist")
+        blacklist: list[dict[str, Any]] = []
+        if isinstance(raw_blacklist, list):
+            for entry in raw_blacklist[:50000]:
+                if isinstance(entry, dict) and entry.get("hash"):
+                    blacklist.append(
+                        {
+                            "hash": str(entry.get("hash"))[:128],
+                            "created_at": int(entry.get("created_at") or 0),
+                        }
+                    )
+                elif isinstance(entry, str) and entry:
+                    blacklist.append({"hash": entry[:128], "created_at": 0})
+        return {
+            "schema": str(payload.get("schema") or f"{BACKUP_FORMAT}/1"),
+            "plugin_version": str(
+                payload.get("plugin_version") or manifest.get("plugin_version") or ""
+            )[:40],
+            "exported_at": int(payload.get("exported_at") or manifest.get("exported_at") or 0),
+            "pending_count": len(pending_items),
+            "blacklist_count": len(blacklist),
+            "blacklist": blacklist,
+        }
 
     @staticmethod
     def _is_preview(path: str) -> bool:
@@ -411,11 +512,13 @@ class PackSource:
         manifest: dict[str, Any],
         json_values: list[Any],
         warnings: list[str],
+        limit: int | None = None,
     ) -> list[SourceItem]:
         metadata = _metadata_index(json_values)
         default_license = str(manifest.get("license") or "").strip()
         items: list[SourceItem] = []
-        for relative, info in sorted(members, key=lambda value: value[0].lower())[: self.max_items]:
+        max_items = self.max_items if limit is None else max(0, int(limit))
+        for relative, info in sorted(members, key=lambda value: value[0].lower())[:max_items]:
             metadata_path = relative
             if "/memes/" in relative:
                 # ZIP exports often wrap the documented layout in one archive

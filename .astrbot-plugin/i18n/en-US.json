@@ -427,7 +427,32 @@
         "select_all_results": "Select all {count}",
         "clear_library": "Clear library",
         "clear_library_tip": "Delete every sticker in the library, including files on disk. This cannot be undone.",
-        "clearing": "Clearing..."
+        "clearing": "Clearing...",
+        "export": "Export"
+      },
+      "export": {
+        "title": "Export backup pack",
+        "tip": "Export the library as a backup pack with full metadata (descriptions, tags, categories, favourites) that can be imported back",
+        "intro": "The archive carries the full analysis (description / tags / scenes / emotions / character / work / favourites / usage stats). Import it back via \"External sources → upload archive\", or keep it as a whole-library backup.",
+        "scope_all": "Whole library ({n})",
+        "scope_filtered": "Current filter ({n})",
+        "filter_hint": "Exports exactly what the list shows: search / category / character / favourites.",
+        "include_pending": "Include review queue ({n})",
+        "include_blacklist": "Include blacklist",
+        "start": "Start export",
+        "again": "Export again",
+        "download": "Download backup",
+        "queued": "Queued",
+        "packing": "Packing…",
+        "completed": "Pack ready",
+        "failed": "Export failed",
+        "start_failed": "Export could not start.",
+        "done_toast": "Backup pack is ready — click \"Download backup\" to save it.",
+        "stat_library": "Library",
+        "stat_pending": "Pending",
+        "stat_blacklist": "Blacklist",
+        "stat_missing": "Skipped (missing files)",
+        "stat_size": "Size"
       },
       "empty": {
         "library_title": "No stickers yet",
@@ -828,7 +853,16 @@
         "failed": "Import failed",
         "type_pack": "Local pack",
         "type_github": "GitHub repo",
-        "type_http": "HTTP catalogue"
+        "type_http": "HTTP catalogue",
+        "backup_title": "Meme Thief backup detected",
+        "backup_hint": "This archive was exported by Meme Thief and carries the full analysis (description / tags / scenes / emotions / character / work / favourites / usage stats). Import is additive: existing images are skipped, or only their blank fields are filled when you enable the option below.",
+        "merge_existing": "Fill blank fields only: add missing descriptions / tags to existing images without overwriting anything",
+        "restore_pending": "Restore review queue ({n})",
+        "restore_blacklist": "Restore blacklist ({n})",
+        "merged": "Fields filled",
+        "pending_restored": "Queue restored",
+        "pending_skipped": "Skipped (queue full)",
+        "blacklist_restored": "Blacklist restored"
       }
     }
   }

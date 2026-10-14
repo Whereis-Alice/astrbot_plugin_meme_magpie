@@ -31,6 +31,8 @@ If [astrbot_plugin_meme_manager](https://github.com/anka-afk/astrbot_plugin_meme
 
 The reader follows the public [AstrBot Meme Pack protocol](https://github.com/anka-afk/astrbot-meme-pack-index/blob/main/ASTRBOT_MEME_PACK_PROTOCOL_ZH.md); unknown fields are ignored safely.
 
+If the archive is a **`magpie-backup` pack** exported by Meme Thief itself (see [The dashboard](webui.md)), the reader recognises the full metadata: besides description / tags / scenes / emotions / character / work it also restores favourites, use count, last used, created timestamp, perceptual hash, scope and origin, and retention class. The import dialog then offers "fill blank fields only", "restore review queue" and "restore blacklist"; new categories are created and characters registered automatically. Imports stay additive — duplicates are skipped by content hash.
+
 ### A GitHub repository
 
 Enter `owner/repo`, or paste a URL:

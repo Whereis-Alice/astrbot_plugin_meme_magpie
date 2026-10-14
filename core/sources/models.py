@@ -54,6 +54,10 @@ class SourceInspection:
     endpoint: str = ""
     manifest: dict[str, Any] = field(default_factory=dict)
     items: list[SourceItem] = field(default_factory=list)
+    # magpie-backup 包才有的字段：待审核池条目与恢复信息（黑名单等）
+    pending_items: list[SourceItem] = field(default_factory=list)
+    backup: bool = False
+    backup_info: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     total_bytes: int = 0
@@ -87,6 +91,12 @@ class SourceInspection:
             "warnings": list(self.warnings),
             "errors": list(self.errors),
             "truncated": self.truncated,
+            "backup": bool(self.backup),
+            # 黑名单明细留在服务端给导入用，不下发几万条 hash 给前端
+            "backup_info": {
+                key: value for key, value in self.backup_info.items() if key != "blacklist"
+            },
+            "pending_count": len(self.pending_items),
             "items": [
                 {
                     "id": item.external_id,

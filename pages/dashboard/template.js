@@ -305,6 +305,14 @@ export const TEMPLATE = `
                             </svg>
                             {{ t('pages.dashboard.actions.sources', '外部源') }}
                         </button>
+                        <button @click="openExportModal" class="codex-btn"
+                            :title="t('pages.dashboard.export.tip', '把图库导出成备份包：包含描述、标签、分类、收藏等完整信息，可再导入回来')">
+                            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12m0 0l-4-4m4 4l4-4" />
+                            </svg>
+                            {{ t('pages.dashboard.actions.export', '导出') }}
+                        </button>
                         <button @click="runStorageCleanup" class="codex-btn">
                             <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -2168,6 +2176,27 @@ export const TEMPLATE = `
                         </div>
                     </div>
 
+                    <div v-if="sourceInspection.backup" class="source-map-block">
+                        <div class="source-card-title">
+                            {{ t('pages.dashboard.sources.backup_title', '识别到 meme神偷 备份包') }}
+                        </div>
+                        <p class="hint-text">
+                            {{ t('pages.dashboard.sources.backup_hint', '这个包由 meme神偷 导出，带完整分析信息（描述 / 标签 / 场景 / 情绪 / 角色 / 作品 / 收藏 / 使用统计）。导入是「只增不覆盖」：图片已存在就跳过或按下面的开关补空字段。') }}
+                        </p>
+                        <label class="source-check">
+                            <input type="checkbox" v-model="sourceForm.merge_existing">
+                            <span>{{ t('pages.dashboard.sources.merge_existing', '只补空字段：已存在的图片只填缺少的描述 / 标签等，不覆盖已有内容') }}</span>
+                        </label>
+                        <label v-if="sourceInspection.pending_count > 0" class="source-check">
+                            <input type="checkbox" v-model="sourceForm.restore_pending">
+                            <span>{{ t('pages.dashboard.sources.restore_pending', '恢复待审核池（{n} 条）').replace('{n}', sourceInspection.pending_count) }}</span>
+                        </label>
+                        <label v-if="sourceInspection.backup_info && sourceInspection.backup_info.blacklist_count > 0" class="source-check">
+                            <input type="checkbox" v-model="sourceForm.restore_blacklist">
+                            <span>{{ t('pages.dashboard.sources.restore_blacklist', '恢复黑名单（{n} 条）').replace('{n}', sourceInspection.backup_info.blacklist_count) }}</span>
+                        </label>
+                    </div>
+
                     <div class="source-options">
                         <label class="source-check">
                             <input type="checkbox" v-model="sourceForm.review" :disabled="sourceDefaults.review_forced">
@@ -2221,8 +2250,9 @@ export const TEMPLATE = `
 
                     <div class="batch-progress-actions">
                         <button type="button" class="codex-btn primary" style="flex:1"
-                            :disabled="Boolean(sourceBusy) || !(sourceInspection.item_count > 0)" @click="startSourceImport">
-                            {{ t('pages.dashboard.sources.start_import', '开始导入（{n} 张）').replace('{n}', sourceInspection.item_count || 0) }}
+                            :disabled="Boolean(sourceBusy) || !((sourceInspection.item_count || 0) + (sourceInspection.pending_count || 0) > 0)"
+                            @click="startSourceImport">
+                            {{ t('pages.dashboard.sources.start_import', '开始导入（{n} 张）').replace('{n}', (sourceInspection.item_count || 0) + (sourceInspection.pending_count || 0)) }}
                         </button>
                     </div>
                 </div>
@@ -2257,6 +2287,22 @@ export const TEMPLATE = `
                             <span class="batch-stat-k">{{ t('pages.dashboard.sources.duplicates', '重复跳过') }}</span>
                             <span class="batch-stat-v">{{ sourceJob.duplicates || 0 }}</span>
                         </div>
+                        <div class="batch-stat" v-if="(sourceJob.merged || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.merged', '补全字段') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.merged || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(sourceJob.pending_restored || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.pending_restored', '恢复待审核') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.pending_restored || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(sourceJob.pending_skipped || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.pending_skipped', '待审核池已满跳过') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.pending_skipped || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(sourceJob.blacklist_restored || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.sources.blacklist_restored', '恢复黑名单') }}</span>
+                            <span class="batch-stat-v">{{ sourceJob.blacklist_restored || 0 }}</span>
+                        </div>
                         <div class="batch-stat" :class="{ warn: (sourceJob.failed || 0) > 0 }">
                             <span class="batch-stat-k">{{ t('pages.dashboard.batch.failed_count', 'Failed') }}</span>
                             <span class="batch-stat-v">{{ sourceJob.failed || 0 }}</span>
@@ -2277,6 +2323,10 @@ export const TEMPLATE = `
                                 <span class="batch-failure-reason">{{ item.error || item }}</span>
                             </li>
                         </ul>
+                    </div>
+
+                    <div v-if="(sourceJob.notes || []).length" class="hint-text">
+                        <p v-for="(note, idx) in sourceJob.notes" :key="'sn' + idx" style="margin:4px 0">{{ note }}</p>
                     </div>
 
                     <div class="batch-progress-actions">
@@ -2344,6 +2394,109 @@ export const TEMPLATE = `
 
         <div class="modal-actions">
             <button type="button" @click="closeSourceModal" class="codex-btn">{{ t('pages.dashboard.actions.close', 'Close') }}</button>
+        </div>
+    </div>
+</div>
+
+<div v-if="exportOpen" class="modal-overlay" data-modal-guard="export"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeExportModal)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
+    <div class="modal-panel modal-narrow">
+        <div class="modal-panel-corner-bl"></div>
+        <div class="modal-panel-corner-br"></div>
+
+        <div class="modal-header">
+            <h2>{{ t('pages.dashboard.export.title', '导出备份包') }}</h2>
+            <button @click="closeExportModal" class="modal-close">
+                <svg style="width:20px;height:20px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </div>
+
+        <div class="modal-content">
+            <div class="modal-pad" style="width:100%">
+                <p class="hint-text">
+                    {{ t('pages.dashboard.export.intro', '导出的压缩包带完整分析信息（描述 / 标签 / 场景 / 情绪 / 角色 / 作品 / 收藏 / 使用统计），可以用「外部源 → 上传压缩包」原样导入回来，也可以当整个表情库的备份。') }}
+                </p>
+
+                <template v-if="!exportTask">
+                    <label class="source-check">
+                        <input type="radio" value="all" v-model="exportForm.scope">
+                        <span>{{ t('pages.dashboard.export.scope_all', '全部图库（{n} 张）').replace('{n}', stats.total || 0) }}</span>
+                    </label>
+                    <label class="source-check">
+                        <input type="radio" value="filtered" v-model="exportForm.scope">
+                        <span>{{ t('pages.dashboard.export.scope_filtered', '当前筛选结果（{n} 张）').replace('{n}', total || 0) }}</span>
+                    </label>
+                    <p v-if="exportForm.scope === 'filtered'" class="hint-text">
+                        {{ t('pages.dashboard.export.filter_hint', '按列表当前条件导出：搜索词 / 分类 / 角色 / 收藏。') }}
+                    </p>
+                    <label class="source-check" v-if="(pendingStats.pending || 0) > 0">
+                        <input type="checkbox" v-model="exportForm.include_pending">
+                        <span>{{ t('pages.dashboard.export.include_pending', '包含待审核池（{n} 条）').replace('{n}', pendingStats.pending || 0) }}</span>
+                    </label>
+                    <label class="source-check">
+                        <input type="checkbox" v-model="exportForm.include_blacklist">
+                        <span>{{ t('pages.dashboard.export.include_blacklist', '包含黑名单') }}</span>
+                    </label>
+                </template>
+
+                <div v-if="exportError" class="error-banner">{{ exportError }}</div>
+
+                <div v-if="exportTask" class="source-progress">
+                    <div class="batch-progress-meta">
+                        <span>{{ exportStatusText }}</span>
+                        <span>{{ exportTask.processed || 0 }} / {{ exportTask.total || 0 }}</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" :style="{ width: exportProgressPercent + '%' }"></div>
+                    </div>
+                    <div class="batch-current-file" v-if="exportTask.current_file">
+                        <span class="batch-current-label">{{ t('pages.dashboard.batch.current_file', 'Current file') }}</span>
+                        <span class="batch-current-name">{{ exportTask.current_file }}</span>
+                    </div>
+                    <div class="batch-stat-grid" v-if="exportTask.status === 'completed'">
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.export.stat_library', '图库') }}</span>
+                            <span class="batch-stat-v">{{ exportTask.library || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(exportTask.pending || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.export.stat_pending', '待审核') }}</span>
+                            <span class="batch-stat-v">{{ exportTask.pending || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(exportTask.blacklist || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.export.stat_blacklist', '黑名单') }}</span>
+                            <span class="batch-stat-v">{{ exportTask.blacklist || 0 }}</span>
+                        </div>
+                        <div class="batch-stat" v-if="(exportTask.missing || 0) > 0">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.export.stat_missing', '跳过（文件缺失）') }}</span>
+                            <span class="batch-stat-v">{{ exportTask.missing || 0 }}</span>
+                        </div>
+                        <div class="batch-stat">
+                            <span class="batch-stat-k">{{ t('pages.dashboard.export.stat_size', '体积') }}</span>
+                            <span class="batch-stat-v">{{ formatBytes(exportTask.bytes || 0) }}</span>
+                        </div>
+                    </div>
+                    <p v-if="exportTask.status === 'completed'" class="hint-text">{{ exportTask.file_name }}</p>
+                </div>
+
+                <div style="display:flex;gap:12px;margin-top:20px">
+                    <button v-if="!exportActive" type="button" class="codex-btn primary" style="flex:1"
+                        :disabled="exportStarting" @click="startExport">
+                        {{ exportTask && exportTask.status === 'completed' ? t('pages.dashboard.export.again', '重新导出') : t('pages.dashboard.export.start', '开始导出') }}
+                    </button>
+                    <a v-if="exportTask && exportTask.status === 'completed'" class="codex-btn primary"
+                        style="flex:1;display:flex;align-items:center;justify-content:center;text-decoration:none"
+                        :href="exportTask.download_url" :download="exportTask.file_name">
+                        {{ t('pages.dashboard.export.download', '下载备份包') }}
+                    </a>
+                    <button type="button" class="codex-btn" style="flex:1" @click="closeExportModal">
+                        {{ t('pages.dashboard.actions.close', '关闭') }}
+                    </button>
+                </div>
+            </div>
         </div>
     </div>
 </div>

@@ -1223,6 +1223,17 @@ class DatabaseService:
             rows = conn.execute("SELECT hash FROM blacklist").fetchall()
             return {r["hash"] for r in rows} if rows else set()
 
+    def get_blacklist_entries(self) -> list[dict[str, Any]]:
+        """导出备份用：返回黑名单明细（hash + 加入时间）。"""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT hash, created_at FROM blacklist ORDER BY created_at DESC"
+            ).fetchall()
+            return [
+                {"hash": str(row["hash"]), "created_at": int(row["created_at"] or 0)}
+                for row in rows
+            ]
+
     async def add_blacklist(self, hash_val: str, ts: int | None = None) -> None:
         if not hash_val:
             return
