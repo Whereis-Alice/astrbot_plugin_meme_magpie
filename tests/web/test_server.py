@@ -117,10 +117,27 @@ async function upload(endpoint, file) {
     return res.json();
 }
 
+// 对齐正式 AstrBot 桥接：download(endpoint, params, filename) 由宿主代持基址并触发保存
+async function download(endpoint, params, filename) {
+    var res = await fetch(BASE + '/' + endpoint + buildQuery(params), { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('download failed: ' + res.status);
+    var blob = await res.blob();
+    var objectUrl = URL.createObjectURL(blob);
+    var anchor = document.createElement('a');
+    anchor.href = objectUrl;
+    anchor.download = filename || 'download.bin';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 0);
+    return { filename: anchor.download };
+}
+
 window.AstrBotPluginPage = {
     apiGet: apiGet,
     apiPost: apiPost,
     upload: upload,
+    download: download,
     getLocale: function () {
         try { return localStorage.getItem('mock_locale') || navigator.language || 'zh-CN'; }
         catch (e) { return 'zh-CN'; }

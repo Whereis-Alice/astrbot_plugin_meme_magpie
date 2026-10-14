@@ -612,6 +612,7 @@ def test_backup_ui_wiring():
         "openExportModal",
         "closeExportModal",
         "startExport",
+        "downloadExport",
     ):
         assert name in template, name
         assert re.search(rf"^\s+{name},$", app_js, re.M), name
@@ -621,6 +622,10 @@ def test_backup_ui_wiring():
         "api/images/export/status",
     ):
         assert path in app_js, path
+
+    # 下载必须走桥接 download()（宿主代持正确基址），不能用绝对 URL 直接开新窗口
+    assert "bridge.download('images/export/download'" in app_js
+    assert ':href="exportTask.download_url"' not in template
 
     # 备份包识别与导入开关
     assert 'data-modal-guard="export"' in template

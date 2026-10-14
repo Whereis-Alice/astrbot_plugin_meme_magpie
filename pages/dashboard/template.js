@@ -2487,11 +2487,11 @@ export const TEMPLATE = `
                         :disabled="exportStarting" @click="startExport">
                         {{ exportTask && exportTask.status === 'completed' ? t('pages.dashboard.export.again', '重新导出') : t('pages.dashboard.export.start', '开始导出') }}
                     </button>
-                    <a v-if="exportTask && exportTask.status === 'completed'" class="codex-btn primary"
-                        style="flex:1;display:flex;align-items:center;justify-content:center;text-decoration:none"
-                        :href="exportTask.download_url" :download="exportTask.file_name">
-                        {{ t('pages.dashboard.export.download', '下载备份包') }}
-                    </a>
+                    <button v-if="exportTask && exportTask.status === 'completed'" type="button"
+                        class="codex-btn primary" style="flex:1"
+                        :disabled="exportDownloading" @click="downloadExport">
+                        {{ exportDownloading ? t('pages.dashboard.export.downloading', '正在下载…') : t('pages.dashboard.export.download', '下载备份包') }}
+                    </button>
                     <button type="button" class="codex-btn" style="flex:1" @click="closeExportModal">
                         {{ t('pages.dashboard.actions.close', '关闭') }}
                     </button>

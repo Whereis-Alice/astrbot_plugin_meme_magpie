@@ -429,6 +429,7 @@ createApp({
         const exportForm = reactive({ scope: 'all', include_pending: false, include_blacklist: false });
         const exportTask = ref(null);
         const exportStarting = ref(false);
+        const exportDownloading = ref(false);
         const exportError = ref(null);
         let exportPollInterval = null;
 
@@ -3892,6 +3893,39 @@ createApp({
                 exportStarting.value = false;
             }
         };
+        // 正式环境里插件接口挂在 /api/v1/plugins/extensions/<插件名>/ 下，
+        // 直接拼 /astrbot_plugin_meme_magpie/... 的绝对地址会掉进 AstrBot 兜底页，
+        // 所以下载必须走桥接的 download()（由宿主代持正确的基址与鉴权）。
+        const downloadExport = async () => {
+            const taskId = exportTask.value?.task_id;
+            const fileName = exportTask.value?.file_name || 'magpie-backup.zip';
+            if (!taskId || exportTask.value?.status !== 'completed' || exportDownloading.value) return;
+            exportDownloading.value = true;
+            exportError.value = null;
+            try {
+                if (typeof bridge?.download === 'function') {
+                    await bridge.download('images/export/download', { task_id: taskId }, fileName);
+                } else if (exportTask.value?.download_url) {
+                    // 老版本 AstrBot 没有 bridge.download 时的兜底
+                    const anchor = document.createElement('a');
+                    anchor.href = exportTask.value.download_url;
+                    anchor.download = fileName;
+                    document.body.appendChild(anchor);
+                    anchor.click();
+                    anchor.remove();
+                } else {
+                    throw new Error('bridge download unsupported');
+                }
+                showAlert(
+                    t('pages.dashboard.export.download_started', '备份包下载已开始。'),
+                    'success',
+                );
+            } catch (e) {
+                exportError.value = `${t('pages.dashboard.export.download_failed', '下载备份包失败')}: ${e.message}`;
+            } finally {
+                exportDownloading.value = false;
+            }
+        };
 
         // 受保护弹窗登记表：顺序＝模板里的叠放顺序，Esc 先处理最上面那个
         const guardedModals = [
@@ -4317,6 +4351,7 @@ createApp({
             exportForm,
             exportTask,
             exportStarting,
+            exportDownloading,
             exportError,
             exportActive,
             exportProgressPercent,
@@ -4324,6 +4359,7 @@ createApp({
             openExportModal,
             closeExportModal,
             startExport,
+            downloadExport,
         };
     },
     template: TEMPLATE,
