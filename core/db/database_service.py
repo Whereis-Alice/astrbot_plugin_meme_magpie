@@ -1840,6 +1840,79 @@ class DatabaseService:
         "last_used": "e.last_used_at DESC, e.use_count DESC, e.path ASC",
     }
 
+    def _build_emoji_where(
+        self,
+        *,
+        category: str | None = None,
+        search_query: str | None = None,
+        scope_target: str | None = None,
+        favorite_only: bool = False,
+        character: str | None = None,
+        work: str | None = None,
+    ) -> tuple[str, list[Any], str, list[Any]]:
+        """构建表情表过滤条件，返回 (主查询 WHERE, 主参数, 分类统计 WHERE, 分类统计参数)。
+
+        分类统计刻意只跟随搜索 / 收藏 / scope 过滤（与既有行为一致），
+        不跟随分类、角色、作品过滤，侧边栏才能显示所有分类的计数。
+        """
+        where_clauses: list[str] = []
+        params: list[Any] = []
+        category_count_where_clauses: list[str] = []
+        category_count_params: list[Any] = []
+
+        if category:
+            where_clauses.append("e.category = ?")
+            params.append(category)
+
+        if character == "__none__":
+            where_clauses.append("(e.character IS NULL OR e.character = '')")
+        elif character:
+            where_clauses.append("e.character = ?")
+            params.append(character)
+
+        if work == "__none__":
+            where_clauses.append("(e.work IS NULL OR e.work = '')")
+        elif work:
+            where_clauses.append("e.work = ?")
+            params.append(work)
+
+        if favorite_only:
+            where_clauses.append("e.is_favorite = 1")
+            category_count_where_clauses.append("e.is_favorite = 1")
+
+        if scope_target:
+            where_clauses.append("(e.scope_mode = 'public' OR e.origin_target = ?)")
+            params.append(scope_target)
+            category_count_where_clauses.append(
+                "(e.scope_mode = 'public' OR e.origin_target = ?)"
+            )
+            category_count_params.append(scope_target)
+
+        if search_query:
+            search_pattern = f"%{search_query}%"
+            search_clause = (
+                "(e.desc LIKE ? OR e.category LIKE ? OR e.hash LIKE ?"
+                " OR e.origin_target LIKE ? OR e.source LIKE ? OR e.path LIKE ?"
+                " OR e.overlay_text LIKE ? OR e.character LIKE ? OR e.work LIKE ?"
+                " OR EXISTS("
+                "SELECT 1 FROM emoji_tag t WHERE t.path = e.path AND t.tag LIKE ?"
+                ") OR EXISTS("
+                "SELECT 1 FROM emoji_scene s WHERE s.path = e.path AND s.scene LIKE ?"
+                "))"
+            )
+            where_clauses.append(search_clause)
+            params.extend([search_pattern] * 11)
+            category_count_where_clauses.append(search_clause)
+            category_count_params.extend([search_pattern] * 11)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        category_count_where_sql = (
+            "WHERE " + " AND ".join(category_count_where_clauses)
+            if category_count_where_clauses
+            else ""
+        )
+        return where_sql, params, category_count_where_sql, category_count_params
+
     def get_emojis_paginated(
         self,
         page: int = 1,
@@ -1872,68 +1945,16 @@ class DatabaseService:
         order_sql = self._VALID_ORDER_FIELDS.get(sort_order, "e.created_at DESC")
 
         with self._get_connection() as conn:
-            # 构建基础查询条件
-            where_clauses: list[str] = []
-            params: list[Any] = []
-            category_count_where_clauses: list[str] = []
-            category_count_params: list[Any] = []
-
-            # 分类过滤
-            if category:
-                where_clauses.append("e.category = ?")
-                params.append(category)
-
-            if character == "__none__":
-                where_clauses.append("(e.character IS NULL OR e.character = '')")
-            elif character:
-                where_clauses.append("e.character = ?")
-                params.append(character)
-
-            if work == "__none__":
-                where_clauses.append("(e.work IS NULL OR e.work = '')")
-            elif work:
-                where_clauses.append("e.work = ?")
-                params.append(work)
-
-            # 收藏过滤
-            if favorite_only:
-                where_clauses.append("e.is_favorite = 1")
-                category_count_where_clauses.append("e.is_favorite = 1")
-
-            # scope 过滤
-            if scope_target:
-                where_clauses.append("(e.scope_mode = 'public' OR e.origin_target = ?)")
-                params.append(scope_target)
-                category_count_where_clauses.append(
-                    "(e.scope_mode = 'public' OR e.origin_target = ?)"
+            where_sql, params, category_count_where_sql, category_count_params = (
+                self._build_emoji_where(
+                    category=category,
+                    search_query=search_query,
+                    scope_target=scope_target,
+                    favorite_only=favorite_only,
+                    character=character,
+                    work=work,
                 )
-                category_count_params.append(scope_target)
-
-            # 搜索过滤（描述/标签/场景/分类/hash/来源/文件名/路径）
-            if search_query:
-                search_pattern = f"%{search_query}%"
-                search_clause = (
-                    "(e.desc LIKE ? OR e.category LIKE ? OR e.hash LIKE ?"
-                    " OR e.origin_target LIKE ? OR e.source LIKE ? OR e.path LIKE ?"
-                    " OR e.overlay_text LIKE ? OR e.character LIKE ? OR e.work LIKE ?"
-                    " OR EXISTS("
-                    "SELECT 1 FROM emoji_tag t WHERE t.path = e.path AND t.tag LIKE ?"
-                    ") OR EXISTS("
-                    "SELECT 1 FROM emoji_scene s WHERE s.path = e.path AND s.scene LIKE ?"
-                    "))"
-                )
-                where_clauses.append(search_clause)
-                params.extend([search_pattern] * 11)
-                category_count_where_clauses.append(search_clause)
-                category_count_params.extend([search_pattern] * 11)
-
-            where_sql = ""
-            if where_clauses:
-                where_sql = "WHERE " + " AND ".join(where_clauses)
-
-            category_count_where_sql = ""
-            if category_count_where_clauses:
-                category_count_where_sql = "WHERE " + " AND ".join(category_count_where_clauses)
+            )
 
             # 计算总数
             count_sql = f"SELECT COUNT(*) as cnt FROM emoji e {where_sql}"
@@ -1987,6 +2008,34 @@ class DatabaseService:
                 images.append(self._hydrate_entry(item))
 
             return images, total, category_counts
+
+    def get_emoji_hashes(
+        self,
+        category: str | None = None,
+        search_query: str | None = None,
+        favorite_only: bool = False,
+        character: str | None = None,
+        work: str | None = None,
+    ) -> list[str]:
+        """返回当前筛选条件下的全部表情 hash（跨页全选 / 清空筛选结果用）。
+
+        与 get_emojis_paginated 共用同一套过滤条件，保证「列表里看到什么，
+        全选就选中什么」；不分页，只取 hash 列，几千条也只是很小的载荷。
+        """
+        where_sql, params, _, _ = self._build_emoji_where(
+            category=category,
+            search_query=search_query,
+            favorite_only=favorite_only,
+            character=character,
+            work=work,
+        )
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT e.hash FROM emoji e {where_sql} "
+                f"ORDER BY {self._VALID_ORDER_FIELDS['newest']}",
+                params,
+            ).fetchall()
+            return [str(row["hash"]) for row in rows if row["hash"]]
 
     # ── 待审核池 (emoji_pending) CRUD ──
 
@@ -2071,14 +2120,11 @@ class DatabaseService:
                 # 仅作 pending 内去重：同路径已存在说明该图已在池中
                 return None
 
-    def get_pending_paginated(
-        self,
-        page: int = 1,
-        page_size: int = 50,
-        category: str | None = None,
-        search_query: str | None = None,
-    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
-        """分页获取待审核列表，支持分类筛选与文本搜索。固定按 created_at 降序。"""
+    @staticmethod
+    def _build_pending_where(
+        category: str | None, search_query: str | None
+    ) -> tuple[str, list[Any]]:
+        """构建待审核表过滤条件，返回 (WHERE 子句, 参数)。"""
         where_clauses: list[str] = []
         params: list[Any] = []
 
@@ -2101,20 +2147,26 @@ class DatabaseService:
             params.extend([search_pattern] * 11)
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        return where_sql, params
+
+    def get_pending_paginated(
+        self,
+        page: int = 1,
+        page_size: int = 50,
+        category: str | None = None,
+        search_query: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int]]:
+        """分页获取待审核列表，支持分类筛选与文本搜索。固定按 created_at 降序。"""
+        where_sql, params = self._build_pending_where(category, search_query)
 
         with self._get_connection() as conn:
             total = conn.execute(
                 f"SELECT COUNT(*) as cnt FROM emoji_pending p {where_sql}", params
             ).fetchone()["cnt"]
 
-            category_where_clauses = [
-                clause for clause in where_clauses if clause != "p.category = ?"
-            ]
-            category_params = params[1:] if category else params
-            category_where_sql = (
-                "WHERE " + " AND ".join(category_where_clauses)
-                if category_where_clauses
-                else ""
+            # 分类统计不跟随分类过滤本身，否则每个分类只会显示自己的计数
+            category_where_sql, category_params = self._build_pending_where(
+                None, search_query
             )
             cat_rows = conn.execute(
                 f"SELECT p.category, COUNT(*) as cnt FROM emoji_pending p {category_where_sql} "
@@ -2164,6 +2216,21 @@ class DatabaseService:
                     item["scenes"] = scenes
                     items.append(self._hydrate_entry(item))
             return items, total, category_counts
+
+    def get_pending_ids(
+        self,
+        category: str | None = None,
+        search_query: str | None = None,
+    ) -> list[int]:
+        """返回当前筛选下的全部待审核 id（跨页全选用，轻量、不分页）。"""
+        where_sql, params = self._build_pending_where(category, search_query)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT p.id FROM emoji_pending p {where_sql} "
+                "ORDER BY p.created_at DESC, p.id DESC",
+                params,
+            ).fetchall()
+            return [int(row["id"]) for row in rows]
 
     def get_pending(self, pending_id: int) -> dict[str, Any] | None:
         """获取单条待审核记录（含拆分后的 tags/scenes，来自关联表）。"""

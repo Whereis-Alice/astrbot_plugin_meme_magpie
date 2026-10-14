@@ -609,6 +609,23 @@ class TestStats:
         assert category_counts["happy"] == 2
         assert category_counts["sad"] == 1
 
+    def test_get_emoji_hashes_shares_filters_with_paginated_list(
+        self, db: DatabaseService
+    ):
+        """跨页全选的 hash 快照必须和分页列表看到的内容一致。"""
+        assert sorted(db.get_emoji_hashes()) == ["h1", "h2", "h3"]
+        assert sorted(db.get_emoji_hashes(category="happy")) == ["h1", "h2"]
+        assert db.get_emoji_hashes(search_query="微笑") == ["h2"]
+        assert db.get_emoji_hashes(favorite_only=True) == []
+
+        images, total, _ = db.get_emojis_paginated(
+            page=1, page_size=50, category="happy"
+        )
+        assert sorted(img["hash"] for img in images) == sorted(
+            db.get_emoji_hashes(category="happy")
+        )
+        assert total == len(db.get_emoji_hashes(category="happy"))
+
     def test_get_emojis_paginated_includes_favorite_and_usage_fields(
         self, db: DatabaseService
     ):
@@ -781,6 +798,25 @@ class TestPendingPool:
         self._insert(db, path="/data/pending/a.jpg", hash="ha")
         self._insert(db, path="/data/pending/b.jpg", hash="hb")
         assert db.count_pending() == 2
+
+    def test_get_pending_ids_shares_filters_with_paginated_list(
+        self, db: DatabaseService
+    ):
+        """跨页全选的 id 快照必须和待审核分页列表看到的内容一致。"""
+        id_a = self._insert(
+            db, path="/data/pending/a.jpg", hash="ha", category="happy", desc="猫咪"
+        )
+        id_b = self._insert(
+            db, path="/data/pending/b.jpg", hash="hb", category="happy", desc="狗狗"
+        )
+        id_c = self._insert(
+            db, path="/data/pending/c.jpg", hash="hc", category="sad", desc="猫咪"
+        )
+
+        assert sorted(db.get_pending_ids()) == sorted([id_a, id_b, id_c])
+        assert sorted(db.get_pending_ids(category="happy")) == sorted([id_a, id_b])
+        assert sorted(db.get_pending_ids(search_query="猫咪")) == sorted([id_a, id_c])
+        assert db.get_pending_ids(category="happy", search_query="猫咪") == [id_a]
 
     def test_insert_pending_duplicate_path_returns_none(self, db: DatabaseService):
         pid1 = self._insert(db, path="/data/pending/a.jpg", hash="ha")

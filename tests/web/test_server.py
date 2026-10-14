@@ -145,7 +145,7 @@ class PreviewState:
         self.pending: list[dict] = []
         self.blacklist: set[str] = set()
         self.batch_tasks: dict[str, dict] = {}
-        self.prefs: dict[str, str] = {"theme": "auto", "view": "grid"}
+        self.prefs: dict[str, str] = {"theme": "auto", "view": "grid", "page_size": "auto"}
         self._next_pending_id = 1
         self._now = int(time.time())
         if seed:
@@ -432,6 +432,7 @@ class PreviewServer:
 
     def api_prefs(self, request, payload):
         valid_themes = {"auto", "dark", "light", "pixel", "terminal"}
+        valid_page_sizes = {"auto", "60", "120", "240"}
         aliases = {"midnight": "dark", "sakura": "light"}
         if request.method == "POST":
             theme = aliases.get(str(payload.get("theme") or ""), str(payload.get("theme") or "").strip())
@@ -439,6 +440,10 @@ class PreviewServer:
                 self.state.prefs["theme"] = theme
             if "view" in payload:
                 self.state.prefs["view"] = "list" if payload.get("view") == "list" else "grid"
+            if "page_size" in payload:
+                page_size = str(payload.get("page_size") or "").strip().lower()
+                if page_size in valid_page_sizes:
+                    self.state.prefs["page_size"] = page_size
         return {"success": True, **self.state.prefs}
 
     def api_stats(self, request, payload):
@@ -486,6 +491,36 @@ class PreviewServer:
             "images": [self._library_view(m) for m in paged],
             "categories": st._categories_list(st.library),
             "favorite_count": sum(1 for m in st.library if m.get("is_favorite")),
+        }
+
+    def api_images_hashes(self, request, payload):
+        """GET /images/hashes —— 跨页全选用，只回 hash 快照。"""
+        st = self.state
+        q = str(request.query.get("q", "")).lower().strip()
+        category = str(request.query.get("category", "") or "")
+        favorite_only = str(request.query.get("favorite_only", "false")).lower() == "true"
+        if category == "__favorite__":
+            category = ""
+            favorite_only = True
+        items = [
+            m for m in st.library
+            if st._match(m, q=q, category=category, favorite_only=favorite_only)
+        ]
+        return {"success": True, "total": len(items), "hashes": [m["hash"] for m in items]}
+
+    def api_images_clear(self, request, payload):
+        """POST /images/clear —— 清空图库（需 confirm: true）。"""
+        st = self.state
+        if payload.get("confirm") is not True:
+            return {"success": False, "error": "缺少确认标记"}
+        deleted = len(st.library)
+        st.library.clear()
+        return {
+            "success": True,
+            "deleted": deleted,
+            "index_removed": deleted,
+            "thumbnails_removed": 0,
+            "failed": 0,
         }
 
     @staticmethod
@@ -550,6 +585,15 @@ class PreviewServer:
             "success": True,
             "stats": {"pending": pending, "capacity": PENDING_CAPACITY, "paused": pending >= PENDING_CAPACITY},
         }
+
+    def api_pending_ids(self, request, payload):
+        """GET /pending/ids —— 跨页全选用，只回待审核 id 快照。"""
+        st = self.state
+        q = str(request.query.get("q", "")).lower().strip()
+        category = str(request.query.get("category", "") or "")
+        items = [m for m in st.pending if st._match(m, q=q, category=category, favorite_only=False)]
+        items.sort(key=lambda m: m.get("created_at", 0), reverse=True)
+        return {"success": True, "total": len(items), "ids": [m["id"] for m in items]}
 
     def api_storage_scan(self, request, payload):
         orphan = max(0, (len(self.state.library) // 7) % 5)

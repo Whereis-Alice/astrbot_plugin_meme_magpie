@@ -88,14 +88,14 @@ class TestDashboardPrefs:
         assert loaded["view"] == "grid"
 
         updated = await api._update_dashboard_prefs({"theme": "terminal", "view": "list"})
-        assert updated == {"theme": "terminal", "view": "list"}
+        assert updated == {"theme": "terminal", "view": "list", "page_size": "auto"}
         loaded = await api._load_dashboard_prefs()
         assert loaded == updated
         assert store[api.DASHBOARD_PREFS_KEY]["theme"] == "terminal"
 
         config.webui_theme = "dark"
         loaded = await api._load_dashboard_prefs()
-        assert loaded == {"theme": "terminal", "view": "list"}
+        assert loaded == {"theme": "terminal", "view": "list", "page_size": "auto"}
         assert store[api.DASHBOARD_PREFS_KEY] == {
             "theme": "terminal",
             "view": "list",
@@ -119,7 +119,7 @@ class TestDashboardPrefs:
         api = PluginAPI(plugin)
 
         loaded = await api._load_dashboard_prefs()
-        assert loaded == {"theme": "auto", "view": "list"}
+        assert loaded == {"theme": "auto", "view": "list", "page_size": "auto"}
         assert store[api.DASHBOARD_PREFS_KEY] == {"theme": "auto", "view": "list"}
 
     @pytest.mark.asyncio
@@ -137,6 +137,7 @@ class TestDashboardPrefs:
         assert await api._load_dashboard_prefs() == {
             "theme": "terminal",
             "view": "list",
+            "page_size": "auto",
         }
 
     @pytest.mark.asyncio
@@ -167,3 +168,39 @@ class TestDashboardPrefs:
         assert api._normalize_theme("nope") == "auto"
         assert api._normalize_view("list") == "list"
         assert api._normalize_view("other") == "grid"
+
+    @pytest.mark.asyncio
+    async def test_page_size_pref_validates_and_persists(self):
+        store: dict = {}
+
+        async def get_kv(key, default=None):
+            return store.get(key, default)
+
+        async def put_kv(key, value):
+            store[key] = value
+
+        plugin = types.SimpleNamespace(
+            plugin_config=types.SimpleNamespace(webui_theme="light"),
+            get_kv_data=get_kv,
+            put_kv_data=put_kv,
+        )
+        api = PluginAPI(plugin)
+
+        # 默认值是 auto，跟随窗口自适应
+        assert (await api._load_dashboard_prefs())["page_size"] == "auto"
+
+        updated = await api._update_dashboard_prefs({"page_size": "120"})
+        assert updated["page_size"] == "120"
+        assert store[api.DASHBOARD_PREFS_KEY]["page_size"] == "120"
+
+        # 白名单外的值不覆盖已保存的合法档位
+        updated = await api._update_dashboard_prefs({"page_size": "9999"})
+        assert updated["page_size"] == "120"
+
+        # 也接受 auto（回到自适应）
+        updated = await api._update_dashboard_prefs({"page_size": "auto"})
+        assert updated["page_size"] == "auto"
+
+    def test_page_size_whitelist_covers_all_presets(self):
+        api = _build_api([])
+        assert api.VALID_PAGE_SIZES == frozenset({"auto", "60", "120", "240"})

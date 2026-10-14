@@ -421,7 +421,13 @@
         "assign_work": "填写作品",
         "reanalyze": "重新识别",
         "missing_desc": "识别失败",
-        "sources": "外部源"
+        "sources": "外部源",
+        "select_page": "全选本页",
+        "deselect_page": "取消本页",
+        "select_all_results": "全选全部 {count}",
+        "clear_library": "清空表情库",
+        "clear_library_tip": "删除图库里的全部表情包（含磁盘文件），不可恢复",
+        "clearing": "正在清空..."
       },
       "empty": {
         "library_title": "暂无表情包",
@@ -433,7 +439,9 @@
       },
       "pagination": {
         "prev": "上一页",
-        "next": "下一页"
+        "next": "下一页",
+        "per_page": "每页",
+        "auto": "自动"
       },
       "scope": {
         "public": "公共",
@@ -624,7 +632,16 @@
         "no_valid_info": "未能识别有效信息。",
         "add_failed": "添加失败。",
         "no_images_dropped": "拖进来的文件里没有图片。",
-        "reanalyze_failed": "重新识别启动失败。"
+        "reanalyze_failed": "重新识别启动失败。",
+        "select_all_done": "已全选 {count} 张。",
+        "select_all_failed": "全选失败",
+        "delete_selected_done": "已删除 {count} 张图片。",
+        "delete_selected_partial": "已删除 {count} 张，另有 {failed} 批删除失败。",
+        "clear_library_done": "表情库已清空，共删除 {count} 张。",
+        "clear_library_partial": "{count} 个文件删除失败，已保留索引，可用存储清理重试。",
+        "clear_library_aborted": "确认文字不匹配，未执行清空。",
+        "clear_library_failed": "清空表情库失败",
+        "library_already_empty": "表情库已经是空的。"
       },
       "confirm": {
         "pending_approve_batch": "确认通过 {count} 条待审核项？",
@@ -636,10 +653,12 @@
         "storage_cleanup": "发现 {count} 个可清理项。将清理失效索引、孤儿文件、缩略图缓存和临时文件，是否继续？",
         "update_existing_category": "分类 {key} 已存在，确定要更新吗？",
         "delete_category": "确定要删除分类 {key} 吗？该分类下的图片会被直接删除且无法恢复。",
-        "delete_character": "确定删除角色 {key}？表情包文件会保留，只去掉角色标记。"
+        "delete_character": "确定删除角色 {key}？表情包文件会保留，只去掉角色标记。",
+        "clear_library": "将永久删除图库里的全部 {count} 张表情包（包括磁盘上的文件），此操作无法撤销。确定继续吗？"
       },
       "prompt": {
-        "origin_scope": "请输入来源作用域，例如 group:123456 或 user:123456。"
+        "origin_scope": "请输入来源作用域，例如 group:123456 或 user:123456。",
+        "clear_library": "请输入 DELETE 确认清空整个表情库。"
       },
       "themes": {
         "title": "主题",

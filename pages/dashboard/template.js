@@ -312,6 +312,14 @@ export const TEMPLATE = `
                             </svg>
                             {{ t('pages.dashboard.actions.storage_cleanup', 'Storage Cleanup') }}
                         </button>
+                        <button @click="clearAllImages" class="codex-btn danger" :disabled="clearingImages || stats.total <= 0"
+                            :title="t('pages.dashboard.actions.clear_library_tip', '删除图库里的全部表情包（含磁盘文件），不可恢复')">
+                            <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            {{ clearingImages ? t('pages.dashboard.actions.clearing', 'Clearing...') : t('pages.dashboard.actions.clear_library', '清空表情库') }}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -411,7 +419,8 @@ export const TEMPLATE = `
                 </div>
             </div>
 
-            <div v-if="total > pageSize" class="pagination-bar">
+            <!-- 列表非空就显示翻页栏：否则把每页条数调大后，档位选择器会跟着翻页栏一起消失 -->
+            <div v-if="total > 0" class="pagination-bar">
                 <button @click="prevPage" :disabled="currentPage === 1" class="codex-btn"
                     :class="{ disabled: currentPage === 1 }">
                     <svg style="width:16px;height:16px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -429,6 +438,17 @@ export const TEMPLATE = `
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                     </svg>
                 </button>
+
+                <label class="page-size-label">
+                    {{ t('pages.dashboard.pagination.per_page', 'Per page') }}
+                    <select class="page-size-select" :value="pageSizeMode"
+                        @change="setPageSizeMode($event.target.value)">
+                        <option value="auto">{{ t('pages.dashboard.pagination.auto', 'Auto') }}</option>
+                        <option value="60">60</option>
+                        <option value="120">120</option>
+                        <option value="240">240</option>
+                    </select>
+                </label>
             </div>
         </template>
 
@@ -477,8 +497,16 @@ export const TEMPLATE = `
                     </div>
 
                     <div v-if="pendingBatchMode" class="toolbar-group pending-batch-actions">
-                        <button @click="toggleSelectAllPending" class="codex-btn select-all-btn">
-                            {{ allPendingSelected ? '☐ ' + t('pages.dashboard.actions.deselect_all', 'Deselect All') : '☑ ' + t('pages.dashboard.actions.select_all', 'Select All') }}
+                        <button @click="toggleSelectAllPending" class="codex-btn select-all-btn"
+                            :disabled="pendingImages.length === 0">
+                            {{ allPendingSelected ? '☐ ' + t('pages.dashboard.actions.deselect_page', 'Deselect page') : '☑ ' + t('pages.dashboard.actions.select_page', 'Select page') }}
+                        </button>
+                        <button v-if="pendingTotal > pendingPageSize" @click="selectAllPendingResults"
+                            class="codex-btn select-all-btn" :disabled="selectingAllPending">
+                            ☑ {{ t('pages.dashboard.actions.select_all_results', 'Select all {count}').replace('{count}', pendingTotal) }}
+                        </button>
+                        <button v-if="pendingSelectedImages.size > 0" @click="clearPendingSelection" class="codex-btn">
+                            ✕ {{ t('pages.dashboard.actions.clear_selection', 'Clear selection') }}
                         </button>
                         <button @click="openBatchReanalyzeModal('selected', 'pending')" class="codex-btn">&#8635; {{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</button>
                         <button @click="approvePendingBatch" class="codex-btn approve-batch-btn">✅ {{ t('pages.dashboard.actions.approve_all', 'Approve All') }}</button>
@@ -586,7 +614,7 @@ export const TEMPLATE = `
                 </div>
             </div>
 
-            <div v-if="pendingTotal > pendingPageSize" class="pagination-bar">
+            <div v-if="pendingTotal > 0" class="pagination-bar">
                 <button @click="pendingCurrentPage > 1 && fetchPendingImages(pendingCurrentPage - 1)"
                     :disabled="pendingCurrentPage === 1" class="codex-btn"
                     :class="{ disabled: pendingCurrentPage === 1 }">
@@ -607,6 +635,17 @@ export const TEMPLATE = `
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                     </svg>
                 </button>
+
+                <label class="page-size-label">
+                    {{ t('pages.dashboard.pagination.per_page', 'Per page') }}
+                    <select class="page-size-select" :value="pageSizeMode"
+                        @change="setPageSizeMode($event.target.value)">
+                        <option value="auto">{{ t('pages.dashboard.pagination.auto', 'Auto') }}</option>
+                        <option value="60">60</option>
+                        <option value="120">120</option>
+                        <option value="240">240</option>
+                    </select>
+                </label>
             </div>
         </template>
     </main>
@@ -1707,24 +1746,45 @@ export const TEMPLATE = `
     </div>
 </div>
 
-<div v-if="isBatchMode && selectedImages.size > 0" class="batch-bar">
+<div v-if="activeSection === 'library' && isBatchMode" class="batch-bar">
     <span style="font-family:'Cinzel',serif;color:var(--gold-bright);font-size:1rem">{{ t('pages.dashboard.batch.selected_short', 'Selected {count}').replace('{count}', selectedImages.size) }}</span>
+    <span v-if="batchProgress" class="batch-progress">{{ batchProgress }}</span>
     <div style="width:1px;height:24px;background:var(--gold-dark)"></div>
-    <button @click="selectAll" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.select_all', 'Select All') }}</button>
-    <button @click="openBatchMoveModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.move', 'Move') }}</button>
-    <button @click="openBatchCharacterModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.assign_character', '分配角色') }}</button>
-    <button @click="openBatchWorkModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.assign_work', '填写作品') }}</button>
-    <button @click="openBatchReanalyzeModal('selected')" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</button>
-    <button @click="handleBatchDelete" class="codex-btn danger" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.delete', 'Delete') }}</button>
-    <button @click="openBatchScopeModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.fields.scope', 'Scope') }}</button>
-    <button @click="repairSelectedScope" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">{{ t('pages.dashboard.actions.repair_origin', 'Repair Origin') }}</button>
-    <button @click="batchSetFavorite(true)" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">
+    <button @click="toggleSelectAllPage" class="codex-btn select-all-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="images.length === 0">
+        {{ allVisibleSelected ? '☐ ' + t('pages.dashboard.actions.deselect_page', 'Deselect page') : '☑ ' + t('pages.dashboard.actions.select_page', 'Select page') }}
+    </button>
+    <button v-if="total > pageSize" @click="selectAllResults" class="codex-btn select-all-btn"
+        style="font-size:0.8rem;padding:8px 16px" :disabled="selectingAllResults">
+        {{ t('pages.dashboard.actions.select_all_results', 'Select all {count}').replace('{count}', total) }}
+    </button>
+    <button v-if="selectedImages.size > 0" @click="clearSelection" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">
+        ✕ {{ t('pages.dashboard.actions.clear_selection', 'Clear selection') }}
+    </button>
+    <div style="width:1px;height:24px;background:var(--gold-dark)"></div>
+    <button @click="openBatchMoveModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.move', 'Move') }}</button>
+    <button @click="openBatchCharacterModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.assign_character', '分配角色') }}</button>
+    <button @click="openBatchWorkModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.assign_work', '填写作品') }}</button>
+    <button @click="openBatchReanalyzeModal('selected')" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.reanalyze', '重新识别') }}</button>
+    <button @click="handleBatchDelete" class="codex-btn danger" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.delete', 'Delete') }}</button>
+    <button @click="openBatchScopeModal" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.fields.scope', 'Scope') }}</button>
+    <button @click="repairSelectedScope" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">{{ t('pages.dashboard.actions.repair_origin', 'Repair Origin') }}</button>
+    <button @click="batchSetFavorite(true)" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">
         <svg style="width:14px;height:14px" fill="currentColor" viewBox="0 0 24 24">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
         </svg>
         {{ t('pages.dashboard.actions.favorite', 'Favorite') }}
     </button>
-    <button @click="batchSetFavorite(false)" class="codex-btn" style="font-size:0.8rem;padding:8px 16px">
+    <button @click="batchSetFavorite(false)" class="codex-btn" style="font-size:0.8rem;padding:8px 16px"
+        :disabled="selectedImages.size === 0">
         {{ t('pages.dashboard.actions.unfavorite', 'Remove Favorite') }}
     </button>
     <div style="width:1px;height:24px;background:var(--gold-dark)"></div>

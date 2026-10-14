@@ -339,7 +339,14 @@
         "save_and_approve": "Сохранить и одобрить",
         "characters": "Персонажи",
         "assign_character": "Назначить персонажа",
-        "open_navigation": "Открыть меню"
+        "open_navigation": "Открыть меню",
+        "select_page": "Выбрать страницу",
+        "deselect_page": "Снять страницу",
+        "select_all_results": "Выбрать все {count}",
+        "clear_selection": "Снять выделение",
+        "clear_library": "Очистить библиотеку",
+        "clear_library_tip": "Удалить все стикеры из библиотеки вместе с файлами. Действие необратимо.",
+        "clearing": "Очистка…"
       },
       "modal": {
         "edit_pending": "Изменить стикер на модерации",
@@ -354,7 +361,22 @@
         "hash": "Хеш"
       },
       "alerts": {
-        "pending_saved": "Изменения на модерации сохранены."
+        "pending_saved": "Изменения на модерации сохранены.",
+        "select_all_done": "Выбрано {count} шт.",
+        "select_all_failed": "Не удалось выбрать всё",
+        "delete_selected_done": "Удалено {count} изображений.",
+        "delete_selected_partial": "Удалено {count}, но {failed} пакет(ов) не удалось.",
+        "clear_library_done": "Библиотека очищена. Удалено {count} шт.",
+        "clear_library_partial": "{count} файл(ов) не удалось удалить, они оставлены в индексе.",
+        "clear_library_aborted": "Текст подтверждения не совпал. Ничего не удалено.",
+        "clear_library_failed": "Не удалось очистить библиотеку",
+        "library_already_empty": "Библиотека уже пуста."
+      },
+      "pagination": {
+        "prev": "Назад",
+        "next": "Вперёд",
+        "per_page": "На странице",
+        "auto": "Авто"
       },
       "themes": {
         "title": "Тема",
@@ -411,7 +433,11 @@
         "overlay_text": "Текст на меме"
       },
       "confirm": {
-        "delete_character": "Удалить персонажа {key}? Стикеры останутся, метка снимется."
+        "delete_character": "Удалить персонажа {key}? Стикеры останутся, метка снимется.",
+        "clear_library": "Все {count} стикер(ов) в библиотеке будут удалены вместе с файлами. Действие необратимо. Продолжить?"
+      },
+      "prompt": {
+        "clear_library": "Введите DELETE, чтобы подтвердить очистку библиотеки."
       },
       "reanalyze": {
         "auto_category": "Автоматически менять категорию",

@@ -19,6 +19,16 @@ before saving.
 
 > **Careful**: deleting a category in the WebUI deletes every image file in it.
 
+## Cross-page select-all, page size and clearing the library
+
+Both areas support **cross-page selection**: once batch mode is on, paging never drops what you already selected, and the bottom bar keeps showing "Selected N" plus a clear-selection button.
+
+- **Select page** — toggles the current page and accumulates across pages;
+- **Select all N** — takes a one-shot snapshot of every result that matches the current filter (keyword, category, character, favourites…). Changing filters afterwards never widens or narrows the selection behind your back;
+- **Per page** — pick auto / 60 / 120 / 240 in the pager; the choice is remembered and shared by the library and the review queue. Auto fits to your window, as before.
+
+"Clear library" in the library toolbar wipes the whole library in one shot (image files and thumbnail cache included) and bypasses the selection UI. It asks twice, and the second step requires typing `DELETE`. It only touches the real library — the review queue, the blacklist and external-source records are untouched. Files that cannot be removed keep their index row so storage cleanup can retry later.
+
 ## Batch import and batch re-analysis
 
 Both live in the WebUI library page and share the same rate limiter.

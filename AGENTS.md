@@ -42,7 +42,7 @@ Main (main.py)
 ├── MemeSenderEngine (core/events/meme_sender_engine.py) -- 自动发送决策与冷却
 ├── MemeCandidateReranker (core/search/candidate_reranker.py) -- 可选文本模型精排，默认关闭，允许拒发
 ├── MigrationService (core/maintenance/migration_service.py) -- 从上游插件迁移数据
-├── PluginAPI (plugin_api.py)                         -- WebUI 的 38 条 Web API 路由
+├── PluginAPI (plugin_api.py)                         -- WebUI 的 49 条 Web API 路由
 └── TaskScheduler (task_scheduler.py)                 -- 定时任务（清理、容量控制）
 ```
 

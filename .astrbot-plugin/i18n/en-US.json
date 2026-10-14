@@ -421,7 +421,13 @@
         "assign_work": "Set work",
         "reanalyze": "Re-analyze",
         "missing_desc": "Missing description",
-        "sources": "External sources"
+        "sources": "External sources",
+        "select_page": "Select page",
+        "deselect_page": "Deselect page",
+        "select_all_results": "Select all {count}",
+        "clear_library": "Clear library",
+        "clear_library_tip": "Delete every sticker in the library, including files on disk. This cannot be undone.",
+        "clearing": "Clearing..."
       },
       "empty": {
         "library_title": "No stickers yet",
@@ -433,7 +439,9 @@
       },
       "pagination": {
         "prev": "Previous",
-        "next": "Next"
+        "next": "Next",
+        "per_page": "Per page",
+        "auto": "Auto"
       },
       "scope": {
         "public": "Public",
@@ -624,7 +632,16 @@
         "no_valid_info": "No valid information recognized.",
         "add_failed": "Add failed.",
         "no_images_dropped": "No image files were dropped.",
-        "reanalyze_failed": "Could not start re-analysis."
+        "reanalyze_failed": "Could not start re-analysis.",
+        "select_all_done": "Selected all {count} result(s).",
+        "select_all_failed": "Select all failed",
+        "delete_selected_done": "Deleted {count} image(s).",
+        "delete_selected_partial": "Deleted {count} image(s), but {failed} batch(es) failed.",
+        "clear_library_done": "Library cleared. Deleted {count} sticker(s).",
+        "clear_library_partial": "{count} file(s) could not be removed and were kept in the index; retry with storage cleanup.",
+        "clear_library_aborted": "Confirmation text did not match. Nothing was deleted.",
+        "clear_library_failed": "Failed to clear the library",
+        "library_already_empty": "The library is already empty."
       },
       "confirm": {
         "pending_approve_batch": "Approve {count} pending item(s)?",
@@ -636,10 +653,12 @@
         "storage_cleanup": "Found {count} cleanable item(s). This will remove stale indexes, orphan files, thumbnail cache, and temp files. Continue?",
         "update_existing_category": "Category {key} already exists. Update it?",
         "delete_category": "Delete category {key}? Images in this category will be deleted permanently.",
-        "delete_character": "Delete character {key}? Stickers stay; only the character tag is removed."
+        "delete_character": "Delete character {key}? Stickers stay; only the character tag is removed.",
+        "clear_library": "This permanently deletes all {count} sticker(s) in the library, including their files on disk. This cannot be undone. Continue?"
       },
       "prompt": {
-        "origin_scope": "Enter the origin scope, for example group:123456 or user:123456."
+        "origin_scope": "Enter the origin scope, for example group:123456 or user:123456.",
+        "clear_library": "Type DELETE to confirm clearing the entire library."
       },
       "themes": {
         "title": "Theme",

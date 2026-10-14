@@ -55,6 +55,8 @@ class PluginAPI:
     WORK_MAX_CHARS = 60
     DASHBOARD_PREFS_KEY = "dashboard_prefs"
     VALID_THEMES = frozenset({"auto", "dark", "light", "pixel", "terminal"})
+    # WebUI 每页条数：auto = 按窗口自适应（旧行为），其余是固定档位。
+    VALID_PAGE_SIZES = frozenset({"auto", "60", "120", "240"})
 
     def __init__(self, plugin: Any) -> None:
         self.plugin = plugin
@@ -69,10 +71,12 @@ class PluginAPI:
     def register(self, context) -> None:
         routes: list[tuple[str, str, list[str]]] = [
             ("/images", "handle_list_images", ["GET"]),
+            ("/images/hashes", "handle_image_hashes", ["GET"]),
             ("/image-data", "handle_image_data", ["GET"]),
             ("/serve-image", "handle_serve_image", ["GET"]),
             ("/thumbnail", "handle_thumbnail", ["GET"]),
             ("/images/upload", "handle_upload_image", ["POST"]),
+            ("/images/clear", "handle_clear_images", ["POST"]),
             ("/images/update", "handle_update_image", ["POST"]),
             ("/images/delete", "handle_delete_image", ["POST"]),
             ("/images/batch-delete", "handle_batch_delete", ["POST"]),
@@ -91,6 +95,7 @@ class PluginAPI:
             ("/storage/cleanup", "handle_storage_cleanup", ["POST"]),
             ("/stats", "handle_get_stats", ["GET"]),
             ("/pending", "handle_list_pending", ["GET"]),
+            ("/pending/ids", "handle_pending_ids", ["GET"]),
             ("/pending/approve", "handle_pending_approve", ["POST"]),
             ("/pending/reject", "handle_pending_reject", ["POST"]),
             ("/pending/update", "handle_pending_update", ["POST"]),
@@ -917,6 +922,65 @@ class PluginAPI:
             logger.error(f"Error listing images: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
+    async def handle_image_hashes(self):
+        """GET /images/hashes —— 只返回当前筛选条件下的全部 hash（跨页全选用）。
+
+        过滤参数与 /images 完全一致，保证「列表里看到什么，全选就选中什么」；
+        不走分页，只回 hash 列表，供前端做快照式全选。
+        """
+        try:
+            cat_filter = request.args.get("category", None)
+            search = str(request.args.get("q", "")).lower()
+            favorite_only = request.args.get("favorite_only", "false").lower() == "true"
+            character_filter = str(request.args.get("character", "") or "")
+            work_filter = str(request.args.get("work", "") or "")
+
+            db = self._db
+            get_hashes = getattr(db, "get_emoji_hashes", None) if db else None
+            if db and callable(get_hashes) and db.count_total() > 0:
+                hashes = get_hashes(
+                    category=cat_filter or None,
+                    search_query=search if search else None,
+                    favorite_only=favorite_only,
+                    character=character_filter or None,
+                    work=work_filter or None,
+                )
+                return jsonify({"success": True, "hashes": hashes, "total": len(hashes)})
+
+            # 无 DB 时回退到索引扫描，过滤规则与 handle_list_images 保持一致
+            hashes: list[str] = []
+            for path_str, meta in self._get_index().items():
+                if not Path(path_str).exists():
+                    continue
+                item = self._build_image_item(path_str, meta)
+                if not item or not item.get("hash"):
+                    continue
+                if search and not self._item_matches_search(item, search):
+                    continue
+                if cat_filter and item["category"] != cat_filter:
+                    continue
+                if favorite_only and not item.get("is_favorite"):
+                    continue
+                item_character = str(item.get("character", "") or "")
+                if character_filter == "__none__" and item_character:
+                    continue
+                if (
+                    character_filter
+                    and character_filter != "__none__"
+                    and item_character != character_filter
+                ):
+                    continue
+                item_work = str(item.get("work", "") or "")
+                if work_filter == "__none__" and item_work:
+                    continue
+                if work_filter and work_filter != "__none__" and item_work != work_filter:
+                    continue
+                hashes.append(str(item["hash"]))
+            return jsonify({"success": True, "hashes": hashes, "total": len(hashes)})
+        except Exception as e:
+            logger.error(f"列出图片 hash 失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
     async def handle_get_stats(self):
         try:
             index = self._get_index()
@@ -1001,9 +1065,11 @@ class PluginAPI:
         config_theme = config_theme or self._config_default_theme()
         stored_theme = str(stored.get("theme") or "").strip()
         theme = stored_theme if stored_theme in self.VALID_THEMES else config_theme
+        stored_page_size = str(stored.get("page_size") or "").strip().lower()
         return {
             "theme": self._normalize_theme(theme),
             "view": self._normalize_view(stored.get("view")),
+            "page_size": stored_page_size if stored_page_size in self.VALID_PAGE_SIZES else "auto",
         }
 
     async def _load_dashboard_prefs(self) -> dict[str, str]:
@@ -1031,12 +1097,16 @@ class PluginAPI:
                 stored["theme"] = theme
         if "view" in payload:
             stored["view"] = self._normalize_view(payload.get("view"))
+        if "page_size" in payload:
+            page_size = str(payload.get("page_size") or "").strip().lower()
+            if page_size in self.VALID_PAGE_SIZES:
+                stored["page_size"] = page_size
 
         await self._save_dashboard_prefs(stored)
         return self._resolve_dashboard_prefs(stored, config_theme)
 
     async def handle_prefs(self):
-        """WebUI 主题 / 视图偏好：KV 持久化，配置变更会淘汰旧主题覆盖。"""
+        """WebUI 主题 / 视图 / 每页条数偏好：KV 持久化，配置变更会淘汰旧主题覆盖。"""
         if request.method == "GET":
             prefs = await self._load_dashboard_prefs()
             return jsonify(
@@ -1383,6 +1453,25 @@ class PluginAPI:
             )
         except Exception as e:
             logger.error(f"列出待审核失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
+
+    async def handle_pending_ids(self):
+        """GET /pending/ids —— 只返回当前筛选下的全部待审核 id（跨页全选用）。"""
+        try:
+            db = self._db
+            get_ids = getattr(db, "get_pending_ids", None) if db else None
+            if not db or not callable(get_ids):
+                return jsonify({"success": True, "ids": [], "total": 0})
+
+            category = request.args.get("category", None)
+            search = str(request.args.get("q", "")).strip().lower()
+            ids = get_ids(
+                category=category if category else None,
+                search_query=search if search else None,
+            )
+            return jsonify({"success": True, "ids": ids, "total": len(ids)})
+        except Exception as e:
+            logger.error(f"列出待审核 id 失败: {e}", exc_info=True)
             return jsonify({"success": False, "error": str(e)})
 
     async def handle_pending_stats(self):
@@ -1868,6 +1957,94 @@ class PluginAPI:
             return jsonify({"success": False, "error": str(e)})
 
     # ── Batch operations ──────────────────────────────────────
+
+    async def handle_clear_images(self):
+        """POST /images/clear —— 清空整个表情库（危险操作，需 {"confirm": true}）。
+
+        只处理正式图库：删除索引引用的图片文件 + 索引条目 + 缩略图缓存，
+        并让 BM25 / 语义向量索引失效。待审核池、黑名单、外部源是独立数据，
+        不被"清空表情库"连带清掉。
+        """
+        try:
+            data = await request.get_json() or {}
+            if data.get("confirm") is not True:
+                return jsonify({"success": False, "error": "缺少确认标记"})
+
+            index = self._build_full_index_snapshot()
+            removed_paths: list[str] = []
+            deleted_hashes: list[str] = []
+            deleted = 0
+            failed = 0
+            for path, meta in index.items():
+                if not isinstance(path, str) or not isinstance(meta, dict):
+                    continue
+                try:
+                    exists = Path(path).resolve().is_file()
+                except Exception:
+                    exists = Path(path).is_file()
+                if exists:
+                    try:
+                        ok = await safe_remove_file(path)
+                    except Exception as e:
+                        logger.warning(f"清空图库删除文件失败 {path}: {e}")
+                        ok = False
+                    if not ok:
+                        # 删不掉就保留索引条目，交给存储清理重试，避免留下孤儿文件
+                        failed += 1
+                        continue
+                    deleted += 1
+                removed_paths.append(path)
+                img_hash = str(meta.get("hash", "") or "")
+                if img_hash:
+                    deleted_hashes.append(img_hash)
+
+            if removed_paths:
+                await self._delete_index_paths(removed_paths)
+
+            processor = getattr(self.plugin, "image_processor_service", None)
+            if processor is not None and hasattr(processor, "invalidate_cache"):
+                for img_hash in deleted_hashes:
+                    try:
+                        processor.invalidate_cache(img_hash)
+                    except Exception:
+                        pass
+
+            thumbnails_removed = 0
+            for thumb in self._iter_files(self._data_dir / "thumb_cache"):
+                try:
+                    if await safe_remove_file(str(thumb)):
+                        thumbnails_removed += 1
+                except Exception as e:
+                    logger.debug(f"清空缩略图失败 {thumb}: {e}")
+
+            try:
+                smart = getattr(
+                    getattr(self.plugin, "meme_selector", None),
+                    "_smart_select_service",
+                    None,
+                )
+                service = getattr(smart, "_embedding_service", None) if smart else None
+                wipe = getattr(service, "_wipe_vector_store", None) if service else None
+                if callable(wipe):
+                    # 库里已经一张图都不剩，向量存储整个作废；重建成本为 0
+                    await wipe()
+                if smart is not None and hasattr(smart, "_invalidate_embedding_index"):
+                    smart._invalidate_embedding_index()
+            except Exception as e:
+                logger.debug(f"清空向量库失败（不阻塞清空结果）: {e}")
+
+            return jsonify(
+                {
+                    "success": True,
+                    "deleted": deleted,
+                    "index_removed": len(removed_paths),
+                    "thumbnails_removed": thumbnails_removed,
+                    "failed": failed,
+                }
+            )
+        except Exception as e:
+            logger.error(f"清空表情库失败: {e}", exc_info=True)
+            return jsonify({"success": False, "error": str(e)})
 
     async def handle_batch_delete(self):
         try:

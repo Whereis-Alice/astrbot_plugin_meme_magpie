@@ -186,11 +186,22 @@ async def test_prefs_persist_theme_and_view():
         saved = await (await client.post(
             f"{PLUGIN_BASE}/prefs", json={"theme": "terminal", "view": "list"}
         )).json()
-        assert saved == {"success": True, "theme": "terminal", "view": "list"}
+        assert saved == {"success": True, "theme": "terminal", "view": "list", "page_size": "auto"}
 
         again = await (await client.get(f"{PLUGIN_BASE}/prefs")).json()
         assert again["theme"] == "terminal"
         assert again["view"] == "list"
+        assert again["page_size"] == "auto"
+
+        paged = await (await client.post(
+            f"{PLUGIN_BASE}/prefs", json={"page_size": "120"}
+        )).json()
+        assert paged["page_size"] == "120"
+
+        bad_page = await (await client.post(
+            f"{PLUGIN_BASE}/prefs", json={"page_size": "9999"}
+        )).json()
+        assert bad_page["page_size"] == "120"
 
         ignored = await (await client.post(
             f"{PLUGIN_BASE}/prefs", json={"theme": "not-a-theme"}
@@ -461,3 +472,94 @@ async def test_unknown_endpoint_returns_404_envelope():
         assert resp.status == 404
         body = await resp.json()
         assert body["success"] is False
+
+
+@pytest.mark.asyncio
+async def test_image_hashes_snapshot_matches_filtered_list():
+    """跨页全选拿到的 hash 快照必须与分页列表在同一筛选下保持一致。"""
+    async with _client() as client:
+        listing = (await (await client.get(f"{PLUGIN_BASE}/images?page=1&size=100")).json())
+        target = next(m for m in listing["images"] if m["tags"])
+        category = target["category"]
+
+        hashes = (await (
+            await client.get(f"{PLUGIN_BASE}/images/hashes?category={category}")
+        ).json())
+        assert hashes["success"] is True
+        assert hashes["total"] == len(hashes["hashes"])
+
+        by_cat = (await (
+            await client.get(f"{PLUGIN_BASE}/images?page=1&size=200&category={category}")
+        ).json())
+        assert set(hashes["hashes"]) == {m["hash"] for m in by_cat["images"]}
+
+        keyword = target["tags"][0]
+        searched = (await (
+            await client.get(f"{PLUGIN_BASE}/images/hashes?q={keyword}")
+        ).json())
+        assert target["hash"] in searched["hashes"]
+
+
+@pytest.mark.asyncio
+async def test_pending_ids_snapshot_matches_list():
+    async with _client() as client:
+        listing = (await (await client.get(f"{PLUGIN_BASE}/pending?page=1&size=100")).json())
+        ids = (await (await client.get(f"{PLUGIN_BASE}/pending/ids")).json())
+        assert ids["success"] is True
+        assert set(ids["ids"]) == {m["id"] for m in listing["images"]}
+
+        first = listing["images"][0]
+        filtered = (await (
+            await client.get(f"{PLUGIN_BASE}/pending/ids?category={first['category']}")
+        ).json())
+        assert set(filtered["ids"]) <= set(ids["ids"])
+        assert first["id"] in filtered["ids"]
+
+
+@pytest.mark.asyncio
+async def test_clear_library_requires_confirm_and_keeps_pending():
+    state = PreviewState(seed=True)
+    pending_before = len(state.pending)
+    async with _client(state) as client:
+        refused = (await (await client.post(f"{PLUGIN_BASE}/images/clear", json={})).json())
+        assert refused["success"] is False
+        assert len(state.library) > 0
+
+        cleared = (await (
+            await client.post(f"{PLUGIN_BASE}/images/clear", json={"confirm": True})
+        ).json())
+        assert cleared["success"] is True
+        assert cleared["deleted"] > 0
+
+        stats = (await (await client.get(f"{PLUGIN_BASE}/stats")).json())["stats"]
+        assert stats["total"] == 0
+        # 清空图库不碰待审核池
+        assert len(state.pending) == pending_before
+
+
+def test_bulk_selection_ui_wiring():
+    """模板、状态与接口路径三处必须接上，避免只有一半功能。"""
+    template = (DASHBOARD_DIR / "template.js").read_text(encoding="utf-8")
+    app_js = (DASHBOARD_DIR / "app.js").read_text(encoding="utf-8")
+
+    for name in (
+        "selectAllResults",
+        "toggleSelectAllPage",
+        "clearSelection",
+        "clearAllImages",
+        "selectAllPendingResults",
+        "clearPendingSelection",
+        "setPageSizeMode",
+    ):
+        assert name in template, name
+        assert re.search(rf"^\s+{name},$", app_js, re.M), name
+
+    for path in ("api/images/hashes?", "api/images/clear", "api/pending/ids?"):
+        assert path in app_js, path
+
+    # 每页条数下拉在两个区域都可用，且走同一份偏好
+    assert template.count('class="page-size-select"') == 2
+    assert "page_size" in app_js and "PAGE_SIZE_STORAGE_KEY" in app_js
+    # 清空图库是双确认：确认框 + 手输 DELETE
+    assert "pages.dashboard.prompt.clear_library" in app_js
+    assert 'trim().toUpperCase() !== \'DELETE\'' in app_js

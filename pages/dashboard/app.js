@@ -140,6 +140,13 @@ createApp({
             const paginationHeight = 56;
             const availableHeight = Math.max(180, h - headerHeight - toolbarHeight - paginationHeight);
             const rows = Math.max(2, Math.floor((availableHeight + gap) / (slot + gap)));
+            // 固定档位优先；auto 才按窗口自适应
+            const fixedSize = Number(pageSizeMode.value);
+            if (pageSizeMode.value !== 'auto' && Number.isFinite(fixedSize) && fixedSize > 0) {
+                pageSize.value = fixedSize;
+                pendingPageSize.value = fixedSize;
+                return;
+            }
             pageSize.value = targetCols * Math.max(2, Math.floor(rows * 0.75));
             pendingPageSize.value = targetCols * Math.max(2, rows - 1);
         };
@@ -503,6 +510,12 @@ createApp({
 
         const THEME_STORAGE_KEY = 'magpie_theme_mode';
         const VIEW_STORAGE_KEY = 'magpie_view_mode';
+        const PAGE_SIZE_STORAGE_KEY = 'magpie_page_size';
+        const PAGE_SIZE_OPTIONS = ['auto', '60', '120', '240'];
+        const normalizePageSize = (value) => {
+            const next = String(value ?? '').trim().toLowerCase();
+            return PAGE_SIZE_OPTIONS.includes(next) ? next : 'auto';
+        };
         const readStored = (key) => {
             try { return localStorage.getItem(key); } catch (e) { return null; }
         };
@@ -565,6 +578,16 @@ createApp({
             writeStored(VIEW_STORAGE_KEY, viewMode.value);
             if (persist) persistPrefs({ view: viewMode.value });
         };
+        // 每页条数：auto = 按窗口自适应（历史行为），固定档位存 KV + localStorage。
+        const pageSizeMode = ref(normalizePageSize(readStored(PAGE_SIZE_STORAGE_KEY)));
+        const setPageSizeMode = (mode, persist = true) => {
+            pageSizeMode.value = normalizePageSize(mode);
+            writeStored(PAGE_SIZE_STORAGE_KEY, pageSizeMode.value);
+            if (persist) persistPrefs({ page_size: pageSizeMode.value });
+            updatePageSize();
+            if (activeSection.value === 'pending') fetchPendingImages(1);
+            else fetchImages(1);
+        };
         const loadDashboardPrefs = async () => {
             const requestRevision = themePreferenceRevision;
             try {
@@ -578,6 +601,14 @@ createApp({
                 if (data.view === 'list' || data.view === 'grid') {
                     viewMode.value = data.view;
                     writeStored(VIEW_STORAGE_KEY, data.view);
+                }
+                if (typeof data.page_size === 'string') {
+                    const next = normalizePageSize(data.page_size);
+                    if (next !== pageSizeMode.value) {
+                        pageSizeMode.value = next;
+                        writeStored(PAGE_SIZE_STORAGE_KEY, next);
+                        updatePageSize();
+                    }
                 }
                 if (data.batch_defaults && typeof data.batch_defaults === 'object') {
                     batchDefaults.value = { ...batchDefaults.value, ...data.batch_defaults };
@@ -904,23 +935,27 @@ createApp({
         };
 
         let imageRequestId = 0;
+        const buildImageQueryParams = (page, size) => {
+            const params = new URLSearchParams({
+                page: page.toString(),
+                size: size.toString(),
+                q: searchQuery.value,
+                category: selectedCategory.value === '__favorite__' ? '' : selectedCategory.value,
+                sort: sortBy.value,
+            });
+            if (selectedCategory.value === '__favorite__') {
+                params.set('favorite_only', 'true');
+            }
+            if (selectedCharacter.value) {
+                params.set('character', selectedCharacter.value);
+            }
+            return params;
+        };
         const fetchImages = async (page = 1) => {
             const requestId = ++imageRequestId;
             loading.value = true;
             try {
-                const params = new URLSearchParams({
-                    page: page.toString(),
-                    size: pageSize.value.toString(),
-                    q: searchQuery.value,
-                    category: selectedCategory.value === '__favorite__' ? '' : selectedCategory.value,
-                    sort: sortBy.value,
-                });
-                if (selectedCategory.value === '__favorite__') {
-                    params.set('favorite_only', 'true');
-                }
-                if (selectedCharacter.value) {
-                    params.set('character', selectedCharacter.value);
-                }
+                const params = buildImageQueryParams(page, pageSize.value);
                 const res = await apiFetch('api/images?' + params.toString());
                 const data = await res.json();
                 if (requestId !== imageRequestId) return [];
@@ -947,12 +982,8 @@ createApp({
                     if (!currentHashes.has(hash)) delete originalDataUrls[hash];
                 }
                 nextTick(() => observeImages());
-                if (selectedImages.value.size > 0) {
-                    const visibleHashes = new Set(nextImages.map((img) => img.hash));
-                    selectedImages.value = new Set(
-                        Array.from(selectedImages.value).filter((hash) => visibleHashes.has(hash))
-                    );
-                }
+                // 选择跨页保留：翻页 / 换筛选都不裁剪已选集合，
+                // 由批量工具栏的「已选 N 张 / 清空选择」显式管理范围。
                 return nextImages;
             } catch (e) {
                 console.error(e);
@@ -1248,11 +1279,45 @@ createApp({
         });
 
         const toggleSelectAllPending = () => {
-            const currentIds = new Set(pendingImages.value.map(img => img.id));
-            if (allPendingSelected.value) {
-                pendingSelectedImages.value = new Set();
+            const pageIds = pendingImages.value.map((img) => img.id);
+            if (!pageIds.length) return;
+            const next = new Set(pendingSelectedImages.value);
+            if (pageIds.every((id) => next.has(id))) {
+                pageIds.forEach((id) => next.delete(id));
             } else {
-                pendingSelectedImages.value = currentIds;
+                pageIds.forEach((id) => next.add(id));
+            }
+            pendingSelectedImages.value = next;
+        };
+
+        const clearPendingSelection = () => { pendingSelectedImages.value = new Set(); };
+
+        // 跨页全选：一次拿全当前筛选下的待审核 id（池子上限通常只有几百）
+        const selectingAllPending = ref(false);
+        const selectAllPendingResults = async () => {
+            if (selectingAllPending.value) return;
+            selectingAllPending.value = true;
+            try {
+                const params = new URLSearchParams({
+                    q: pendingSearchQuery.value,
+                    category: pendingCategory.value,
+                });
+                const res = await apiFetch('api/pending/ids?' + params.toString());
+                const data = await res.json();
+                if (!data || data.success === false) {
+                    showAlert(data?.error || t('pages.dashboard.alerts.select_all_failed', 'Select all failed.'));
+                    return;
+                }
+                const ids = Array.isArray(data.ids) ? data.ids : [];
+                pendingSelectedImages.value = new Set(ids);
+                showAlert(
+                    t('pages.dashboard.alerts.select_all_done', 'Selected all {count} result(s).')
+                        .replace('{count}', ids.length)
+                );
+            } catch (e) {
+                showAlert(`${t('pages.dashboard.alerts.select_all_failed', 'Select all failed')}: ${e.message}`, 'error');
+            } finally {
+                selectingAllPending.value = false;
             }
         };
 
@@ -1481,33 +1546,176 @@ createApp({
             selectedImages.value = next;
         };
 
-        const selectAll = () => {
-            selectedImages.value = selectedImages.value.size === images.value.length
-                ? new Set()
-                : new Set(images.value.map(i => i.hash));
+        const allVisibleSelected = computed(() => (
+            images.value.length > 0
+            && images.value.every((img) => selectedImages.value.has(img.hash))
+        ));
+
+        const toggleSelectAllPage = () => {
+            const pageHashes = images.value.map((img) => img.hash);
+            if (!pageHashes.length) return;
+            const next = new Set(selectedImages.value);
+            if (pageHashes.every((hash) => next.has(hash))) {
+                pageHashes.forEach((hash) => next.delete(hash));
+            } else {
+                pageHashes.forEach((hash) => next.add(hash));
+            }
+            selectedImages.value = next;
         };
 
+        const clearSelection = () => { selectedImages.value = new Set(); };
+
+        // 跨页全选：按当前筛选条件取一次完整 hash 快照（不是动态跟随），
+        // 之后改搜索词/分类也不会把范围偷偷撑大。
+        const selectingAllResults = ref(false);
+        const selectAllResults = async () => {
+            if (selectingAllResults.value) return;
+            selectingAllResults.value = true;
+            try {
+                const params = buildImageQueryParams(1, 1);
+                params.delete('page');
+                params.delete('size');
+                const res = await apiFetch('api/images/hashes?' + params.toString());
+                const data = await res.json();
+                if (!data || data.success === false) {
+                    showAlert(data?.error || t('pages.dashboard.alerts.select_all_failed', 'Select all failed.'));
+                    return;
+                }
+                const hashes = Array.isArray(data.hashes) ? data.hashes : [];
+                selectedImages.value = new Set(hashes);
+                showAlert(
+                    t('pages.dashboard.alerts.select_all_done', 'Selected all {count} result(s).')
+                        .replace('{count}', hashes.length)
+                );
+            } catch (e) {
+                showAlert(`${t('pages.dashboard.alerts.select_all_failed', 'Select all failed')}: ${e.message}`, 'error');
+            } finally {
+                selectingAllResults.value = false;
+            }
+        };
+
+        const batchProgress = ref('');
         const handleBatchDelete = async () => {
-            if (selectedImages.value.size === 0) return;
+            const all = Array.from(selectedImages.value);
+            if (!all.length) return;
             if (!await showConfirm(
                 t('pages.dashboard.confirm.delete_selected_images', 'Delete {count} selected image(s)?')
-                    .replace('{count}', selectedImages.value.size)
+                    .replace('{count}', all.length)
             )) return;
 
+            // 跨页全选可能上千张，分片请求避免单次请求跑太久；进度显示在批量工具栏
+            const chunkSize = 200;
+            let deleted = 0;
+            let failedBatches = 0;
             try {
-                const res = await apiFetch('api/images/batch-delete', {
-                    method: 'POST',
-                    body: JSON.stringify({ hashes: Array.from(selectedImages.value) }),
-                });
-                const data = await res.json();
-                if (data.success) {
-                    selectedImages.value = new Set();
-                    refreshView();
+                for (let index = 0; index < all.length; index += chunkSize) {
+                    const chunk = all.slice(index, index + chunkSize);
+                    batchProgress.value = `${Math.min(index + chunk.length, all.length)} / ${all.length}`;
+                    const res = await apiFetch('api/images/batch-delete', {
+                        method: 'POST',
+                        body: JSON.stringify({ hashes: chunk }),
+                    });
+                    const data = await res.json();
+                    if (data && data.success) {
+                        deleted += Number(data.count || 0);
+                    } else {
+                        failedBatches += 1;
+                    }
+                }
+                selectedImages.value = new Set();
+                await refreshView();
+                if (failedBatches) {
+                    showAlert(
+                        t(
+                            'pages.dashboard.alerts.delete_selected_partial',
+                            'Deleted {count} image(s), but {failed} batch(es) failed.'
+                        ).replace('{count}', deleted).replace('{failed}', failedBatches),
+                        'error'
+                    );
                 } else {
-                    showAlert(data.error || t('pages.dashboard.alerts.delete_failed', 'Delete failed.'));
+                    showAlert(
+                        t('pages.dashboard.alerts.delete_selected_done', 'Deleted {count} image(s).')
+                            .replace('{count}', deleted),
+                        'success'
+                    );
                 }
             } catch (e) {
                 showAlert(`${t('pages.dashboard.alerts.action_failed', 'Action failed')}: ${e.message}`);
+            } finally {
+                batchProgress.value = '';
+            }
+        };
+
+        // 「清空表情库」：图库管理里的独立危险操作，不走选择器。
+        // 双确认 + 手输 DELETE，防止和批量删除混淆。
+        const clearingImages = ref(false);
+        const clearAllImages = async () => {
+            if (clearingImages.value) return;
+            const count = Number(stats.total || 0);
+            if (count <= 0) {
+                showAlert(t('pages.dashboard.alerts.library_already_empty', 'The library is already empty.'));
+                return;
+            }
+            const confirmed = await showConfirm(
+                t(
+                    'pages.dashboard.confirm.clear_library',
+                    'This permanently deletes all {count} sticker(s) in the library, including their files on disk. This cannot be undone. Continue?'
+                ).replace('{count}', count)
+            );
+            if (!confirmed) return;
+            const typed = await showPrompt(
+                t(
+                    'pages.dashboard.prompt.clear_library',
+                    'Type DELETE to confirm clearing the entire library.'
+                )
+            );
+            if (typed === null) return;
+            if (String(typed).trim().toUpperCase() !== 'DELETE') {
+                showAlert(
+                    t(
+                        'pages.dashboard.alerts.clear_library_aborted',
+                        'Confirmation text did not match. Nothing was deleted.'
+                    )
+                );
+                return;
+            }
+            clearingImages.value = true;
+            try {
+                const res = await apiFetch('api/images/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ confirm: true }),
+                });
+                const data = await res.json();
+                if (!data || !data.success) {
+                    showAlert(
+                        data?.error
+                        || t('pages.dashboard.alerts.clear_library_failed', 'Failed to clear the library.')
+                    );
+                    return;
+                }
+                selectedImages.value = new Set();
+                isBatchMode.value = false;
+                await fetchImages(1);
+                await fetchStats();
+                const failedSuffix = data.failed
+                    ? ` ${t(
+                        'pages.dashboard.alerts.clear_library_partial',
+                        '{count} file(s) could not be removed and were kept in the index.'
+                    ).replace('{count}', data.failed)}`
+                    : '';
+                showAlert(
+                    t('pages.dashboard.alerts.clear_library_done', 'Library cleared. Deleted {count} sticker(s).')
+                        .replace('{count}', data.deleted || 0) + failedSuffix,
+                    'success'
+                );
+            } catch (e) {
+                showAlert(
+                    `${t('pages.dashboard.alerts.clear_library_failed', 'Failed to clear the library')}: ${e.message}`,
+                    'error'
+                );
+            } finally {
+                clearingImages.value = false;
             }
         };
 
@@ -3607,8 +3815,9 @@ createApp({
                 });
             }, { rootMargin: '200px' });
             checkHealth();
-            loadDashboardPrefs();
-            loadAll();
+            // 先等偏好落地（每页条数可能来自服务端 KV），再拉第一页数据，
+            // 避免首屏按旧的每页条数请求、页码信息对不上。
+            loadDashboardPrefs().finally(() => loadAll());
         });
 
         onUnmounted(() => {
@@ -3640,6 +3849,8 @@ createApp({
             sortBy,
             currentPage,
             pageSize,
+            pageSizeMode,
+            setPageSizeMode,
             total,
             pendingImages,
             pendingTotal,
@@ -3667,6 +3878,9 @@ createApp({
             togglePendingSelection,
             allPendingSelected,
             toggleSelectAllPending,
+            clearPendingSelection,
+            selectAllPendingResults,
+            selectingAllPending,
 
             // issue #87：审核区编辑
             pendingEditOpen,
@@ -3697,7 +3911,14 @@ createApp({
             batchScopeMode,
             toggleBatchMode,
             toggleSelection,
-            selectAll,
+            allVisibleSelected,
+            toggleSelectAllPage,
+            clearSelection,
+            selectAllResults,
+            selectingAllResults,
+            batchProgress,
+            clearAllImages,
+            clearingImages,
             runStorageCleanup,
             handleBatchDelete,
             openBatchMoveModal,

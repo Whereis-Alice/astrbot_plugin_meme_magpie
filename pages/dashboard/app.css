@@ -788,6 +788,33 @@ h2 {
     text-align: center;
 }
 
+.page-size-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'Cinzel', serif;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.page-size-select {
+    background: var(--btn-gradient);
+    border: 1px solid var(--gold-dim);
+    color: var(--gold-primary);
+    font-family: 'Cinzel', serif;
+    font-size: 0.8rem;
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+.batch-progress {
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+}
+
 
 .codex-btn {
     background: var(--btn-gradient);
