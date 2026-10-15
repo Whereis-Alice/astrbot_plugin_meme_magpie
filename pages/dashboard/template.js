@@ -2067,7 +2067,7 @@ export const TEMPLATE = `
 
         <div class="modal-header">
             <h2>{{ t('pages.dashboard.sources.title', '外部表情包源') }}</h2>
-            <button @click="closeSourceModal" class="modal-close">
+            <button @click="closeSourceModal" class="modal-close" :disabled="sourceBusy === 'upload' || sourceBusy === 'inspect'">
                 <svg style="width:20px;height:20px" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                 </svg>
@@ -2123,7 +2123,7 @@ export const TEMPLATE = `
                     </div>
                 </div>
 
-                <div v-if="sourceBusy === 'upload'" class="md-empty">{{ t('pages.dashboard.sources.uploading', '正在上传并读取清单…') }}</div>
+                <div v-if="sourceBusy === 'upload'" class="md-empty" role="status" aria-live="polite">{{ t('pages.dashboard.sources.uploading', '正在上传压缩包…') }} {{ sourceUploadProgress }}%</div>
                 <div v-else-if="sourceBusy === 'inspect'" class="md-empty">{{ t('pages.dashboard.sources.inspecting', '正在读取清单…') }}</div>
                 <div v-if="sourceError" class="md-empty is-error">{{ sourceError }}</div>
 
@@ -2393,7 +2393,7 @@ export const TEMPLATE = `
         </div>
 
         <div class="modal-actions">
-            <button type="button" @click="closeSourceModal" class="codex-btn">{{ t('pages.dashboard.actions.close', 'Close') }}</button>
+            <button type="button" @click="closeSourceModal" class="codex-btn" :disabled="sourceBusy === 'upload' || sourceBusy === 'inspect'">{{ t('pages.dashboard.actions.close', 'Close') }}</button>
         </div>
     </div>
 </div>

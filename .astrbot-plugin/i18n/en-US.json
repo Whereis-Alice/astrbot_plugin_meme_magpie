@@ -794,7 +794,7 @@
         "http_title": "HTTP catalogue",
         "http_hint": "An HTTPS address that returns a sticker catalogue as JSON. Only HTTPS is allowed by default.",
         "inspect": "Inspect",
-        "uploading": "Uploading and reading the catalogue...",
+        "uploading": "Uploading archive...",
         "inspecting": "Reading the catalogue...",
         "pack_name": "Name",
         "item_count": "Images",

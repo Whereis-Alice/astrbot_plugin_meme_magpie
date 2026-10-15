@@ -22,6 +22,7 @@ from astrbot.api import logger
 
 from .core.maintenance.backup_service import BackupService
 from .core.processing.analysis_throttle import AnalysisThrottle, build_analysis_throttle
+from .core.sources.archive_upload import ArchiveUploadService
 from .core.sources.models import ExternalSourceError, ExternalSourceSecurityError
 from .core.util.blacklist import add_blacklist_hash
 from .core.util.category_paths import category_path, validate_category_key
@@ -68,6 +69,7 @@ class PluginAPI:
         self.export_tasks: dict[str, dict] = {}
         self._export_task_handles: dict[str, asyncio.Task] = {}
         self._backup_service: BackupService | None = None
+        self._archive_upload_service: ArchiveUploadService | None = None
         # 正式库改分类会移动文件并改主键路径。识别可以并发，但所有
         # categories/ 下的移动入口必须共用这把锁，否则并发请求可能同时
         # _unique_path() / move()，互相踩对方的落点。
@@ -129,6 +131,7 @@ class PluginAPI:
             ("/sources/jobs/control", "handle_source_job_control", ["POST"]),
             ("/sources/delete", "handle_source_delete", ["POST"]),
             ("/sources/upload", "handle_source_upload", ["POST"]),
+            ("/sources/upload/chunked", "handle_source_chunked_upload", ["POST"]),
         ]
         for route, handler_name, methods in routes:
             handler = getattr(self, handler_name)
@@ -1351,6 +1354,27 @@ class PluginAPI:
             deleted = await service.delete_source(source_id)
             return jsonify({"success": deleted, "deleted": deleted, "images_preserved": True})
         except ExternalSourceError as exc:
+            return self._source_error_response(exc)
+
+    async def handle_source_chunked_upload(self):
+        """接收小块 JSON 上传，避开宿主整包上传的体积与超时限制。"""
+        service = self._sources
+        if service is None:
+            return self._service_unavailable()
+        try:
+            payload = await self._source_json()
+            if payload.get("action") == "start":
+                if not bool(getattr(self._cfg, "external_sources_enabled", True)):
+                    raise ExternalSourceError("external sources are disabled")
+                await service.cleanup_staged_uploads()
+            if self._archive_upload_service is None:
+                self._archive_upload_service = ArchiveUploadService(service.import_dir / "uploads")
+            result = await self._archive_upload_service.handle(
+                payload,
+                max_bytes=int(getattr(self._cfg, "external_source_max_archive_bytes", 1024**3)),
+            )
+            return jsonify({"success": True, **result})
+        except (ExternalSourceError, OSError, ValueError) as exc:
             return self._source_error_response(exc)
 
     async def handle_source_upload(self):

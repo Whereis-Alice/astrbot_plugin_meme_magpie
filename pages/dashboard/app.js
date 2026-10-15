@@ -1,4 +1,5 @@
 import { TEMPLATE } from './template.js';
+import { uploadArchive } from './archive-upload.js';
 const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
 const PLACEHOLDER = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
@@ -397,6 +398,7 @@ createApp({
         const sourceLoading = ref(false);
         // 当前在跑的动作，用来禁按钮：'' | 'upload' | 'inspect' | 'import' | 'control'
         const sourceBusy = ref('');
+        const sourceUploadProgress = ref(0);
         const sourceList = ref([]);
         const sourceInspection = ref(null);
         const sourceFile = ref(null);
@@ -3500,6 +3502,7 @@ createApp({
 
         const openSourceModal = () => {
             sourceOpen.value = true;
+            if (sourceBusy.value) return;
             sourceError.value = null;
             sourceInspection.value = null;
             sourceFile.value = null;
@@ -3519,6 +3522,7 @@ createApp({
         };
 
         const closeSourceModal = () => {
+            if (sourceBusy.value === 'upload' || sourceBusy.value === 'inspect') return;
             sourceOpen.value = false;
             stopSourcePoll();
             releaseModal('source');
@@ -3555,6 +3559,7 @@ createApp({
             const file = event?.target?.files?.[0];
             if (event?.target) event.target.value = '';
             if (!file) return;
+            if (sourceBusy.value) return;
             if (!/\.(zip|meme-pack)$/i.test(file.name)) {
                 sourceError.value = t('pages.dashboard.sources.bad_archive', '只认 .zip 或 .meme-pack 压缩包。');
                 return;
@@ -3564,22 +3569,28 @@ createApp({
             sourceInspection.value = null;
             sourceUploadedPath.value = '';
             sourceBusy.value = 'upload';
+            sourceUploadProgress.value = 0;
             sourceError.value = null;
             try {
-                const formData = new FormData();
-                formData.append('file', file);
-                const res = await apiFetch('api/sources/upload', { method: 'POST', body: formData });
+                sourceUploadedPath.value = await uploadArchive(
+                    bridge, file, fileToBase64,
+                    (percent) => { sourceUploadProgress.value = percent; },
+                );
+                sourceBusy.value = 'inspect';
+                const res = await apiFetch('api/sources/inspect', {
+                    method: 'POST',
+                    body: { source_type: 'meme_pack', path: sourceUploadedPath.value },
+                });
                 const data = await res.json();
                 if (!data.success) {
                     sourceError.value = sourceErrorText(data.error);
                     sourceFile.value = null;
                     return;
                 }
-                sourceUploadedPath.value = String(data.path || '');
                 applySourceInspection(data.inspection);
             } catch (e) {
                 sourceError.value = sourceErrorText(
-                    t('pages.dashboard.sources.upload_failed', '压缩包没传上去'),
+                    e?.message || t('pages.dashboard.sources.upload_failed', '压缩包没传上去'),
                 );
                 sourceFile.value = null;
                 console.error('Source upload error:', e);
@@ -4320,6 +4331,7 @@ createApp({
             sourceOpen,
             sourceLoading,
             sourceBusy,
+            sourceUploadProgress,
             sourceList,
             sourceInspection,
             sourceFile,

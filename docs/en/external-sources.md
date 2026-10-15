@@ -12,6 +12,8 @@ It is **read-only**: not a single byte of the source is modified, and images are
 
 Pick a `.zip` or `.meme-pack` in the browser; preflight runs as soon as the upload finishes.
 
+Archives are uploaded in chunks with percentage progress. Each request stays below 1 MiB so large backups fit the host's per-request upload limit. Temporary network failures retry the current chunk; other failures show their specific error. The plugin's total archive-size limit still applies (1 GiB by default). Keep the page open while uploading.
+
 The recommended layout is the AstrBot Meme Pack v2 export format:
 
 ```text

@@ -60,6 +60,7 @@ async def test_bridge_js_and_static_assets_served():
 
         for path, keyword in (
             ("/app.js", "createApp"),
+            ("/archive-upload.js", "uploadArchive"),
             ("/template.js", "TEMPLATE"),
             ("/app.css", "{"),
             ("/vendor/vue.global.prod.js", "Vue"),

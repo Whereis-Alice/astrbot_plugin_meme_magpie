@@ -794,7 +794,7 @@
         "http_title": "HTTP 目录",
         "http_hint": "一个返回表情包清单 JSON 的 HTTPS 地址。默认只允许 HTTPS。",
         "inspect": "预检",
-        "uploading": "正在上传并读取清单…",
+        "uploading": "正在上传压缩包…",
         "inspecting": "正在读取清单…",
         "pack_name": "名称",
         "item_count": "张数",
