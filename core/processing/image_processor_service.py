@@ -1158,6 +1158,7 @@ class ImageProcessorService:
     def cleanup(self):
         """清理资源。"""
         self._image_cache.clear()
+        self._vlm_call_service.cleanup()
         self._render_service.cleanup()
         logger.debug("ImageProcessorService 资源已清理")
 

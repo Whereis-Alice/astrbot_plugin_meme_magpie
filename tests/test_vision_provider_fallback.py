@@ -302,6 +302,104 @@ def test_timeout_cancels_stuck_request_and_tries_next_model(tmp_path):
     assert _requested_providers(llm) == ["stuck", "second"]
 
 
+def test_timeout_falls_back_before_cancellation_resistant_provider_finishes(tmp_path):
+    processor, llm, _current, _framework, path = _make_processor(
+        tmp_path, providers=["stuck", "second"], timeout=0.01
+    )
+    service = processor._vlm_call_service
+
+    async def run():
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def generate(**kwargs):
+            if kwargs["chat_provider_id"] == "stuck":
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    # Some SDKs perform slow cleanup before acknowledging cancellation.
+                    await release.wait()
+                finally:
+                    finished.set()
+            return SimpleNamespace(completion_text=VALID_RESPONSE)
+
+        llm.side_effect = generate
+        classification = asyncio.create_task(processor.classify_image(None, path))
+        try:
+            done, _pending = await asyncio.wait({classification}, timeout=0.5)
+            assert classification in done, "fallback waited for the timed-out provider's cleanup"
+            assert classification.result()[0] == "happy"
+            assert not release.is_set()
+            assert cancelled.is_set()
+            assert not finished.is_set()
+            assert any(not task.done() for task in service._timed_out_calls)
+            assert _requested_providers(llm) == ["stuck", "second"]
+        finally:
+            release.set()
+            if not classification.done():
+                classification.cancel()
+            await asyncio.gather(classification, return_exceptions=True)
+            await asyncio.wait_for(finished.wait(), timeout=1.0)
+            # The call's done callback runs after its coroutine finishes.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert service._timed_out_calls == set()
+
+    asyncio.run(run())
+
+
+def test_external_cancellation_does_not_wait_for_slow_provider_cleanup(tmp_path):
+    processor, llm, _current, _framework, path = _make_processor(
+        tmp_path, providers=["first", "second"]
+    )
+    service = processor._vlm_call_service
+
+    async def run():
+        release = asyncio.Event()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def generate(**kwargs):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+            finally:
+                finished.set()
+            return SimpleNamespace(completion_text=VALID_RESPONSE)
+
+        llm.side_effect = generate
+        classification = asyncio.create_task(processor.classify_image(None, path))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            classification.cancel()
+            done, _pending = await asyncio.wait({classification}, timeout=0.5)
+            assert classification in done, "caller cancellation waited for provider cleanup"
+            with pytest.raises(asyncio.CancelledError):
+                classification.result()
+            await asyncio.wait_for(cancelled.wait(), timeout=0.5)
+            assert not release.is_set()
+            assert not finished.is_set()
+            assert any(not task.done() for task in service._timed_out_calls)
+            assert _requested_providers(llm) == ["first"]
+        finally:
+            release.set()
+            if not classification.done():
+                classification.cancel()
+            await asyncio.gather(classification, return_exceptions=True)
+            await asyncio.wait_for(finished.wait(), timeout=1.0)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert service._timed_out_calls == set()
+
+    asyncio.run(run())
+
+
 def test_preprocessing_and_mime_temp_files_survive_until_fallback_finishes(tmp_path):
     processor, llm, _current, _framework, path = _make_processor(
         tmp_path, providers=["first", "second"]

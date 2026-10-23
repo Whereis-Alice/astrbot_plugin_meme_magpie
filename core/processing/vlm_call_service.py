@@ -129,6 +129,41 @@ class VLMCallService:
         self.vision_provider_ids = list(
             getattr(self.plugin_config, "vision_provider_ids", []) or []
         )
+        self._timed_out_calls: set[asyncio.Task] = set()
+
+    def _cancel_pending_call(self, task: asyncio.Task) -> None:
+        """Cancel without waiting for slow provider cleanup; consume its final result."""
+        task.cancel()
+        self._timed_out_calls.add(task)
+
+        def finished(completed: asyncio.Task) -> None:
+            self._timed_out_calls.discard(completed)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finished)
+
+    async def _generate_with_timeout(
+        self, provider_id: str, prompt: str, file_url: str, timeout: float
+    ):
+        """The deadline includes providers that delay or suppress cancellation."""
+        task = asyncio.create_task(
+            self._llm_generate_with_image_compat(provider_id, prompt, file_url)
+        )
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        except BaseException:
+            self._cancel_pending_call(task)
+            raise
+        if task in done:
+            return task.result()
+        self._cancel_pending_call(task)
+        raise TimeoutError(f"视觉模型 {provider_id} 请求超时（{timeout:g} 秒）")
+
+    def cleanup(self) -> None:
+        """Cancel provider calls whose cleanup is still pending when unloading."""
+        for task in tuple(self._timed_out_calls):
+            task.cancel()
 
     @staticmethod
     def _provider_id(provider: Any) -> str:
@@ -843,13 +878,8 @@ class VLMCallService:
                 except (TypeError, ValueError, OverflowError):
                     timeout = 60.0
                 timeout = min(600.0, timeout) if math.isfinite(timeout) and timeout > 0 else 60.0
-                result = await asyncio.wait_for(
-                    self._llm_generate_with_image_compat(
-                        provider_id=provider_id,
-                        prompt=prompt,
-                        file_url=file_url,
-                    ),
-                    timeout=timeout,
+                result = await self._generate_with_timeout(
+                    provider_id, prompt, file_url, timeout
                 )
 
                 # LLMResponse.completion_text 是 @property，自动处理 result_chain
