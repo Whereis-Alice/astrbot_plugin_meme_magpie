@@ -437,6 +437,7 @@ class Main(Star):
             categories=list(cfg.categories or []) or list(cfg.DEFAULT_CATEGORIES),
             content_filtration=cfg.content_filtration,
             vision_provider_id=self._load_vision_provider_id(),
+            vision_provider_ids=list(cfg.vision_provider_ids or []),
             emoji_classification_prompt=final_prompts.get("emoji_classification_prompt"),
             emoji_classification_with_filter_prompt=final_prompts.get(
                 "emoji_classification_with_filter_prompt"

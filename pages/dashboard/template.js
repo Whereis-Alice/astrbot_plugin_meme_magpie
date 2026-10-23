@@ -64,6 +64,13 @@ export const TEMPLATE = `
     </div>
 
     <div class="header-right">
+        <button type="button" class="codex-btn vision-settings-button" @click="openVisionProviders"
+            :aria-label="t('pages.dashboard.vision.title', 'Vision models')" :title="t('pages.dashboard.vision.title', 'Vision models')">
+            <svg class="vision-settings-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 4h16v16H4zM4 16l5-5 4 4 3-3 4 4M16 8h.01" />
+            </svg>
+            <span class="vision-settings-label">{{ t('pages.dashboard.vision.title', 'Vision models') }}</span>
+        </button>
         <div class="health-indicator" :class="healthStatus">
             <span class="health-dot"></span>
             <span class="health-text">{{ getHealthText(healthStatus) }}</span>
@@ -2496,6 +2503,65 @@ export const TEMPLATE = `
                         {{ t('pages.dashboard.actions.close', '关闭') }}
                     </button>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div v-if="visionProvidersOpen" class="modal-overlay" data-modal-guard="visionProviders"
+    @pointerdown.capture="onOverlayPointerDown" @click.self="onOverlayClick($event, closeVisionProviders)"
+    @input.capture="onOverlayInput" @change.capture="onOverlayInput">
+    <div class="modal-panel modal-md" role="dialog" aria-modal="true" aria-labelledby="vision-providers-title">
+        <div class="modal-panel-corner-bl"></div>
+        <div class="modal-panel-corner-br"></div>
+        <div class="modal-header">
+            <h2 id="vision-providers-title">{{ t('pages.dashboard.vision.title', 'Vision models') }}</h2>
+            <button type="button" class="modal-close" :disabled="visionProvidersSaving" @click="closeVisionProviders"
+                :aria-label="t('pages.dashboard.actions.close', 'Close')">×</button>
+        </div>
+        <div class="modal-pad">
+            <p class="hint-text">{{ t('pages.dashboard.vision.hint', 'Select multiple vision models. They are tried in this order when a request fails, times out, or returns an unusable result. Saving also updates AstrBot plugin configuration.') }}</p>
+            <p v-if="visionProvidersLoading" class="hint-text" role="status">{{ t('pages.dashboard.vision.loading', 'Loading models…') }}</p>
+            <p v-if="visionProvidersError" class="reanalyze-note error" role="alert">{{ visionProvidersError }}</p>
+            <template v-if="visionProvidersLoaded">
+                <div class="vision-order-heading">
+                    <h3>{{ t('pages.dashboard.vision.order', 'Attempt order') }}</h3>
+                    <button type="button" class="codex-btn" :disabled="visionProvidersSaving || !visionProviderIds.length"
+                        @click="useAutomaticVisionProviders">{{ t('pages.dashboard.vision.automatic', 'Automatic selection') }}</button>
+                </div>
+                <p v-if="!visionProviderIds.length" class="reanalyze-note">{{ t('pages.dashboard.vision.auto_hint', 'No explicit selection: use AstrBot’s global image-caption model, the current conversation model, then enabled models that declare image support. Recognition works without opening this page.') }}</p>
+                <ol v-else class="vision-provider-order">
+                    <li v-for="(id, index) in visionProviderIds" :key="id" class="vision-provider-row">
+                        <span class="vision-provider-rank">{{ index + 1 }}</span>
+                        <div class="vision-provider-label">
+                            <strong>{{ visionProviderName(id) }}</strong>
+                            <small v-if="visionProviderName(id) !== id">{{ id }}</small>
+                            <small v-if="!isVisionProviderAvailable(id)">{{ t('pages.dashboard.vision.unavailable', 'Currently unavailable; kept in configuration.') }}</small>
+                        </div>
+                        <div class="vision-provider-controls">
+                            <button type="button" class="codex-btn" :disabled="visionProvidersSaving || index === 0" @click="moveVisionProvider(index, -1)"
+                                :aria-label="t('pages.dashboard.vision.move_up', 'Move up')" :title="t('pages.dashboard.vision.move_up', 'Move up')">↑</button>
+                            <button type="button" class="codex-btn" :disabled="visionProvidersSaving || index === visionProviderIds.length - 1" @click="moveVisionProvider(index, 1)"
+                                :aria-label="t('pages.dashboard.vision.move_down', 'Move down')" :title="t('pages.dashboard.vision.move_down', 'Move down')">↓</button>
+                            <button type="button" class="codex-btn" :disabled="visionProvidersSaving" @click="toggleVisionProvider(id)"
+                                :aria-label="t('pages.dashboard.vision.remove', 'Remove model')" :title="t('pages.dashboard.vision.remove', 'Remove model')">×</button>
+                        </div>
+                    </li>
+                </ol>
+                <h3 class="vision-model-heading">{{ t('pages.dashboard.vision.available', 'Available models') }}</h3>
+                <div class="vision-provider-options">
+                    <label v-for="provider in visionProviders" :key="provider.id" class="vision-provider-option">
+                        <input type="checkbox" :checked="visionProviderIds.includes(provider.id)" :disabled="visionProvidersSaving"
+                            @change="toggleVisionProvider(provider.id)">
+                        <span>{{ provider.name || provider.id }}<small v-if="provider.name && provider.name !== provider.id">{{ provider.id }}</small></span>
+                    </label>
+                    <p v-if="!visionProviders.length" class="hint-text">{{ t('pages.dashboard.vision.no_models', 'No model providers are available. Add a vision-capable provider in AstrBot LLM settings.') }}</p>
+                </div>
+            </template>
+            <div class="modal-footer-actions vision-footer">
+                <button type="button" class="codex-btn" :disabled="visionProvidersSaving" @click="closeVisionProviders">{{ t('pages.dashboard.actions.cancel', 'Cancel') }}</button>
+                <button v-if="!visionProvidersLoaded && !visionProvidersLoading" type="button" class="codex-btn" @click="openVisionProviders">{{ t('pages.dashboard.vision.retry', 'Reload') }}</button>
+                <button type="button" class="codex-btn primary" :disabled="!visionProvidersLoaded || visionProvidersSaving" @click="saveVisionProviders">{{ visionProvidersSaving ? t('pages.dashboard.vision.saving', 'Saving…') : t('pages.dashboard.vision.save', 'Save order') }}</button>
             </div>
         </div>
     </div>

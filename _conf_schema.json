@@ -292,10 +292,25 @@
     "invisible": true
   },
   "vision_provider_id": {
-    "description": "视觉模型",
+    "description": "首选视觉模型",
     "type": "string",
-    "hint": "用于图片分类。留空则自动使用 AstrBot 全局配置的图片描述模型（default_image_caption_provider_id）。",
+    "default": "",
+    "hint": "兼容原来的单模型配置，优先尝试此模型，失败后依次尝试下方的视觉模型列表。两项都留空时自动使用全局图片描述模型、当前会话模型及支持图片的模型，无需打开插件 WebUI。",
     "_special": "select_provider"
+  },
+  "vision_provider_ids": {
+    "description": "视觉模型回退列表",
+    "type": "list",
+    "default": [],
+    "hint": "可多选支持图片的模型，按列表顺序尝试；首选模型留空时从这里的第一项开始。请求报错、超时、空响应或结果无法解析时自动换下一个。可在插件 WebUI 的「视觉模型」中调整顺序。与首选模型重复的项只尝试一次。",
+    "_special": "select_providers"
+  },
+  "vision_timeout_seconds": {
+    "description": "视觉模型请求超时（秒）",
+    "type": "float",
+    "default": 60.0,
+    "hint": "单个模型超过此时间仍未响应时切换到下一个模型。取值范围 1～600 秒。",
+    "slider": {"min": 1, "max": 600, "step": 1}
   },
   "enable_embedding_search": {
     "description": "启用嵌入向量检索",

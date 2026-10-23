@@ -65,10 +65,20 @@ No TypeSafe account or additional API key is required.
 
 | Setting | Default | Description |
 |:---|:---|:---|
-| Vision model | `""` | Empty uses the global image-captioning model |
+| Vision model (`vision_provider_id`) | `""` | Optional primary; existing selections remain valid. Failures move to the fallback list |
+| Fallback vision models (`vision_provider_ids`) | `[]` | Multi-select image-capable models; tried in the saved list order |
+| Vision request timeout (`vision_timeout_seconds`) | `60` | Seconds allowed for each actual model request, range 1–600; timeout moves to the next model |
 | Enable embedding search | `true` | Vector similarity; falls back to BM25 when off or unavailable |
 | Embedding provider ID | `""` | Empty uses the first embedding provider |
 | Similarity weight preset | `balanced` | balanced / keyword-first / semantic-first / strict, instead of hand-tuning five weights |
+
+Vision analysis works without initializing the plugin WebUI. Model selection follows these rules:
+
+- With a primary or fallback list configured: try the primary, then the fallback list in order, deduplicating IDs. Only the selected models are used.
+- With both empty: try AstrBot's global image-captioning model, the current chat model (the default chat model for background analysis), then other enabled chat models explicitly marked as image-capable, deduplicating IDs.
+- Automatic discovery only includes enabled models explicitly marked as image-capable. Selected primary / fallback models and framework defaults are actually attempted; errors from missing, disabled or text-only models also enter the fallback flow.
+
+Request errors, empty responses and invalid results such as missing category / description use the current model's existing bounded retry budget before moving to the next model. A timeout moves immediately to the next model without waiting again on the same one. The first valid classification ends the round. A valid content-moderation rejection is respected without trying to bypass it through another model. Failure of every model records the real error instead of inventing tags; batch tasks still observe their existing transient-error retry settings. Fallback models also receive the image and analysis prompt, so arrange them according to your needs.
 
 ## Batch analysis
 

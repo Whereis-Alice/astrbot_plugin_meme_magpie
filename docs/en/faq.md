@@ -9,7 +9,7 @@ Not technically. The two plugins use different data directories, command prefixe
 `apply` only reads from the old directory and writes to the new one — not a byte of the original changes, so you can always fall back. Only `move` relocates files, and that one is irreversible.
 
 **Images are being collected but have no tags. Why?**
-Almost always a vision-model problem. Check the AstrBot log for errors and confirm the vision model setting or global captioning model works. Untagged images already in the library can be fixed with batch re-analysis.
+Check the per-model errors in AstrBot's log and confirm the models accept image input. With both vision settings empty, the plugin automatically tries the global image-captioning model, the current chat / default model and other models explicitly marked as image-capable, without opening the plugin WebUI first. You can also multi-select fallback vision models so a failed request moves to the next model. Fix existing untagged entries with batch re-analysis. See [Models and retrieval](configuration.md#models-and-retrieval).
 
 **Batch analysis keeps returning 429.**
 Drop concurrency to 1 and RPM to 6–10. If it still throttles, your quota is genuinely tight: use the item limit to process a few dozen at a time.

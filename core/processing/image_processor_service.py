@@ -228,6 +228,7 @@ class ImageProcessorService:
         categories=None,
         content_filtration=None,
         vision_provider_id=None,
+        vision_provider_ids=None,
         emoji_classification_prompt=None,
         emoji_classification_with_filter_prompt=None,
     ):
@@ -247,6 +248,8 @@ class ImageProcessorService:
         if vision_provider_id is not None:
             self.vision_provider_id = str(vision_provider_id or "").strip()
             self._vlm_call_service.vision_provider_id = self.vision_provider_id
+        if vision_provider_ids is not None:
+            self._vlm_call_service.vision_provider_ids = list(vision_provider_ids)
         if emoji_classification_prompt is not None:
             self.emoji_classification_prompt = emoji_classification_prompt
         if emoji_classification_with_filter_prompt is not None:
@@ -567,7 +570,7 @@ class ImageProcessorService:
             # 3. 缓存检查（锁外；缓存带 VLM model_sig，换模型即失效）
             #    skip_vlm 时根本不靠视觉模型，无需查缓存也无需探测 provider。
             known_sig = PromptManager.known_facts_signature(llm_hints)
-            model_sig = "" if skip_vlm else str(await self._resolve_vision_provider(event) or "")
+            model_sig = "" if skip_vlm else await self._resolve_vision_model_signature(event)
             if model_sig and known_sig:
                 # 已知信息会写进提示词、改变模型输出，必须与「没有已知信息」的结果分开缓存
                 model_sig = f"{model_sig}#known:{known_sig}"
@@ -985,7 +988,8 @@ class ImageProcessorService:
             raise
         except Exception as e:
             logger.error(f"图片分类失败 [{file_path}]: {e}")
-            return "", [], "", "", [], "", []
+            # A transport failure must never become a successful, cached empty classification.
+            raise
 
     def _normalize_category(self, raw: str, *, fallback_other: bool = True) -> str:
         """将 VLM 返回的分类文本规范化为有效分类名。
@@ -1168,6 +1172,9 @@ class ImageProcessorService:
     async def _resolve_vision_provider(self, event=None) -> str | None:
         """缓存签名和实际请求共用同一个、实时读取框架默认值的解析器。"""
         return await self._vlm_call_service._resolve_vision_provider(event)
+
+    async def _resolve_vision_model_signature(self, event=None) -> str:
+        return await self._vlm_call_service._resolve_vision_model_signature(event)
 
     # ── 渲染门面方法（委托给 ImageRenderService）────────────────
 

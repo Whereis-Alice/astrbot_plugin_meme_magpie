@@ -588,6 +588,94 @@ createApp({
         const themePickerOpen = ref(false);
         const closeThemePicker = () => { themePickerOpen.value = false; };
 
+        const visionProvidersOpen = ref(false);
+        const visionProvidersLoading = ref(false);
+        const visionProvidersSaving = ref(false);
+        const visionProvidersLoaded = ref(false);
+        const visionProvidersError = ref('');
+        const visionProviders = ref([]);
+        const visionProviderIds = ref([]);
+        let visionProviderRequestRevision = 0;
+        const normalizeProviderIds = (values) => [...new Set(
+            values.filter((value) => typeof value === 'string').map((value) => value.trim()).filter(Boolean),
+        )];
+        const visionProviderName = (id) => (
+            visionProviders.value.find((provider) => provider.id === id)?.name || id
+        );
+        const isVisionProviderAvailable = (id) => visionProviders.value.some((provider) => provider.id === id);
+        const closeVisionProviders = () => {
+            if (visionProvidersSaving.value) return;
+            visionProviderRequestRevision += 1;
+            visionProvidersOpen.value = false;
+        };
+        const openVisionProviders = async () => {
+            const revision = ++visionProviderRequestRevision;
+            visionProvidersOpen.value = true;
+            visionProvidersLoading.value = true;
+            visionProvidersLoaded.value = false;
+            visionProvidersError.value = '';
+            try {
+                const data = await bridge.apiGet('vision-providers');
+                if (revision !== visionProviderRequestRevision) return;
+                if (!data || data.success === false) throw new Error(data?.error || '');
+                visionProviders.value = Array.isArray(data.providers) ? data.providers : [];
+                // 只编辑显式配置，自动发现的候选模型不应被保存成固定选择。
+                visionProviderIds.value = normalizeProviderIds([
+                    data.vision_provider_id,
+                    ...(Array.isArray(data.vision_provider_ids) ? data.vision_provider_ids : []),
+                ]);
+                visionProvidersLoaded.value = true;
+            } catch (error) {
+                if (revision !== visionProviderRequestRevision) return;
+                visionProvidersError.value = error.message
+                    || t('pages.dashboard.vision.load_failed', 'Unable to load vision models.');
+            } finally {
+                if (revision === visionProviderRequestRevision) visionProvidersLoading.value = false;
+            }
+        };
+        const toggleVisionProvider = (id) => {
+            if (visionProvidersLoading.value || visionProvidersSaving.value) return;
+            touchModal('visionProviders');
+            visionProviderIds.value = visionProviderIds.value.includes(id)
+                ? visionProviderIds.value.filter((value) => value !== id)
+                : [...visionProviderIds.value, id];
+        };
+        const moveVisionProvider = (index, direction) => {
+            const destination = index + direction;
+            if (visionProvidersSaving.value || destination < 0 || destination >= visionProviderIds.value.length) return;
+            touchModal('visionProviders');
+            const reordered = [...visionProviderIds.value];
+            [reordered[index], reordered[destination]] = [reordered[destination], reordered[index]];
+            visionProviderIds.value = reordered;
+        };
+        const useAutomaticVisionProviders = () => {
+            if (visionProvidersLoading.value || visionProvidersSaving.value) return;
+            touchModal('visionProviders');
+            visionProviderIds.value = [];
+        };
+        const saveVisionProviders = async () => {
+            if (!visionProvidersLoaded.value || visionProvidersSaving.value) return;
+            visionProvidersSaving.value = true;
+            visionProvidersError.value = '';
+            try {
+                const ids = normalizeProviderIds(visionProviderIds.value);
+                const data = await bridge.apiPost('vision-providers', {
+                    vision_provider_id: ids[0] || '',
+                    vision_provider_ids: ids.slice(1),
+                });
+                if (!data || data.success === false) throw new Error(data?.error || '');
+                releaseModal('visionProviders');
+                visionProvidersOpen.value = false;
+                showAlert(t('pages.dashboard.vision.saved', 'Vision model order saved.'), 'success');
+            } catch (error) {
+                visionProvidersError.value = error.message
+                    || t('pages.dashboard.vision.save_failed', 'Unable to save vision models.');
+            } finally {
+                visionProvidersSaving.value = false;
+            }
+        };
+        modalBusyExtra.visionProviders = () => visionProvidersSaving.value;
+
         const viewMode = ref(readStored(VIEW_STORAGE_KEY) === 'list' ? 'list' : 'grid');
         const setViewMode = (mode, persist = true) => {
             viewMode.value = mode === 'list' ? 'list' : 'grid';
@@ -1406,6 +1494,7 @@ createApp({
             confirmOpen.value || promptOpen.value || uploadOpen.value || batchUploadOpen.value
             || emotionsOpen.value || batchMoveOpen.value || batchScopeOpen.value || pendingEditOpen.value
             || batchCharacterOpen.value || batchWorkOpen.value || charactersOpen.value
+            || visionProvidersOpen.value
         );
 
         const handleKeydown = (e) => {
@@ -3953,6 +4042,7 @@ createApp({
             { key: 'missingDesc', open: missingDescOpen, close: closeMissingDescModal },
             { key: 'source', open: sourceOpen, close: closeSourceModal },
             { key: 'export', open: exportOpen, close: closeExportModal },
+            { key: 'visionProviders', open: visionProvidersOpen, close: closeVisionProviders },
         ];
         // 每次重新打开都按「干净」算，别让上一次的输入痕迹一直把窗口锁着
         guardedModals.forEach((modal) => {
@@ -4008,6 +4098,21 @@ createApp({
         });
 
         return {
+            visionProvidersOpen,
+            visionProvidersLoading,
+            visionProvidersSaving,
+            visionProvidersLoaded,
+            visionProvidersError,
+            visionProviders,
+            visionProviderIds,
+            openVisionProviders,
+            closeVisionProviders,
+            saveVisionProviders,
+            toggleVisionProvider,
+            moveVisionProvider,
+            useAutomaticVisionProviders,
+            visionProviderName,
+            isVisionProviderAvailable,
             activeSection,
             sidebarOpen,
             switchSection,

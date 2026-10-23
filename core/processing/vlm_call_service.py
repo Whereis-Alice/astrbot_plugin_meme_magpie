@@ -1,6 +1,7 @@
 """VLM 调用服务：负责调用视觉模型分析图片。"""
 
 import asyncio
+import json
 import math
 import os
 import tempfile
@@ -125,41 +126,100 @@ class VLMCallService:
             if self.plugin_config
             else ""
         )
+        self.vision_provider_ids = list(
+            getattr(self.plugin_config, "vision_provider_ids", []) or []
+        )
+
+    @staticmethod
+    def _provider_id(provider: Any) -> str:
+        """Read an instantiated AstrBot provider ID without exposing its config."""
+        try:
+            return str(provider.meta().id or "").strip()
+        except Exception:
+            return ""
+
+    def _available_vision_providers(
+        self, *, explicit_image_only: bool = False
+    ) -> list[dict[str, str]]:
+        """Enabled chat providers; unknown modalities remain manually selectable."""
+        context = getattr(self.plugin, "context", None)
+        getter = getattr(context, "get_all_providers", None)
+        if not callable(getter):
+            return []
+        try:
+            providers = getter()
+        except Exception as exc:
+            logger.debug(f"读取视觉模型列表失败: {exc}")
+            return []
+        available = []
+        for provider in providers:
+            config = getattr(provider, "provider_config", {}) or {}
+            modalities = config.get("modalities") or []
+            if (modalities and "image" not in modalities) or (
+                explicit_image_only and "image" not in modalities
+            ):
+                continue
+            provider_id = self._provider_id(provider)
+            if provider_id:
+                available.append({"id": provider_id, "name": provider_id})
+        return available
+
+    async def _resolve_vision_providers(self, event=None) -> list[str]:
+        """Resolve an ordered chain, using AstrBot defaults only in automatic mode."""
+        candidates: list[str] = []
+
+        def add(value: Any) -> None:
+            if not isinstance(value, str):
+                return
+            provider_id = value.strip()
+            if provider_id and provider_id not in candidates:
+                candidates.append(provider_id)
+
+        add(self.vision_provider_id)
+        for provider_id in self.vision_provider_ids:
+            add(provider_id)
+        if candidates:
+            return candidates
+
+        context = getattr(self.plugin, "context", None)
+        try:
+            config = context.get_config()
+            add(
+                (config.get("provider_settings", {}) or {}).get(
+                    "default_image_caption_provider_id"
+                )
+            )
+        except Exception as exc:
+            logger.debug(f"读取框架视觉模型配置失败: {exc}")
+
+        umo = getattr(event, "unified_msg_origin", None)
+        try:
+            # The asynchronous API also works without an event, e.g. batch imports.
+            getter = getattr(context, "get_using_provider_async", None)
+            if callable(getter):
+                add(self._provider_id(await getter(umo)))
+            elif umo and callable(getattr(context, "get_current_chat_provider_id", None)):
+                add(await context.get_current_chat_provider_id(umo))
+            elif callable(getattr(context, "get_using_provider", None)):
+                add(self._provider_id(context.get_using_provider(umo)))
+        except Exception as exc:
+            logger.debug(f"读取当前会话/默认模型失败: {exc}")
+
+        for provider in self._available_vision_providers(explicit_image_only=True):
+            add(provider["id"])
+        return candidates
 
     async def _resolve_vision_provider(self, event=None) -> str | None:
-        """统一的视觉模型 provider 解析逻辑。
+        """Compatibility accessor for callers that only need the first candidate."""
+        providers = await self._resolve_vision_providers(event)
+        return providers[0] if providers else None
 
-        优先级：
-        1. 插件配置的 vision_provider_id
-        2. AstrBot 框架配置的 default_image_caption_provider_id
-        """
-        if self.vision_provider_id:
-            return self.vision_provider_id
-
-        # Framework settings can change independently of plugin update_config.
-        # Read the current local configuration on every resolution, including
-        # after a previous lookup found no default provider.
-        framework_vlm_id = ""
-        try:
-            if hasattr(self.plugin, "context"):
-                astrbot_config = self.plugin.context.get_config()
-                provider_settings = astrbot_config.get("provider_settings", {})
-                framework_vlm_id = str(
-                    provider_settings.get("default_image_caption_provider_id", "") or ""
-                ).strip()
-        except Exception as e:
-            logger.debug(f"读取框架视觉模型配置失败: {e}")
-
-        if framework_vlm_id:
-            logger.info(f"使用框架全局图片描述模型: {framework_vlm_id}")
-            return framework_vlm_id
-
-        logger.warning(
-            "未配置视觉模型，无法进行图片分类。"
-            "请在插件配置中设置 vision_provider_id，"
-            "或在 AstrBot 全局配置中设置 default_image_caption_provider_id。"
-        )
-        return None
+    async def _resolve_vision_model_signature(self, event=None) -> str:
+        """Changing a fallback or its priority invalidates classification caches."""
+        providers = await self._resolve_vision_providers(event)
+        if len(providers) == 1:
+            return providers[0]
+        return json.dumps(providers, ensure_ascii=False) if providers else ""
 
     async def _call_vision_model(
         self,
@@ -200,11 +260,11 @@ class VLMCallService:
             raise FileNotFoundError(f"图片文件不存在: {img_path}")
 
         # 解析 provider
-        provider_id = await self._resolve_vision_provider(event)
-        if not provider_id:
+        provider_ids = await self._resolve_vision_providers(event)
+        if not provider_ids:
             raise ValueError(
-                "未配置视觉模型(vision_provider_id)，无法进行图片分析。"
-                "请在插件配置或 AstrBot 全局配置中设置。"
+                "未找到可用视觉模型，无法进行图片分析。"
+                "请在 AstrBot 中添加支持图片的模型，或在插件配置中选择视觉模型及回退列表。"
             )
 
         # 预处理：动图抽帧拼接、上游不收的格式转 PNG（可能产生多个临时文件）
@@ -222,10 +282,28 @@ class VLMCallService:
             if montage is not None:
                 actual_prompt = self._montage_prompt(montage) + prompt
 
-            return await self._do_vlm_call(
-                provider_id, actual_prompt, resolved_img_path, temp_files=temp_files,
-                response_validator=response_validator,
+            failures: list[str] = []
+            last_error: Exception | None = None
+            for position, provider_id in enumerate(provider_ids):
+                try:
+                    return await self._do_vlm_call(
+                        provider_id, actual_prompt, resolved_img_path, temp_files=temp_files,
+                        response_validator=response_validator,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    failures.append(f"{provider_id}: {exc}")
+                    if position + 1 < len(provider_ids):
+                        logger.warning(f"视觉模型 {provider_id} 失败，回退到 {provider_ids[position + 1]}: {exc}")
+            if len(provider_ids) == 1:
+                assert last_error is not None
+                raise last_error
+            error_type = (
+                ClassificationResponseError
+                if isinstance(last_error, ClassificationResponseError)
+                else RuntimeError
             )
+            raise error_type("所有视觉模型均失败: " + "; ".join(failures)) from last_error
         finally:
             # 清理临时文件（预处理产出 + 格式自救产出）
             for temp_file in temp_files:
@@ -760,10 +838,18 @@ class VLMCallService:
                     f"调用VLM (尝试 {attempt + 1}/{max_retries}), "
                     f"provider={provider_id}, 图片={file_url}"
                 )
-                result = await self._llm_generate_with_image_compat(
-                    provider_id=provider_id,
-                    prompt=prompt,
-                    file_url=file_url,
+                try:
+                    timeout = float(getattr(self.plugin_config, "vision_timeout_seconds", 60.0))
+                except (TypeError, ValueError, OverflowError):
+                    timeout = 60.0
+                timeout = min(600.0, timeout) if math.isfinite(timeout) and timeout > 0 else 60.0
+                result = await asyncio.wait_for(
+                    self._llm_generate_with_image_compat(
+                        provider_id=provider_id,
+                        prompt=prompt,
+                        file_url=file_url,
+                    ),
+                    timeout=timeout,
                 )
 
                 # LLMResponse.completion_text 是 @property，自动处理 result_chain
@@ -784,6 +870,8 @@ class VLMCallService:
             except Exception as e:
                 last_error = e
                 error_msg = str(e)
+                if isinstance(e, TimeoutError):
+                    raise TimeoutError(f"视觉模型 {provider_id} 请求超时（{timeout:g} 秒）") from e
 
                 # 上游明确表示「这个图片格式我不收」：本地转码一次再试。
                 # 这类错误重试多少次都是同样结果，而这里的内部重试不经过

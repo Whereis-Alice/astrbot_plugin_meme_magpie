@@ -22,6 +22,7 @@ from astrbot.api import logger
 
 from .core.maintenance.backup_service import BackupService
 from .core.processing.analysis_throttle import AnalysisThrottle, build_analysis_throttle
+from .core.processing.vlm_call_service import VLMCallService
 from .core.sources.archive_upload import ArchiveUploadService
 from .core.sources.models import ExternalSourceError, ExternalSourceSecurityError
 from .core.util.blacklist import add_blacklist_hash
@@ -122,6 +123,7 @@ class PluginAPI:
             ("/emotions", "handle_get_emotions", ["GET"]),
             ("/health", "handle_health_check", ["GET"]),
             ("/prefs", "handle_prefs", ["GET", "POST"]),
+            ("/vision-providers", "handle_vision_providers", ["GET", "POST"]),
             ("/sources", "handle_sources", ["GET", "POST"]),
             ("/sources/inspect", "handle_source_inspect", ["POST"]),
             ("/sources/import", "handle_source_import", ["POST"]),
@@ -1135,6 +1137,54 @@ class PluginAPI:
             payload = {}
         current = await self._update_dashboard_prefs(payload)
         return jsonify({"success": True, **current})
+
+    async def handle_vision_providers(self):
+        """Manage the same ordered vision chain exposed in AstrBot plugin settings."""
+        config = self.plugin.plugin_config
+        if request.method == "POST":
+            try:
+                payload = await request.get_json()
+            except Exception:
+                return jsonify({"success": False, "error": "请求必须是 JSON 对象"}), 400
+            if not isinstance(payload, dict):
+                return jsonify({"success": False, "error": "请求必须是 JSON 对象"}), 400
+            primary = payload.get("vision_provider_id", "")
+            fallbacks = payload.get("vision_provider_ids", [])
+            if not isinstance(primary, str) or not isinstance(fallbacks, list) or not all(isinstance(item, str) for item in fallbacks):
+                return jsonify({"success": False, "error": "视觉模型必须是字符串，回退模型必须是字符串列表"}), 400
+            chain = list(dict.fromkeys(item.strip() for item in [primary, *fallbacks] if item.strip()))
+            updates = {"vision_provider_id": chain[0] if chain else "", "vision_provider_ids": chain[1:]}
+            previous = {
+                "vision_provider_id": config.vision_provider_id,
+                "vision_provider_ids": list(config.vision_provider_ids),
+            }
+            try:
+                persist = getattr(config, "update_config", None)
+                if callable(persist):
+                    saved = persist(updates)
+                    if inspect.isawaitable(saved):
+                        saved = await saved
+                    if saved is False:
+                        for key, value in previous.items():
+                            setattr(config, key, value)
+                        raise RuntimeError("视觉模型配置无法持久化")
+                result = self.plugin.update_config(updates)
+                if inspect.isawaitable(result):
+                    await result
+                config = self.plugin.plugin_config
+                if config.vision_provider_id != updates["vision_provider_id"] or list(config.vision_provider_ids) != updates["vision_provider_ids"]:
+                    raise RuntimeError("视觉模型配置未保存")
+            except Exception as exc:
+                logger.error(f"保存视觉模型配置失败: {exc}")
+                return jsonify({"success": False, "error": "保存视觉模型配置失败，请查看日志"}), 500
+        service = VLMCallService(self.plugin)
+        return jsonify({
+            "success": True,
+            "providers": service._available_vision_providers(),
+            "vision_provider_id": getattr(config, "vision_provider_id", ""),
+            "vision_provider_ids": list(getattr(config, "vision_provider_ids", []) or []),
+            "effective_provider_ids": await service._resolve_vision_providers(),
+        })
 
     # ── External sources（外部表情包源）───────────────────────
 

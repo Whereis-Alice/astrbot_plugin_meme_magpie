@@ -178,6 +178,136 @@ h2 {
     justify-content: flex-end;
 }
 
+.codex-btn.vision-settings-button {
+    padding: 7px 10px;
+    font-family: inherit;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.vision-settings-icon {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .codex-btn.vision-settings-button {
+        width: 34px;
+        padding: 6px;
+    }
+    .vision-settings-label {
+        display: none;
+    }
+    .vision-settings-icon {
+        display: block;
+        width: 20px;
+        height: 20px;
+    }
+}
+
+.vision-order-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 18px 0 10px;
+}
+
+.vision-order-heading h3,
+.vision-model-heading {
+    margin: 0;
+    font-family: inherit;
+    font-size: 0.9rem;
+}
+
+.vision-provider-order {
+    display: grid;
+    gap: 8px;
+    margin: 0 0 18px;
+    padding: 0;
+    list-style: none;
+}
+
+.vision-provider-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--glass-border);
+    background: var(--bg-main);
+}
+
+.vision-provider-rank {
+    flex: 0 0 24px;
+    text-align: center;
+    color: var(--gold-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.vision-provider-label {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.vision-provider-label strong {
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+
+.vision-provider-label small,
+.vision-provider-option small {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+
+.vision-provider-controls {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+}
+
+.vision-provider-controls .codex-btn {
+    min-width: 30px;
+    padding: 6px 8px;
+    font-family: inherit;
+}
+
+.vision-provider-options {
+    display: grid;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    margin-top: 10px;
+}
+
+.vision-provider-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--glass-border);
+    color: var(--text-main);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+}
+
+.vision-provider-option input {
+    flex: 0 0 auto;
+    accent-color: var(--gold-primary);
+}
+
+.vision-footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+}
+
 .stats-bar {
     display: flex;
     gap: 4px;

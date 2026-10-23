@@ -290,7 +290,9 @@ class CommandHandler:
         capacity_auto = bool(getattr(self.plugin.plugin_config, "capacity_auto_cleanup", False))
 
         # 添加视觉模型信息
-        vision_model = self.plugin._load_vision_provider_id() or "未设置（将使用当前会话默认模型）"
+        cfg = self.plugin.plugin_config
+        vision_models = cfg.get_vision_provider_ids() if hasattr(cfg, "get_vision_provider_ids") else [self.plugin._load_vision_provider_id()]
+        vision_model = " → ".join(p for p in vision_models if p) or "自动（全局图片模型 / 当前会话或默认模型 / 可用视觉模型）"
 
         # 基础状态信息
         steal_mode = self.plugin.plugin_config.steal_mode

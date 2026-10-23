@@ -142,7 +142,10 @@
     "auto_meme_delivery_mode": {
       "description": "自动表情的投递方式",
       "hint": "separate（默认）：表情单独发一条消息，和以往行为一致。attach：把表情追加到机器人这条回复的消息链末尾，让分段回复类插件（如 outputpro_split）能识别并统一编排。attach 需要在回复发出前把图选好，因此会让回复稍慢；超时或选图失败会自动回退成 separate。",
-      "labels": ["单独发一条消息", "并入本条回复"]
+      "labels": [
+        "单独发一条消息",
+        "并入本条回复"
+      ]
     },
     "auto_meme_attach_timeout": {
       "description": "attach 模式选图超时（秒）",
@@ -177,8 +180,16 @@
       "hint": ""
     },
     "vision_provider_id": {
-      "description": "视觉模型",
-      "hint": "用于图片分类。留空则自动使用 AstrBot 全局配置的图片描述模型（default_image_caption_provider_id）。"
+      "description": "首选视觉模型",
+      "hint": "兼容原来的单模型配置，优先尝试此模型，失败后依次尝试视觉模型回退列表。两项都留空时自动使用全局图片描述模型、当前会话模型及支持图片的模型，无需打开插件 WebUI。"
+    },
+    "vision_provider_ids": {
+      "description": "视觉模型回退列表",
+      "hint": "可多选支持图片的模型，按列表顺序尝试；首选模型留空时从这里的第一项开始。请求报错、超时、空响应或结果无法解析时自动换下一个。可在插件 WebUI 的「视觉模型」中调整顺序。与首选模型重复的项只尝试一次。"
+    },
+    "vision_timeout_seconds": {
+      "description": "视觉模型请求超时（秒）",
+      "hint": "单个模型超过此时间仍未响应时切换到下一个模型。取值范围 1～600 秒。"
     },
     "enable_embedding_search": {
       "description": "启用嵌入向量检索",
@@ -866,6 +877,26 @@
         "pending_restored": "恢复待审核",
         "pending_skipped": "待审核池已满跳过",
         "blacklist_restored": "恢复黑名单"
+      },
+      "vision": {
+        "title": "视觉模型",
+        "hint": "可选择多个支持图片的模型。请求报错、超时或结果不可用时按下方顺序回退。保存后会同步更新 AstrBot 插件配置。",
+        "loading": "正在加载模型…",
+        "order": "尝试顺序",
+        "automatic": "自动选择",
+        "auto_hint": "未指定模型时，自动依次使用 AstrBot 全局图片描述模型、当前会话模型及声明支持图片的已启用模型。无需打开本页面也能识别。",
+        "unavailable": "当前不可用，已保留配置。",
+        "move_up": "上移",
+        "move_down": "下移",
+        "remove": "移除模型",
+        "available": "可选模型",
+        "no_models": "暂无可用模型，请先在 AstrBot 的 LLM 设置中添加支持图片的模型。",
+        "retry": "重新加载",
+        "saving": "正在保存…",
+        "save": "保存顺序",
+        "saved": "视觉模型顺序已保存。",
+        "load_failed": "无法加载视觉模型。",
+        "save_failed": "无法保存视觉模型。"
       }
     }
   }

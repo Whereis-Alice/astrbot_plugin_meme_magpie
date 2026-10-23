@@ -53,12 +53,11 @@ This plugin is a fork of [nagatoquin33/astrbot_plugin_stealer](https://github.co
 
 ## Getting started
 
-### 1. Configure a vision model first
+### 1. Make sure a vision-capable model is available
 
-The plugin needs a VLM to understand images; **without one it is essentially non-functional**. Either:
+The plugin needs a model that accepts images. **Opening the plugin WebUI or choosing a separate model is optional**: with empty model settings, it tries AstrBot's global image-captioning model, the current chat / default model, and other chat models explicitly marked as image-capable.
 
-- configure an image-captioning model globally in AstrBot and the plugin will use it, or
-- point the plugin's own "vision model" setting (`vision_provider_id`) at a provider.
+To choose specific models, set "Vision model" (`vision_provider_id`) and multi-select "Fallback vision models" (`vision_provider_ids`) on AstrBot's plugin config page. If the primary fails, the plugin tries the list in order. See [Models and retrieval](docs/en/configuration.md#models-and-retrieval).
 
 An embedding model is optional: it makes retrieval sharper, and without one the plugin silently falls back to BM25 keyword search.
 
@@ -120,7 +119,7 @@ Everything is edited on the AstrBot plugin config page. The knobs people actuall
 
 | Setting | Default | Notes |
 |:---|:---|:---|
-| Vision model | empty | Empty means AstrBot's global image-captioning model |
+| Vision model / fallback vision models | empty / `[]` | Tries models in order; with both empty, uses AstrBot's configured image / chat models automatically |
 | Enable collection | `false` | Master switch for collecting, same as `/mp on` |
 | Collect probability | `0.3` | Chance each image is taken in probability mode |
 | Require review | `true` | Turn it off and images skip the review queue |
@@ -176,7 +175,7 @@ Back it up by archiving that one directory.
 
 ## Notes
 
-- **A vision model is mandatory**; without one, nothing that involves recognition works.
+- **AstrBot needs a model that accepts image input**; the plugin can choose it automatically or use your primary and fallback selections.
 - "Max stickers" is a hard cap that really deletes files. Read [Library capacity cap](docs/en/configuration.md#library-capacity-cap) before lowering it.
 - Deleting a category in the WebUI deletes the image files inside it.
 - With "send as GIF" enabled, files already in GIF format pass through untouched; other animations are converted. Peak memory is frame- and pixel-budget-capped but still higher than sending the original file — leave it off if memory is tight.

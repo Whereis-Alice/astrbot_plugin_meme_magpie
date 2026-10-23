@@ -97,6 +97,8 @@ class PluginConfig(BaseModel):
 
     # === 模型配置 ===
     vision_provider_id: str = ""
+    vision_provider_ids: list[str] = []  # 按顺序回退；旧单模型字段仍优先
+    vision_timeout_seconds: float = 60.0  # 每个模型的请求超时，避免阻塞回退
 
     # === LLM 主动偷图时的参数优先级 ===
     # 主对话 LLM 往往已经从上下文知道“群里在聊哪部番、这是谁”，
@@ -459,6 +461,18 @@ class PluginConfig(BaseModel):
     def get_vlm_categories(self) -> list[str]:
         """给 VLM 的分类列表，不含 other。"""
         return [key for key in self.get_categories() if key != "other"]
+
+    def get_vision_provider_ids(self) -> list[str]:
+        """返回显式配置的视觉模型顺序，兼容旧单选并去掉空白与重复项。"""
+        candidates = [self.vision_provider_id, *(self.vision_provider_ids or [])]
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in candidates:
+            provider_id = str(value or "").strip()
+            if provider_id and provider_id not in seen:
+                seen.add(provider_id)
+                result.append(provider_id)
+        return result
 
     def closest_category(self, raw: str) -> str:
         """把无法识别的分类名收到最接近的已有情绪类，不再使用 other。"""

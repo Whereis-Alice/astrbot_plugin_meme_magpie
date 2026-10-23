@@ -142,7 +142,10 @@
     "auto_meme_delivery_mode": {
       "description": "Auto sticker delivery mode",
       "hint": "separate (default): the sticker is sent as its own message, same as before. attach: the sticker is appended to the message chain of the bot's reply, so reply-splitting plugins (such as outputpro_split) can see it and arrange it together with the text. attach has to pick the image before the reply goes out, which makes the reply slightly slower; on timeout or failure it falls back to separate automatically.",
-      "labels": ["Separate message", "Inside this reply"]
+      "labels": [
+        "Separate message",
+        "Inside this reply"
+      ]
     },
     "auto_meme_attach_timeout": {
       "description": "attach mode pick timeout (seconds)",
@@ -177,8 +180,16 @@
       "hint": ""
     },
     "vision_provider_id": {
-      "description": "Vision model",
-      "hint": "Used for image classification. Leave blank to auto-use AstrBot's global default_image_caption_provider_id."
+      "description": "Primary vision model",
+      "hint": "Preserves the original single-model setting. This model is tried first, followed by the fallback list. When both are empty, automatically use the global image-caption model, current conversation model, and image-capable models without opening the plugin WebUI."
+    },
+    "vision_provider_ids": {
+      "description": "Vision model fallback list",
+      "hint": "Select multiple image-capable models to try in list order. If the primary model is empty, start with the first item. Errors, timeouts, empty responses, and unparseable results trigger the next model. Reorder them under Vision models in the plugin WebUI. Duplicate IDs are tried only once."
+    },
+    "vision_timeout_seconds": {
+      "description": "Vision request timeout (seconds)",
+      "hint": "Switch to the next model if an individual request exceeds this time. Valid range: 1–600 seconds."
     },
     "enable_embedding_search": {
       "description": "Enable embedding vector search",
@@ -866,6 +877,26 @@
         "pending_restored": "Queue restored",
         "pending_skipped": "Skipped (queue full)",
         "blacklist_restored": "Blacklist restored"
+      },
+      "vision": {
+        "title": "Vision models",
+        "hint": "Select multiple vision models. They are tried in this order when a request fails, times out, or returns an unusable result. Saving also updates AstrBot plugin configuration.",
+        "loading": "Loading models…",
+        "order": "Attempt order",
+        "automatic": "Automatic selection",
+        "auto_hint": "No explicit selection: use AstrBot’s global image-caption model, the current conversation model, then enabled models that declare image support. Recognition works without opening this page.",
+        "unavailable": "Currently unavailable; kept in configuration.",
+        "move_up": "Move up",
+        "move_down": "Move down",
+        "remove": "Remove model",
+        "available": "Available models",
+        "no_models": "No model providers are available. Add a vision-capable provider in AstrBot LLM settings.",
+        "retry": "Reload",
+        "saving": "Saving…",
+        "save": "Save order",
+        "saved": "Vision model order saved.",
+        "load_failed": "Unable to load vision models.",
+        "save_failed": "Unable to save vision models."
       }
     }
   }
