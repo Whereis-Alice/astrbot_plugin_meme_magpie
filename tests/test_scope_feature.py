@@ -358,7 +358,9 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
 
         info_log.assert_not_called()
 
-    async def test_force_capture_stays_synchronous_with_background_queue(self):
+    async def test_force_capture_admits_before_background_processing_completes(self):
+        import asyncio
+
         plugin = DummyPlugin()
         tmp_dir = tempfile.TemporaryDirectory()
         plugin.base_dir = Path(tmp_dir.name)
@@ -366,33 +368,58 @@ class ScopeFeatureTests(unittest.IsolatedAsyncioTestCase):
         await handler.start_background_workers()
 
         image_cls = self._get_shared_image_class()
-        event = DummyEvent(target="group:123", messages=[image_cls()])
+        image = image_cls()
+        event = DummyEvent(target="group:123", messages=[image])
         consumed = []
-        plugin.get_force_capture_entry = lambda _event: {"until": time.time() + 30}
+        plugin.get_force_capture_entry = lambda _event: {"until": time.time() + 60}
         plugin.consume_force_capture = lambda _event: consumed.append(True)
+        processing_started = asyncio.Event()
+        release_processing = asyncio.Event()
+        original_process = plugin._process_image
+
+        async def blocked_process(event, path, **kwargs):
+            processing_started.set()
+            await release_processing.wait()
+            return await original_process(
+                event,
+                path,
+                is_temp=kwargs.get("is_temp", True),
+                is_platform_emoji=kwargs.get("is_platform_emoji", True),
+                extra_meta=kwargs.get("extra_meta"),
+                to_pending=kwargs.get("to_pending", False),
+            )
+
+        plugin._process_image = blocked_process
 
         with tempfile.NamedTemporaryFile(delete=False) as fp:
             temp_path = fp.name
-
-        async def fake_download(_img):
-            return temp_path, False
-
-        handler._download_original_image = fake_download
+        image.file = temp_path
         try:
-            await handler.on_message(event)
+            await asyncio.wait_for(handler.on_message(event), timeout=1)
+            await asyncio.wait_for(processing_started.wait(), timeout=1)
+            self.assertEqual(plugin.process_calls, [])
+            release_processing.set()
+            for _ in range(100):
+                if plugin.process_calls:
+                    break
+                await asyncio.sleep(0.01)
         finally:
+            release_processing.set()
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             await handler.stop_background_workers()
             tmp_dir.cleanup()
 
-        self.assertEqual(consumed, [True])
+        self.assertEqual(consumed, [])
         self.assertEqual(len(plugin.process_calls), 1)
         sent_texts = []
         for chain in event.sent_messages:
             for comp in chain:
                 sent_texts.append(getattr(comp, "text", ""))
-        self.assertTrue(any("已收录" in text for text in sent_texts))
+        self.assertTrue(any(
+            any(word in text for word in ("接收", "提交", "入队", "已收录"))
+            for text in sent_texts
+        ))
 
     async def test_event_handler_merges_multi_image_results_before_save(self):
         class MultiImagePlugin(DummyPlugin):

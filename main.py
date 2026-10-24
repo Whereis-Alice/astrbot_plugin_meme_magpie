@@ -360,14 +360,16 @@ class Main(Star):
     def is_steal_enabled_for_event(self, event: AstrMessageEvent) -> bool:
         return self._is_action_enabled_for_event("steal", event)
 
-    def begin_force_capture(self, event: AstrMessageEvent, seconds: int) -> None:
+    def begin_force_capture(
+        self, event: AstrMessageEvent, seconds: int = 60, *, character: str = "", work: str = ""
+    ) -> None:
         """委托给 EventHandler。"""
         event_handler = self._get_event_handler(
             log_message="event_handler 未初始化，无法进入强制接收模式"
         )
         if event_handler is None:
             return
-        event_handler.begin_force_capture(event, seconds)
+        event_handler.begin_force_capture(event, seconds, character=character, work=work)
 
     def get_force_capture_entry(self, event: AstrMessageEvent) -> dict[str, object] | None:
         """委托给 EventHandler。"""
@@ -658,9 +660,9 @@ class Main(Star):
 
     @filter.permission_type(PermissionType.ADMIN)
     @mp.command("偷")
-    async def capture(self, event: AstrMessageEvent):
-        """进入强制接收模式，30秒内发送的图片将直接入库。"""
-        async for result in self.command_handler.capture(event):
+    async def capture(self, event: AstrMessageEvent, character: str = "", work: str = ""):
+        """60秒内接收本人全部图片。用法: mp 偷 [角色] [作品]，或 mp 偷 角色=名称 作品=名称。"""
+        async for result in self.command_handler.capture(event, character, work):
             yield result
 
     @filter.permission_type(PermissionType.ADMIN)
@@ -1411,6 +1413,7 @@ class Main(Star):
         add_method: str = "auto",
         llm_hints: LlmMemeHints | None = None,
         skip_vlm: bool = False,
+        force_capture: bool = False,
     ) -> tuple[bool, dict[str, Any] | None]:
         """统一处理图片的方法，包括过滤、分类、存储和索引更新。"""
         try:
@@ -1421,17 +1424,18 @@ class Main(Star):
                     is_temp=is_temp,
                     idx=idx,
                     categories=self.plugin_config.get_categories(),
-                    content_filtration=self.plugin_config.content_filtration,
+                    content_filtration=False if force_capture else self.plugin_config.content_filtration,
                     is_platform_emoji=is_platform_emoji,
                     extra_meta=extra_meta,
                     to_pending=to_pending,
                     add_method=add_method,
                     llm_hints=llm_hints,
                     skip_vlm=skip_vlm,
+                    force_capture=force_capture,
                 ),
                 timeout=self.IMAGE_PROCESSING_TIMEOUT_SECONDS,
             )
-            if idx is None and updated_idx is not None and not to_pending:
+            if idx is None and updated_idx is not None and not to_pending and not force_capture:
                 full_idx = await self.index_manager.load_index()
                 full_idx.update(updated_idx)
                 return success, full_idx

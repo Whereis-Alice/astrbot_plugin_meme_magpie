@@ -89,6 +89,8 @@ Request errors, empty responses and invalid results such as missing category / d
 | Max retries | `3` | 0–8 | Retry ceiling for throttling and transient errors |
 | Retry backoff base | `2.0` | 1.0–10.0 | Multiplier between retries |
 
+The forced-collection queue also uses the concurrency and RPM settings above. Its 60-second window limits intake only; accepted images continue processing afterwards. Failed analysis or the 90-second per-image budget saves the image for later reanalysis through the WebUI.
+
 ## External sticker sources
 
 | Setting | Default | Notes |

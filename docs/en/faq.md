@@ -14,6 +14,9 @@ Check the per-model errors in AstrBot's log and confirm the models accept image 
 **Batch analysis keeps returning 429.**
 Drop concurrency to 1 and RPM to 6–10. If it still throttles, your quota is genuinely tight: use the item limit to process a few dozen at a time.
 
+**Does “偷” collect only one image? Must every image finish analysis within a minute?**
+`/mp 偷 [character] [work]` accepts all images the caller posts in this chat for 60 seconds, including multiple messages and images. This is the intake window; queued images continue processing afterwards using batch-analysis concurrency and RPM settings. Explicit labels take priority over model guesses. If analysis fails or reaches its 90-second budget, the image is saved with an empty description for later reanalysis through the WebUI failure scan. Exact duplicates and blocklisted images are skipped; failed downloads still cannot be stored. See [A minute of collection](commands.md#a-minute-of-collection-with-character-and-work-labels).
+
 **My server only has 1GB (or 512MB) of RAM. Will analysing hundreds of images blow it up?**
 No, but keep concurrency low. Peak memory per image is now decoupled from image size: a 512-square 60-frame animation takes about 17MB, a 1920×480 120-frame animation about 22MB, a 4000×4000 still about 45MB. A batch peaks at roughly *per-image peak × concurrency*, so on a small box leave batch concurrency at the default 2 or drop it to 1 — hundreds of images will just take longer, not run you out of memory. Also note that “send as GIF” adds one more encode at send time, so leave it off when memory is tight.
 

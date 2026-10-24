@@ -35,7 +35,7 @@ Command group `mp`, aliases `magpie` and `神偷`. The table lists subcommands o
 |:---|:---|
 | `on` / `off` | Enable / disable collection |
 | `auto_on` / `auto_off` | Enable / disable automatic sending |
-| `偷` | 30-second force-collect mode; every image posted gets taken |
+| `偷 [character] [work]` | Collect all images the caller posts in this chat for 60 seconds; explicit labels take priority |
 | `natural_analysis <on\|off>` | Switch between the two emotion-analysis modes |
 | `clear_emotion_cache` | Clear the emotion-analysis cache |
 | `delete <index\|filename>` | Delete a sticker |
@@ -50,3 +50,20 @@ Command group `mp`, aliases `magpie` and `神偷`. The table lists subcommands o
 | `group show` | Show the collect/send list configuration |
 | `group <send\|steal> priority <wl\|bl>` | Which list wins when both match |
 | `group <send\|steal> <wl\|bl> <add\|del\|clear> [group:<id>\|user:<id>]` | Manage the lists |
+
+## A minute of collection with character and work labels
+
+```text
+/mp 偷
+/mp 偷 Isla "Plastic Memories"
+/mp 偷 character=Isla work="Plastic Memories"
+/mp 偷 作品="Plastic Memories" 角色=Isla
+```
+
+Both labels are optional. One positional name means the character; to set only the work, use `work=name` or `作品=名称`. Quote names containing spaces. Named fields may be given in either order.
+
+The window accepts every image the command caller posts in the current chat for 60 seconds, including multiple messages and multiple images per message, without a fixed item count. Each user and chat has a separate window. Running the command again refreshes that caller's window and labels; already accepted images keep the labels captured when they arrived.
+
+Accepted images are queued using the batch-analysis concurrency and RPM settings. Processing continues after the window closes and may take longer than a minute. Explicit character and work labels take priority, while vision fills the remaining metadata. Forced collection bypasses automatic non-meme filtering and perceptual-similarity deduplication; exact-content duplicates and blocklisted images are still skipped.
+
+If analysis fails or reaches the 90-second per-image budget, the downloaded image and explicit labels are stored in an available fallback category with an empty description. Find these entries through the WebUI analysis-failure scan and reanalyse later. The receipt confirms that images have been queued; a failed background download cannot be stored because no image was obtained, and its cause is recorded in the logs.

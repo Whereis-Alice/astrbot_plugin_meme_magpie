@@ -92,7 +92,7 @@ Command group `mp`, aliases `magpie` and `神偷`. Subcommands only — prepend 
 | `status` | Runtime status and library statistics |
 | `on` / `off` | Enable / disable collection |
 | `auto_on` / `auto_off` | Enable / disable automatic sending |
-| `偷` | 30-second force-collect mode; every image posted gets taken |
+| `偷 [character] [work]` | Collect all images the caller posts in this chat for 60 seconds; explicit labels take priority |
 | `list [category] [per_page] [page]` | List collected stickers |
 | `delete <index\|filename>` | Delete a sticker |
 | `blacklist <index\|filename>` | Delete and blocklist it so it is never collected again |

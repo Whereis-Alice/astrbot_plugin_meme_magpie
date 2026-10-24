@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -509,6 +510,7 @@ class ImageProcessorService:
         add_method: str = "auto",
         llm_hints: LlmMemeHints | None = None,
         skip_vlm: bool = False,
+        force_capture: bool = False,
     ) -> tuple[bool, dict[str, Any] | None]:
         """统一处理图片：存储、分类、过滤。
 
@@ -559,8 +561,9 @@ class ImageProcessorService:
                 logger.debug(f"图片正在处理中，跳过: {hash_val[:16]}")
                 return False, None
             # 检查去重
+            duplicate_kwargs = {"compare_similar": False} if force_capture else {}
             if await self._is_duplicate_or_blacklisted(
-                hash_val, idx, file_path, is_temp, phash_val
+                hash_val, idx, file_path, is_temp, phash_val, **duplicate_kwargs
             ):
                 return False, None
             # 标记为处理中
@@ -571,6 +574,8 @@ class ImageProcessorService:
             #    skip_vlm 时根本不靠视觉模型，无需查缓存也无需探测 provider。
             known_sig = PromptManager.known_facts_signature(llm_hints)
             model_sig = "" if skip_vlm else await self._resolve_vision_model_signature(event)
+            if force_capture:
+                model_sig += "#force_capture"
             if model_sig and known_sig:
                 # 已知信息会写进提示词、改变模型输出，必须与「没有已知信息」的结果分开缓存
                 model_sig = f"{model_sig}#known:{known_sig}"
@@ -615,28 +620,54 @@ class ImageProcessorService:
                     [],
                 )
             else:
-                category, tags, desc, emotion, scenes, overlay_text, emotions = (
-                    await self.classify_image(
+                analysis_failed = False
+                try:
+                    analysis = self.classify_image(
                         event=event,
                         file_path=raw_path,
                         categories=categories,
-                        content_filtration=content_filtration,
+                        content_filtration=False if force_capture else content_filtration,
                         known=llm_hints,
                     )
-                )
+                    result = (
+                        await asyncio.wait_for(analysis, timeout=90)
+                        if force_capture else await analysis
+                    )
+                    category, tags, desc, emotion, scenes, overlay_text, emotions = result
+                    if force_capture and category in {
+                        self.CATEGORY_FILTERED, self.CATEGORY_NOT_EMOJI
+                    }:
+                        raise ValueError("强制收录的图片未获得有效视觉分类")
+                except Exception as exc:
+                    if not force_capture or not os.path.isfile(raw_path):
+                        raise
+                    # Manual capture keeps the image even when every model is
+                    # unavailable. An empty description marks it for reanalysis.
+                    analysis_failed = True
+                    category = (
+                        self.plugin_config.closest_category("")
+                        if self.plugin_config else self.categories[0]
+                    )
+                    tags, desc, emotion, scenes, overlay_text, emotions = (
+                        [], "", category, [], "", []
+                    )
+                    if llm_hints is not None:
+                        llm_hints = replace(llm_hints, desc="", desc_explicit=False)
+                    logger.warning(f"强制收录保留未识别图片，稍后可补充识别 [{raw_path}]: {exc}")
 
                 # 6. 缓存结果（锁外）
-                self._put_image_cache(
-                    hash_val,
-                    category,
-                    tags,
-                    desc,
-                    emotion,
-                    scenes,
-                    model_sig,
-                    overlay_text=overlay_text,
-                    emotions=emotions,
-                )
+                if not analysis_failed:
+                    self._put_image_cache(
+                        hash_val,
+                        category,
+                        tags,
+                        desc,
+                        emotion,
+                        scenes,
+                        model_sig,
+                        overlay_text=overlay_text,
+                        emotions=emotions,
+                    )
 
             # 7. 处理分类结果（锁内）
             async with self._process_lock:
@@ -663,6 +694,12 @@ class ImageProcessorService:
                     llm_hints=llm_hints,
                 )
 
+        except asyncio.CancelledError:
+            if is_temp:
+                await safe_remove_file(file_path)
+                if raw_path is not None and raw_path != file_path:
+                    await safe_remove_file(raw_path)
+            raise
         except Exception as e:
             logger.error(f"处理图片失败 [{file_path}]: {e}")
             # 清理临时文件
@@ -686,6 +723,8 @@ class ImageProcessorService:
         file_path: str,
         is_temp: bool,
         phash_val: str = "",
+        *,
+        compare_similar: bool = True,
     ) -> bool:
         """检查图片是否已存在于索引或黑名单中。
 
@@ -709,7 +748,9 @@ class ImageProcessorService:
                 return True
 
             # 2) 感知哈希视觉相似度匹配 — 只查 pHash 映射
-            _phash = phash_val or await self._phash_service.compute_phash(file_path)
+            _phash = (
+                phash_val or await self._phash_service.compute_phash(file_path)
+            ) if compare_similar else ""
             if _phash and db_service:
                 phash_map = db_service.get_phash_map()
                 for entry_path, existing_phash in phash_map.items():
@@ -747,7 +788,7 @@ class ImageProcessorService:
                     await _cleanup_temp()
                     return True
 
-            if phash_val and db_service:
+            if compare_similar and phash_val and db_service:
                 phash_map = db_service.get_phash_map()
                 for entry_path, existing_phash in phash_map.items():
                     distance = self._phash_service.hamming_distance(phash_val, existing_phash)
@@ -808,10 +849,27 @@ class ImageProcessorService:
         ext = Path(file_path).suffix.lower() or ".jpg"
         filename = f"{int(time.time())}_{hash_val[:8]}{ext}"
         raw_path = str(raw_dir / filename)
-        if is_temp:
-            await asyncio.to_thread(shutil.move, file_path, raw_path)
-        else:
-            await asyncio.to_thread(shutil.copy2, file_path, raw_path)
+        transfer = asyncio.create_task(asyncio.to_thread(
+            shutil.move if is_temp else shutil.copy2, file_path, raw_path
+        ))
+        try:
+            await asyncio.shield(transfer)
+        except asyncio.CancelledError:
+            # Cancellation cannot stop the file-operation thread. Wait until
+            # it releases its handles before removing the known destination;
+            # the caller has not received raw_path yet and cannot clean it.
+            async def finish_and_cleanup():
+                await asyncio.gather(transfer, return_exceptions=True)
+                await safe_remove_file(raw_path)
+
+            cleanup = asyncio.create_task(finish_and_cleanup())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
         return raw_path
 
     async def _handle_classification_result(

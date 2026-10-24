@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,6 +17,8 @@ from typing import Any
 from astrbot.api import logger
 
 from ..util.safe_io import safe_remove_file
+from ..processing.analysis_throttle import build_analysis_throttle
+from ..processing.llm_meme_hints import LlmMemeHints
 from .image_download_service import ImageDownloadService
 
 
@@ -25,6 +30,8 @@ class StealJob:
     extra_meta: dict[str, Any] = field(default_factory=dict)
     to_pending: bool = True
     source: str = "automatic"
+    character: str = ""
+    work: str = ""
 
 
 class BackgroundStealQueue:
@@ -51,10 +58,26 @@ class BackgroundStealQueue:
         self._staging_lock = asyncio.Lock()
         self._copy_executor: ThreadPoolExecutor | None = None
         self._accepting = False
+        # Forced captures keep lightweight references to staged files instead
+        # of dropping them when the bounded processing queue is full.
+        self._force_backlog: deque[StealJob] = deque()
+        self._force_remote: deque[dict[str, Any]] = deque()
+        self._force_ready = asyncio.Event()
+        self._force_remote_ready = asyncio.Event()
+        self._force_tasks: list[asyncio.Task[Any]] = []
+        self._force_download_inflight = 0
+        self._force_feed_inflight = 0
+        self._force_content_locks: dict[str, tuple[asyncio.Lock, int]] = {}
+        self._force_throttle = build_analysis_throttle(
+            getattr(plugin, "plugin_config", None), name="force_capture"
+        )
 
     @property
     def pending_count(self) -> int:
-        return self._queue.qsize()
+        return (
+            self._queue.qsize() + len(self._force_backlog) + len(self._force_remote)
+            + self._force_download_inflight + self._force_feed_inflight
+        )
 
     @staticmethod
     def _staging_suffix(file_path: str) -> str:
@@ -78,6 +101,13 @@ class BackgroundStealQueue:
             asyncio.create_task(self._worker_loop(), name=f"steal_worker_{i}")
             for i in range(self.worker_count)
         ]
+        self._force_tasks = [
+            asyncio.create_task(self._force_feeder(), name="force_capture_feeder"),
+            *[
+                asyncio.create_task(self._force_downloader(), name=f"force_capture_download_{i}")
+                for i in range(2)
+            ],
+        ]
         logger.info(
             f"[MemeThief] 后台偷图队列已启动: capacity={self.capacity}, "
             f"workers={self.worker_count}, capture_limit={self.capture_limit}"
@@ -93,6 +123,13 @@ class BackgroundStealQueue:
         if self._capture_tasks:
             await asyncio.gather(*self._capture_tasks, return_exceptions=True)
         self._capture_tasks.clear()
+
+        for task in self._force_tasks:
+            task.cancel()
+        if self._force_tasks:
+            await asyncio.gather(*self._force_tasks, return_exceptions=True)
+        self._force_tasks.clear()
+        self._force_remote.clear()
 
         # Stop processing workers.
         for task in self._workers:
@@ -120,12 +157,153 @@ class BackgroundStealQueue:
                 await safe_remove_file(job.file_path)
                 self._queue.task_done()
 
+            while self._force_backlog:
+                await safe_remove_file(self._force_backlog.popleft().file_path)
+
             if self.staging_dir.exists():
                 for path in self.staging_dir.iterdir():
                     if path.is_file():
                         await safe_remove_file(str(path))
 
         logger.info("[MemeThief] 后台偷图队列已停止，暂存文件已清理")
+
+    async def submit_force_capture_async(self, descriptors: list[dict[str, Any]]) -> int:
+        """Admit every forced image, snapshotting event-owned files before returning.
+
+        Remote URLs wait in a lightweight backlog serviced by two downloaders;
+        staged files wait on disk until the bounded processing queue has room.
+        Neither backlog holds an event or image component.
+        """
+        if not self._accepting:
+            return 0
+        accepted = 0
+        for item in descriptors:
+            if not self._accepting:
+                break
+            descriptor = {
+                "media_ref": str(item.get("media_ref") or ""),
+                "extra_meta": dict(item.get("extra_meta") or {}),
+                "character": str(item.get("character") or ""),
+                "work": str(item.get("work") or ""),
+            }
+            ref = descriptor["media_ref"]
+            if ref.startswith(("http://", "https://")):
+                self._force_remote.append(descriptor)
+                self._force_remote_ready.set()
+                accepted += 1
+            elif await self._stage_force_local(descriptor):
+                accepted += 1
+        return accepted
+
+    async def _stage_force_local(self, descriptor: dict[str, Any]) -> bool:
+        ref = descriptor["media_ref"]
+        if not ref or not os.path.isfile(ref):
+            logger.warning(f"强制收录暂存失败：媒体不存在 ref={ref[:120]}")
+            return False
+        staged_path = ""
+        async with self._staging_lock:
+            if not self._accepting:
+                return False
+            try:
+                suffix = self._staging_suffix(ref)
+                staged_path = str(self.staging_dir / f"{uuid.uuid4().hex}{suffix.lower()}")
+                await self._copy_file(ref, staged_path)
+                if not self._accepting:
+                    await safe_remove_file(staged_path)
+                    return False
+                self._force_backlog.append(StealJob(
+                    file_path=staged_path,
+                    extra_meta=dict(descriptor.get("extra_meta") or {}),
+                    to_pending=False,
+                    source="force_capture",
+                    character=str(descriptor.get("character") or ""),
+                    work=str(descriptor.get("work") or ""),
+                ))
+                self._force_ready.set()
+                return True
+            except asyncio.CancelledError:
+                if staged_path:
+                    await safe_remove_file(staged_path)
+                raise
+            except Exception as exc:
+                logger.error(f"强制收录暂存失败: {exc!r}", exc_info=exc)
+                if staged_path:
+                    await safe_remove_file(staged_path)
+                return False
+
+    async def _force_feeder(self) -> None:
+        while True:
+            self._force_ready.clear()
+            while self._force_backlog:
+                job = self._force_backlog.popleft()
+                self._force_feed_inflight = 1
+                try:
+                    await self._queue.put(job)
+                except asyncio.CancelledError:
+                    await safe_remove_file(job.file_path)
+                    raise
+                finally:
+                    self._force_feed_inflight = 0
+            await self._force_ready.wait()
+
+    async def _force_downloader(self) -> None:
+        while True:
+            self._force_remote_ready.clear()
+            while self._force_remote:
+                descriptor = self._force_remote.popleft()
+                source_path = ""
+                self._force_download_inflight += 1
+                try:
+                    handler = getattr(self.plugin, "event_handler", None)
+                    if handler is None:
+                        logger.warning("强制收录下载失败：事件处理服务不可用")
+                        continue
+                    source_path, _ = await handler._download_url_to_temp(descriptor["media_ref"])
+                    if not source_path:
+                        logger.warning("强制收录下载失败：媒体未下载")
+                        continue
+                    local_descriptor = dict(descriptor, media_ref=str(source_path))
+                    await self._stage_force_local(local_descriptor)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(f"强制收录下载失败: {exc!r}", exc_info=exc)
+                finally:
+                    self._force_download_inflight -= 1
+                    if source_path:
+                        await safe_remove_file(str(source_path))
+            await self._force_remote_ready.wait()
+
+    @staticmethod
+    def _content_hash(file_path: str) -> str:
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(128 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @asynccontextmanager
+    async def _force_content_reservation(self, file_path: str):
+        """Keep duplicate bytes reserved through processing AND index commit."""
+        content_hash = await asyncio.to_thread(self._content_hash, file_path)
+        lock, users = self._force_content_locks.get(content_hash, (asyncio.Lock(), 0))
+        self._force_content_locks[content_hash] = (lock, users + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            current_lock, users = self._force_content_locks[content_hash]
+            if users <= 1:
+                self._force_content_locks.pop(content_hash, None)
+            else:
+                self._force_content_locks[content_hash] = (current_lock, users - 1)
+
+    async def _save_result(self, index: dict[str, Any]) -> None:
+        async with self._save_lock:
+            current = await self.plugin.index_manager.load_index()
+            current = dict(current or {})
+            current.update(index)
+            await self.plugin.index_manager.save_index(current)
 
     def submit_capture(self, descriptors: list[dict[str, Any]]) -> bool:
         """Schedule staging/download work and return without waiting for it."""
@@ -176,9 +354,24 @@ class BackgroundStealQueue:
         if executor is None:
             executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="steal_copy")
             self._copy_executor = executor
-        await asyncio.get_running_loop().run_in_executor(
+        copy_future = asyncio.get_running_loop().run_in_executor(
             executor, shutil.copy2, source_path, target_path
         )
+        try:
+            await asyncio.shield(copy_future)
+        except asyncio.CancelledError:
+            # Cancellation cannot stop the copy thread. Wait until its file
+            # handles close before callers remove either source or staging.
+            while not copy_future.done():
+                try:
+                    await asyncio.shield(copy_future)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not copy_future.cancelled():
+                copy_future.exception()
+            raise
 
     async def _stage_local_descriptor(self, descriptor: dict[str, Any]) -> bool:
         ref = str(descriptor.get("media_ref") or "")
@@ -323,24 +516,35 @@ class BackgroundStealQueue:
                 if callable(mark_started):
                     mark_started()
 
-                success, index = await self.plugin._process_image(
-                    None,
-                    job.file_path,
-                    is_temp=True,
-                    is_platform_emoji=True,
-                    extra_meta=job.extra_meta,
-                    to_pending=job.to_pending,
-                )
+                kwargs = {
+                    "is_temp": True,
+                    "is_platform_emoji": True,
+                    "extra_meta": job.extra_meta,
+                    "to_pending": job.to_pending,
+                }
+                async with self._force_content_reservation(job.file_path):
+                    if job.source == "force_capture":
+                        kwargs.update(
+                            llm_hints=LlmMemeHints.from_tool_args(
+                                getattr(self.plugin, "plugin_config", None),
+                                character=job.character, work=job.work,
+                            ),
+                            force_capture=True,
+                            add_method="force_capture",
+                        )
+                        success, index = await self._force_throttle.run(
+                            self.plugin._process_image, None, job.file_path, **kwargs
+                        )
+                    else:
+                        success, index = await self.plugin._process_image(
+                            None, job.file_path, **kwargs
+                        )
+                    if success and isinstance(index, dict) and not job.to_pending:
+                        await self._save_result(index)
                 logger.info(
                     f"[MemeThief] 后台偷图处理完成 source={job.source}, "
                     f"success={success}, pending={job.to_pending}"
                 )
-                if success and isinstance(index, dict) and not job.to_pending:
-                    async with self._save_lock:
-                        current = await self.plugin.index_manager.load_index()
-                        current = dict(current or {})
-                        current.update(index)
-                        await self.plugin.index_manager.save_index(current)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

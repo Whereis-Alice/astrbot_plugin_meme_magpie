@@ -12,6 +12,7 @@ from astrbot.api.message_components import Image, Plain
 
 from ..util.safe_io import safe_remove_file
 from ..util.retention import count_capacity_managed, rank_eviction_candidates
+from ..processing.llm_meme_hints import LlmMemeHints
 from .background_steal_queue import BackgroundStealQueue
 from .event_context import get_event_session_key
 from .platform_detector import PlatformDetector
@@ -39,7 +40,7 @@ class EventHandler:
         self._last_process_time: float = 0.0  # 上次处理时间（用于interval和cooldown模式）
 
         # 强制捕获窗口（需要锁保护）
-        self._force_capture_windows: dict[str, dict[str, object]] = {}
+        self._force_capture_windows: dict[tuple[str, str], dict[str, object]] = {}
         self._force_capture_lock = threading.RLock()  # 可重入锁，保护并发访问
 
         # 子服务
@@ -388,13 +389,14 @@ class EventHandler:
             int: 清理的过期窗口数量
         """
         now = time.time()
-        expired_keys = [
-            key
-            for key, entry in self._force_capture_windows.items()
-            if isinstance(entry, dict) and float(entry.get("until", 0)) < now
-        ]
-        for key in expired_keys:
-            self._force_capture_windows.pop(key, None)
+        with self._force_capture_lock:
+            expired_keys = [
+                key
+                for key, entry in self._force_capture_windows.items()
+                if isinstance(entry, dict) and float(entry.get("until", 0)) <= now
+            ]
+            for key in expired_keys:
+                self._force_capture_windows.pop(key, None)
         return len(expired_keys)
 
     def _get_force_capture_sender_id(self, event) -> str | None:
@@ -412,18 +414,27 @@ class EventHandler:
         uid = getattr(sender, "user_id", None) if sender is not None else None
         return str(uid) if uid else None
 
-    def begin_force_capture(self, event, seconds: int) -> None:
+    def begin_force_capture(
+        self, event, seconds: int = 60, *, character: str = "", work: str = ""
+    ) -> None:
         """开始强制捕获窗口。
 
         Args:
             event: 消息事件对象
             seconds: 捕获窗口持续时间（秒）
         """
-        key = self._get_force_capture_key(event)
         sender_id = self._get_force_capture_sender_id(event)
+        if not sender_id:
+            raise ValueError("无法识别发指令者，不能开启收录窗口")
+        key = (self._get_force_capture_key(event), sender_id)
+        hints = LlmMemeHints.from_tool_args(character=character, work=work)
         until = time.time() + max(1, int(seconds))
         with self._force_capture_lock:
-            self._force_capture_windows[key] = {"until": until, "sender_id": sender_id}
+            self._cleanup_expired_capture_windows()
+            self._force_capture_windows[key] = {
+                "until": until, "sender_id": sender_id,
+                "character": hints.character, "work": hints.work,
+            }
 
     def get_force_capture_entry(self, event) -> dict[str, object] | None:
         """获取强制捕获条目。
@@ -435,10 +446,12 @@ class EventHandler:
             dict | None: 捕获条目，如果不存在或已过期则返回None
         """
         # 先清理所有过期的捕获窗口
-        self._cleanup_expired_capture_windows()
-
-        key = self._get_force_capture_key(event)
+        sender_id = self._get_force_capture_sender_id(event)
+        if not sender_id:
+            return None
+        key = (self._get_force_capture_key(event), sender_id)
         with self._force_capture_lock:
+            self._cleanup_expired_capture_windows()
             entry = self._force_capture_windows.get(key)
             if not entry:
                 return None
@@ -449,17 +462,17 @@ class EventHandler:
                 self._force_capture_windows.pop(key, None)
                 return None
 
-            if time.time() > until:
+            if time.time() >= until:
                 self._force_capture_windows.pop(key, None)
                 return None
 
             expected_sender_id = entry.get("sender_id")
             if expected_sender_id:
                 current_sender_id = self._get_force_capture_sender_id(event)
-                if current_sender_id and str(current_sender_id) != str(expected_sender_id):
+                if str(current_sender_id) != str(expected_sender_id):
                     return None
 
-            return entry
+            return dict(entry)
 
     def consume_force_capture(self, event) -> None:
         """消费强制捕获条目。
@@ -467,7 +480,7 @@ class EventHandler:
         Args:
             event: 消息事件对象
         """
-        key = self._get_force_capture_key(event)
+        key = (self._get_force_capture_key(event), self._get_force_capture_sender_id(event) or "")
         with self._force_capture_lock:
             self._force_capture_windows.pop(key, None)
 
@@ -535,9 +548,12 @@ class EventHandler:
         if not imgs and not store_urls:
             return
         if force_active:
-            # 强制收录是管理员主动命令，保持同步处理以保留明确的
-            # 成功/失败反馈，也保留 convert_to_file_path 兜底。
-            await self._handle_force_capture(event, plugin_instance, imgs, store_urls)
+            # Freeze admission and labels before downloads or queue waits. The
+            # minute controls receipt, not when analysis finally completes.
+            await self._handle_force_capture(
+                event, plugin_instance, imgs, store_urls,
+                force_entry=dict(force_entry), store_meta_map=store_meta_map,
+            )
             return
         # 待审核池容量护栏：池满则暂停自动偷取（不下载、不处理、不删库内文件），
         # 审核通过/删除使 pending 减少后下条消息自然恢复。
@@ -762,50 +778,65 @@ class EventHandler:
         plugin_instance,
         imgs: list,
         store_urls: list[str],
+        *,
+        force_entry: dict[str, object] | None = None,
+        store_meta_map: dict[str, dict] | None = None,
     ) -> None:
-        """处理强制捕获模式：下载并处理单张图片后直接返回。"""
+        """Snapshot every admitted image; bounded workers classify after receipt."""
+        entry = dict(force_entry or {})
+        descriptors: list[dict[str, Any]] = []
+        missing = 0
+        origin_target = ""
         try:
-            temp_path: str | None = None
-            is_gif = False
+            scope, target = plugin_instance.plugin_config.get_event_target(event)
+            if scope and target:
+                origin_target = f"{scope}:{target}"
+        except (AttributeError, TypeError, ValueError):
+            pass
 
-            if imgs:
-                img = imgs[0]
-                result = await self._download_original_image(img)
-                # _download_original_image 固定返回二元组 (temp_path, is_gif)
-                temp_path, is_gif = result
-                if not temp_path:
-                    temp_path = await img.convert_to_file_path()
-            elif store_urls:
-                result = await self._download_url_to_temp(store_urls[0])
-                # _download_url_to_temp 固定返回二元组 (temp_path, is_gif)
-                temp_path, is_gif = result
+        def descriptor(ref: str, meta: dict | None = None) -> dict[str, Any]:
+            extra_meta = dict(meta or {})
+            extra_meta["source"] = "force_capture"
+            if origin_target:
+                extra_meta["origin_target"] = origin_target
+            return {
+                "media_ref": ref, "source": "force_capture", "to_pending": False,
+                "extra_meta": extra_meta,
+                "character": str(entry.get("character") or ""),
+                "work": str(entry.get("work") or ""),
+            }
 
-            if not temp_path or not Path(temp_path).exists():
-                await event.send(MessageChain([Plain(text="❌ 收录失败：图片临时文件不存在")]))
+        for img in imgs:
+            ref = self._get_media_ref(img)
+            if not ref:
+                try:
+                    ref = str(await img.convert_to_file_path() or "")
+                except Exception as exc:
+                    logger.warning(f"强制收图无法解析媒体: {exc}")
+            if ref:
+                descriptors.append(descriptor(ref))
             else:
-                success, idx = await plugin_instance._process_image(
-                    event, temp_path, is_temp=True, is_platform_emoji=True
-                )
-                if success and isinstance(idx, dict):
-                    await plugin_instance.index_manager.save_index(idx)
-                    await event.send(MessageChain([Plain(text="✅ 已收录并自动分类入库")]))
-                else:
-                    await event.send(
-                        MessageChain(
-                            [
-                                Plain(
-                                    text="❌ 未收录（可能被判定为非表情包/审核不通过/重复或处理失败）"
-                                )
-                            ]
-                        )
-                    )
+                missing += 1
+        for url in store_urls:
+            descriptors.append(descriptor(url, (store_meta_map or {}).get(url)))
+
+        try:
+            if self._background_queue is None:
+                await self.start_background_workers()
+            queue = self._background_queue
+            if queue is None:
+                raise RuntimeError("后台收录服务不可用")
+            accepted = await queue.submit_force_capture_async(descriptors)
+            failed = len(descriptors) - accepted + missing
+            text = (
+                f"✅ 已接收 {accepted} 张图片，正在后台识别并入库；窗口内可继续发图"
+                if accepted else "❌ 未能接收图片，请检查图片是否仍可下载"
+            )
+            if failed:
+                text += f"；{failed} 张未能接收"
+            await event.send(MessageChain([Plain(text=text)]))
         except Exception as e:
             await event.send(MessageChain([Plain(text=f"❌ 收录失败：{e}")]))
-        finally:
-            try:
-                plugin_instance.consume_force_capture(event)
-            except Exception:
-                pass
 
     async def _clean_raw_directory(self) -> int:
         """清理 raw 目录中的所有临时文件。"""
@@ -838,7 +869,8 @@ class EventHandler:
         self._cleaned = True
         # 清理强制捕获窗口
         if hasattr(self, "_force_capture_windows"):
-            self._force_capture_windows.clear()
+            with self._force_capture_lock:
+                self._force_capture_windows.clear()
         # 清理插件引用
         self.plugin = None
         logger.debug("EventHandler 资源已清理")

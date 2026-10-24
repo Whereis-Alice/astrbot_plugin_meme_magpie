@@ -5,6 +5,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 
+from .force_capture_args import parse_force_capture_args
 from ..util.command_hint import (
     CHINESE_COMMAND_GROUP,
     LEGACY_COMMAND_GROUP,
@@ -195,13 +196,35 @@ class CommandHandler:
 
     # ===== CommandHandler 核心逻辑 =====
 
-    async def capture(self, event: AstrMessageEvent):
-        window_seconds = 30
+    async def capture(
+        self, event: AstrMessageEvent, character: str = "", work: str = ""
+    ):
+        """Start a minute of capture, with optional authoritative role/work labels."""
+        window_seconds = 60
+        message = getattr(event, "message_str", "") or ""
+        getter = getattr(event, "get_message_str", None)
+        if callable(getter):
+            message = getter() or message
+        try:
+            character, work = parse_force_capture_args(character, work, message=message)
+        except ValueError as exc:
+            usage = self.plugin.cmd("偷 [角色] [作品]", event)
+            yield event.plain_result(f"❌ {exc}\n用法：{usage}\n也可使用：角色=名称 作品=名称")
+            return
 
         if hasattr(self.plugin, "begin_force_capture"):
-            self.plugin.begin_force_capture(event, window_seconds)
+            self.plugin.begin_force_capture(
+                event, window_seconds, character=character, work=work
+            )
+            labels = []
+            if character:
+                labels.append(f"角色：{character}")
+            if work:
+                labels.append(f"作品：{work}")
+            label_hint = "\n指定信息优先采用：" + "；".join(labels) if labels else ""
             yield event.plain_result(
-                f"✅ 已进入强制接收窗口：{window_seconds} 秒内发送 1 张图片将自动分类并入库"
+                f"✅ 已进入强制接收窗口：{window_seconds} 秒内，你在当前会话发送的所有图片都会排队识别并入库"
+                f"{label_hint}\n窗口结束后，已接收图片会继续处理；重复或黑名单图片会跳过"
             )
             return
 
@@ -503,7 +526,7 @@ class CommandHandler:
                 [
                     (c("on") + "  |  " + c("off"), "开始 / 停止自动收集聊天里的表情包"),
                     (c("auto_on") + "  |  " + c("auto_off"), "开启 / 关闭聊天时自动配表情"),
-                    (c("偷"), "强制接收模式：之后 30 秒内发的图直接入库"),
+                    (c("偷 [角色] [作品]"), "60 秒收录窗口：接收你的所有图片，角色与作品优先采用"),
                 ],
             ),
             (
