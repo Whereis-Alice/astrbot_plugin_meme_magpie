@@ -1005,8 +1005,30 @@ class MemeSmartSelectService:
         if self._result_has_image_path(result, attach_path):
             logger.debug("[MemeThief] 消息链里已有这张表情，跳过重复附加")
             return attach_path
+        markdown_ready = False
+        get_markdown_service = getattr(self.plugin, "_get_qq_markdown_delivery_service", None)
+        if callable(get_markdown_service):
+            # Resolve uploads before appending the image. An attach timeout
+            # must not leave an image in the reply and also schedule a fallback.
+            markdown_ready = await get_markdown_service().prepare_attachment(
+                event, emoji_path, attach_path
+            )
+            # Uploads yield to configuration and scope changes. A denied
+            # Markdown preparation must not send the same image via fallback.
+            selector = getattr(self.plugin, "meme_selector", None)
+            path_allowed = getattr(selector, "is_path_allowed_for_event", None)
+            send_allowed = getattr(self.plugin, "is_send_enabled_for_event", None)
+            if (
+                callable(path_allowed) and not path_allowed(emoji_path, event)
+            ) or (
+                callable(send_allowed) and not send_allowed(event)
+            ):
+                return None
         if not await self._append_emoji_to_result(event, result, attach_path):
             return None
+        if markdown_ready:
+            result.use_markdown_ = True
+            result.use_t2i_ = False
         return attach_path
 
     async def pick_emoji_only(

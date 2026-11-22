@@ -84,7 +84,7 @@ class PlatformDetector:
         OneBot 的 dict 段列表，消息组件链与 NapCat/OneBot 差异较大。
         """
         platform_name = self.get_platform_name(event)
-        return platform_name == "qq_official"
+        return platform_name in {"qq_official", "qq_official_webhook"}
 
     @staticmethod
     def _is_qq_emoji_url(url: str) -> bool:

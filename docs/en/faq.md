@@ -14,6 +14,9 @@ Check the per-model errors in AstrBot's log and confirm the models accept image 
 **Batch analysis keeps returning 429.**
 Drop concurrency to 1 and RPM to 6–10. If it still throttles, your quota is genuinely tight: use the item limit to process a few dozen at a time.
 
+**How can QQ put text above a sticker in the same message?**
+Choose Attach to reply and enable QQ Official: text above sticker. In OutputProSplit, Inline or Follow previous keeps the sticker below the final text segment; Standalone stays separate. Native QQ media needs no additional image host. Failed uploads try configured ImgBed Ferry or file callbacks, then ordinary images. See [QQ Markdown](platforms.md#qq-official-text-above-the-sticker).
+
 **Does “偷” collect only one image? Must every image finish analysis within a minute?**
 `/mp 偷 [character] [work]` accepts all images the caller posts in this chat for 60 seconds, including multiple messages and images. This is the intake window; queued images continue processing afterwards using batch-analysis concurrency and RPM settings. Explicit labels take priority over model guesses. If analysis fails or reaches its 90-second budget, the image is saved with an empty description for later reanalysis through the WebUI failure scan. Exact duplicates and blocklisted images are skipped; failed downloads still cannot be stored. See [A minute of collection](commands.md#a-minute-of-collection-with-character-and-work-labels).
 

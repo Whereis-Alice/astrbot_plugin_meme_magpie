@@ -34,7 +34,8 @@ Everything is editable in the AstrBot plugin config page. The notable ones:
 | Per-character delay (s) | `0.3` | Extra wait scaled by reply length, simulating "read the text, then react" |
 | Smart selection | `true` | Composite scoring; off means purely random |
 | Auto sticker delivery mode | `separate` | `separate` sends its own message / `attach` rides along in the reply's message chain, see [Working with message-splitting plugins](platforms.md#working-with-message-splitting-plugins) |
-| `attach` selection timeout (s) | `10.0` | `attach` mode only; on timeout it falls back to a separate message delivered asynchronously, so the reply is never held up |
+| QQ Official: text above sticker | `true` | With Attach to reply, use native QQ Markdown with text above the sticker; compatible with OutputProSplit, see [QQ Markdown](platforms.md#qq-official-text-above-the-sticker) |
+| `attach` selection timeout (s) | `10.0` | Includes selection and QQ media preparation; on timeout it falls back to a separate message delivered asynchronously |
 | Emit compat path for splitters | `false` | `attach` mode only, see [What is that "compat path" switch for](platforms.md#what-is-that-compat-path-switch-for) |
 
 ## Emotion analysis

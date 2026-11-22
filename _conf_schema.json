@@ -237,6 +237,12 @@
     "default": 10.0,
     "hint": "attach 模式下最多等多久把表情选出来。超过这个时间就放弃附加，改回 separate 方式异步补发，回复本身不会被卡住。仅在投递方式为 attach 时生效。"
   },
+  "qqofficial_markdown_images": {
+    "description": "官QQ：文字在上、表情在下",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，在「自动表情的投递方式」选择「并入本条回复」时，官方 QQ 将正文与表情发送为同一条原生 Markdown 图文，文字在上、表情在下。优先使用 QQ 原生图片素材，上传不可用时尝试已配置的图床摆渡或 AstrBot 文件回调服务，仍失败则按普通图片发送。兼容 OutputProSplit 分段：表情策略选择「嵌入」或「跟随上段」即可跟随最后文字段；「单独」仍单独发送。仅作用于官方 QQ，其他平台沿用原方式。"
+  },
   "auto_meme_attach_compat_split": {
     "description": "为分段回复插件生成兼容路径",
     "type": "bool",

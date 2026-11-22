@@ -43,6 +43,7 @@ This plugin is a fork of [nagatoquin33/astrbot_plugin_stealer](https://github.co
 | **Semantic search** | Text embeddings + on-image text + usage scenes; falls back to BM25 when embeddings are unavailable |
 | **Emotion matching** | Extracts search terms and an emotion prior from the bot's own reply; the reply text is never modified |
 | **LLM tools** | During conversation the model can search, send and collect stickers itself, filling in work and character as it goes |
+| **QQ Markdown** | Text above the sticker in one native QQ message, compatible with OutputProSplit segmentation |
 | **Cross-plugin integration** | Structured candidates and permission-checked short-lived asset handles for forum and image-hosting plugins |
 | **WebUI dashboard** | Review queue + library: bulk actions, batch import, batch re-analysis, missing-description detector, duplicate cleanup, storage maintenance |
 | **Rate-limited batches** | Concurrency and requests-per-minute are configurable, so hundreds of images will not trigger upstream 429s |

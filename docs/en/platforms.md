@@ -17,7 +17,17 @@ What that means in practice:
 
 This assumes OneBot's `messageFormat` is `array` (the default). Set it to `string` and the raw message becomes one CQ-code string, at which point marketplace stickers cannot be read at all.
 
-Other platforms (Telegram, the official QQ bot API) are handled as ordinary images with no loss of function. The official QQ bot API has no OneBot sticker flag, so the separate "sticker collection mode (QQ_Official)" setting decides which images qualify.
+QQ Official has no OneBot sticker flag. The separate sticker collection setting applies to both QQ Official and Webhook. Telegram and other platforms retain their own image or sticker delivery.
+
+## QQ Official: text above the sticker
+
+In Meme Thief's sending settings, choose **Attach to reply** and enable **QQ Official: text above sticker** (enabled by default). Ordinary QQ media captions place the image first. This mode sends the reply as native Markdown with selectable text followed by the sticker in the same message.
+
+Images are uploaded to QQ native media first, without requiring an image host. Uploads for identical content and bot identity share a cached reference and concurrent uploads are coalesced. Original images and GIF animation are retained; the existing GIF conversion is used when Send as GIF is enabled. If native upload is unavailable, the plugin tries an installed, configured ImgBed Ferry that permits integration uploads, then AstrBot's file callback service. If all fail, the ordinary image path remains available and the reason is logged.
+
+With [OutputProSplit](https://github.com/Whereis-Alice/astrbot_plugin_outputpro_split), the sticker stays an image component until text splitting is complete, then becomes a Markdown image reference. Image syntax is never split. Set the splitter's sticker strategy to **Inline** or **Follow previous** to place it below the final text segment, including replies ending in punctuation. **Standalone** still sends it separately. The text segment soft limit preserves standalone image boundaries.
+
+The mode also works without a splitter. Already streamed text and replies rendered as a long image retain the existing separate sticker delivery. Turning off the setting restores ordinary QQ media; OneBot and Telegram are unaffected.
 
 ## Working with message-splitting plugins
 
@@ -32,8 +42,8 @@ The cost of `attach` is that selection has to finish before the reply goes out, 
 
 ### What is that "compat path" switch for
 
-The way `outputpro_split` recognises "this image is a sticker" is by looking for `plugin_stealer` in the image path — that is the original plugin's directory name, and this plugin naturally uses a different one.
+Current `outputpro_split` recognises Meme Thief's own image paths, so the compat path is generally unnecessary. Older splitters that only recognise `plugin_stealer` can still use it.
 
 Turn on "emit compat path for splitters" and the sticker about to be attached is first hard-linked (copied if the link fails, e.g. across volumes) into a compat directory whose name contains that string, and attached from there, which the splitter recognises correctly. The original file and the path recorded in the library are untouched, and the compat directory keeps only the 64 most recent files, so disk use is negligible.
 
-It is a stopgap: the cleaner fix is for upstream to add `astrbot_plugin_meme_magpie` to its own list of keywords, and then this switch can go back off.
+The compat path only helps older splitters recognise stickers; it does not control QQ's native media layout.

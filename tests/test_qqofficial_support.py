@@ -91,6 +91,18 @@ class TestQQOfficialEmojiDetection:
         img = _FakeImage()
         assert det.check_platform_emoji_metadata(img, _FakeEvent()) is False
 
+    def test_webhook_uses_the_same_official_collection_modes(self):
+        class _WebhookEvent(_FakeEvent):
+            def get_platform_name(self):
+                return "qq_official_webhook"
+
+        event = _WebhookEvent()
+        ordinary = _FakeImage(file="https://example.com/a.png")
+        assert _detector("all_images").check_platform_emoji_metadata(ordinary, event) is True
+        assert _detector("cdn_only").check_platform_emoji_metadata(ordinary, event) is False
+        sticker = _FakeImage(file="https://gxh.vip.qq.com/xxx/parcel.jpg")
+        assert _detector("cdn_only").check_platform_emoji_metadata(sticker, event) is True
+
     def test_non_qqofficial_platform_untouched(self):
         """非 QQ 官方平台不受新分支影响（走原 OneBot 逻辑）"""
 

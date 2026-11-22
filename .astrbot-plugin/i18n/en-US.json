@@ -151,6 +151,10 @@
       "description": "attach mode pick timeout (seconds)",
       "hint": "How long attach mode may spend picking a sticker. Past that it gives up attaching and sends a separate message asynchronously instead, so the reply itself is never held up. Only applies when delivery mode is attach."
     },
+    "qqofficial_markdown_images": {
+      "description": "QQ Official: text above sticker",
+      "hint": "With delivery set to Attach to reply, send text followed by the sticker in one native QQ Markdown message. Prefer QQ native media; fall back to configured ImgBed Ferry or AstrBot file callbacks, then ordinary images. Compatible with OutputProSplit: Inline or Follow previous keeps the sticker with the final text segment, while Standalone stays separate. Other platforms are unaffected."
+    },
     "auto_meme_attach_compat_split": {
       "description": "Generate a compatible path for reply-splitting plugins",
       "hint": "Only applies when delivery mode is attach. Some reply-splitting plugins (outputpro_split) decide whether an image is a sticker by looking for the keyword plugin_stealer in its file path. When enabled, the sticker is linked into a compat folder containing that keyword before it is attached, so those plugins recognise it. Leave it off if upstream already supports this plugin directly."

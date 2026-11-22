@@ -94,6 +94,7 @@ class PluginConfig(BaseModel):
     # - all_images：该平台消息中的图片附件全部按表情收录（普通图片也会被收）
     # - gif_only：仅收录 GIF 格式的图片（QQ 表情包多为 GIF，可过滤静态图/普通图）
     qqofficial_steal_mode: str = "cdn_only"
+    qqofficial_markdown_images: bool = True
 
     # === 模型配置 ===
     vision_provider_id: str = ""

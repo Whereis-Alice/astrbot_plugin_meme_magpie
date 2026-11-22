@@ -39,6 +39,7 @@ from .core.integration.meme_asset import (
     MemeMagpieIntegrationAPI,
 )
 from .core.integration.candidate_search import MemeCandidateSearchService
+from .core.integration.qq_markdown_delivery import QQMarkdownDeliveryService
 from .core.util.command_hint import (
     CHINESE_COMMAND_GROUP,
     COMMAND_GROUP,
@@ -120,6 +121,7 @@ class Main(Star):
         # 供其它 AstrBot 插件（例如论坛和图床插件）调用的受控资源接口。
         # 资源服务只持有短期句柄，不把本地绝对路径交给调用方。
         self.asset_export_service = MemeAssetExportService(self)
+        self.qq_markdown_delivery_service = QQMarkdownDeliveryService(self)
         self.candidate_search_service = MemeCandidateSearchService(self)
         self._integration_api = MemeMagpieIntegrationAPI(self)
         self.integration_api = self._integration_api
@@ -581,6 +583,14 @@ class Main(Star):
             return service
         service = MemeAssetExportService(self)
         self.__dict__["asset_export_service"] = service
+        return service
+
+    def _get_qq_markdown_delivery_service(self) -> QQMarkdownDeliveryService:
+        """Resolve the official QQ Markdown service for normal and lazy instances."""
+        service = self.__dict__.get("qq_markdown_delivery_service")
+        if not isinstance(service, QQMarkdownDeliveryService):
+            service = QQMarkdownDeliveryService(self)
+            self.__dict__["qq_markdown_delivery_service"] = service
         return service
 
     async def export_meme_asset(
@@ -1599,6 +1609,13 @@ class Main(Star):
         self._schedule_auto_emoji_task(event, task)
         return True
 
+    @filter.on_decorating_result(priority=-100)
+    async def _finalize_qq_markdown(self, event: AstrMessageEvent) -> None:
+        """Convert attached QQ images after splitters have arranged the text."""
+        result = event.get_result()
+        if result is not None:
+            self._get_qq_markdown_delivery_service().convert_result(event, result)
+
     async def initialize(self):
         """初始化插件运行时资源。
 
@@ -1698,6 +1715,12 @@ class Main(Star):
         if self._terminated:
             return
         self._terminated = True
+        markdown_service = self.__dict__.get("qq_markdown_delivery_service")
+        if isinstance(markdown_service, QQMarkdownDeliveryService):
+            try:
+                await markdown_service.aclose()
+            except Exception as exc:
+                logger.warning(f"[MemeThief] 官QQ Markdown 上传任务清理失败: {type(exc).__name__}")
         asset_service = self.__dict__.get("asset_export_service")
         if isinstance(asset_service, MemeAssetExportService):
             try:
